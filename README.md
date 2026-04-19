@@ -102,4 +102,4 @@ and research lessons that inform the architecture.
 
 ## License
 
-TBD
+Apache License 2.0. See [LICENSE](LICENSE) for details.
