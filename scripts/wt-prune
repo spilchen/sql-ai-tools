@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# scripts/wt-prune — remove worktrees whose PR has merged.
+#
+# Walks every worktree rooted under .claude/worktrees/, queries gh for a
+# merged PR on the worktree's branch, and removes the worktree + branch
+# if one is found. Dirty worktrees are skipped unless --force is passed.
+#
+# Usage:
+#   scripts/wt-prune              # remove merged + clean worktrees
+#   scripts/wt-prune --dry-run    # report what would happen, change nothing
+#   scripts/wt-prune --force      # also remove dirty merged worktrees
+#
+# A `gh` failure (auth, rate limit, network) is treated as fatal: we never
+# want to silently SKIP a branch that actually has a merged PR just
+# because the API was momentarily unhappy.
+set -euo pipefail
+
+usage() {
+	cat <<'EOF' >&2
+Usage: scripts/wt-prune [--dry-run] [--force]
+
+  --dry-run   Report what would be removed; change nothing.
+  --force     Also remove dirty merged worktrees (uses git worktree remove
+              --force --force, which discards uncommitted work).
+  -h, --help  Show this help.
+EOF
+}
+
+dry_run=false
+force=false
+for arg in "$@"; do
+	case "$arg" in
+		--dry-run) dry_run=true ;;
+		--force)   force=true ;;
+		-h|--help) usage; exit 0 ;;
+		*) echo "wt-prune: unknown arg $arg" >&2; usage; exit 1 ;;
+	esac
+done
+
+if [ "$dry_run" = true ] && [ "$force" = true ]; then
+	echo "wt-prune: --dry-run and --force are mutually exclusive" >&2
+	exit 1
+fi
+
+command -v gh >/dev/null || { echo "wt-prune: gh CLI is required" >&2; exit 1; }
+command -v jq >/dev/null || { echo "wt-prune: jq is required" >&2; exit 1; }
+
+repo_root=$(git rev-parse --show-toplevel)
+prefix="$repo_root/.claude/worktrees/"
+
+# Parse `git worktree list --porcelain` into (path \t branch) lines for
+# worktrees rooted under our prefix. The porcelain format also emits a
+# `bare` line for bare repos; we skip those by ignoring records that have
+# no checkout (no `branch` and no `detached` line).
+mapfile -t entries < <(
+	git worktree list --porcelain | awk -v pfx="$prefix" '
+		function emit(   ) {
+			if (path != "" && index(path, pfx) == 1 && !is_bare)
+				print path "\t" branch
+			path = ""; branch = ""; is_bare = 0
+		}
+		/^worktree / { emit(); path = substr($0, 10) }
+		/^branch /   { branch = substr($0, 8); sub("^refs/heads/", "", branch) }
+		/^bare$/     { is_bare = 1 }
+		END          { emit() }
+	'
+)
+
+if [ ${#entries[@]} -eq 0 ]; then
+	echo "wt-prune: no worktrees under $prefix"
+	exit 0
+fi
+
+removed=0
+warnings=0
+for entry in "${entries[@]}"; do
+	path="${entry%%	*}"
+	branch="${entry#*	}"
+
+	if [ -z "$branch" ]; then
+		printf 'SKIP %s (detached, no branch to query)\n' "$path"
+		continue
+	fi
+
+	# `gh pr list --jq '.[0].number // empty'` exits 0 with empty stdout
+	# when no PR matches and 0 with the number when one does. Letting
+	# `set -e` abort on non-zero exit keeps real gh failures (auth,
+	# network) from being misread as "no merged PR".
+	merged_pr=$(gh pr list --head "$branch" --state merged \
+		--json number --jq '.[0].number // empty')
+
+	if [ -z "$merged_pr" ]; then
+		printf 'SKIP %s (no merged PR for %s)\n' "$path" "$branch"
+		continue
+	fi
+
+	# Worktree's checkout state. If the directory is already gone (manual
+	# rm), git status fails — treat that as "clean enough to prune".
+	if [ -d "$path" ]; then
+		dirty=$(git -C "$path" status --porcelain)
+	else
+		dirty=""
+	fi
+
+	if [ -n "$dirty" ] && [ "$force" = false ]; then
+		printf 'SKIP %s (PR #%s merged but worktree is dirty; use --force)\n' \
+			"$path" "$merged_pr"
+		continue
+	fi
+
+	if [ "$dry_run" = true ]; then
+		printf 'DRY-RUN MERGED #%s: would remove %s and branch %s\n' \
+			"$merged_pr" "$path" "$branch"
+		continue
+	fi
+
+	printf 'MERGED #%s: removing %s and branch %s\n' "$merged_pr" "$path" "$branch"
+
+	# `git worktree remove` needs --force to drop a worktree with local
+	# (committed) changes; a *second* --force is required when the tree
+	# is dirty. Don't pass --force on a clean tree — that would defeat
+	# the safety net the script's --force flag is supposed to gate.
+	rm_flags=()
+	if [ -n "$dirty" ]; then
+		rm_flags=(--force --force)
+	fi
+	if ! git -C "$repo_root" worktree remove "${rm_flags[@]}" "$path"; then
+		printf 'WARN: git worktree remove failed for %s\n' "$path" >&2
+		warnings=$((warnings + 1))
+		continue
+	fi
+	if ! git -C "$repo_root" branch -D "$branch" >/dev/null; then
+		printf 'WARN: git branch -D %s failed (worktree was removed)\n' "$branch" >&2
+		warnings=$((warnings + 1))
+	fi
+	removed=$((removed + 1))
+done
+
+if [ "$dry_run" = false ] && [ "$removed" -gt 0 ]; then
+	git -C "$repo_root" worktree prune || \
+		printf 'WARN: git worktree prune failed\n' >&2
+fi
+
+printf 'wt-prune: removed %d worktree(s)' "$removed"
+[ "$warnings" -gt 0 ] && printf ', %d warning(s)' "$warnings"
+printf '\n'

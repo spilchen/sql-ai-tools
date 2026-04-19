@@ -1,0 +1,3 @@
+# Gitignored files Claude Code copies into new worktrees (gitignore syntax).
+# Currently none — add patterns here when local secrets or per-checkout
+# config (e.g. .env, .claude/settings.local.json) start to exist.
