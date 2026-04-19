@@ -3,11 +3,13 @@
 #
 # Output columns: PATH  BRANCH  PR  STATE
 #   PR is the PR number if one exists for the branch, "-" otherwise.
-#   STATE is OPEN / MERGED / CLOSED / NONE / DIRTY / MISSING / GH-ERR.
-#   DIRTY (uncommitted changes) and MISSING (worktree dir gone) override
-#   the PR state because they're the more actionable signal. GH-ERR means
-#   the gh query failed for that branch — the listing keeps going so a
-#   transient outage doesn't black out the whole table.
+#   STATE is OPEN / MERGED / CLOSED / NONE / DIRTY / MISSING / GH-ERR /
+#   STAT-ERR. DIRTY (uncommitted changes) and MISSING (worktree dir gone)
+#   override the PR state because they're the more actionable signal.
+#   GH-ERR means the gh query failed for that branch; STAT-ERR means
+#   `git status` itself failed (corrupt worktree). The listing keeps
+#   going for both so a transient/local issue on one entry doesn't black
+#   out the whole table.
 set -euo pipefail
 
 command -v gh >/dev/null || { echo "wt-ls: gh CLI is required" >&2; exit 1; }
@@ -55,7 +57,18 @@ fi
 			continue
 		fi
 
-		dirty=$(git -C "$path" status --porcelain)
+		# Inline `dirty=$(git ...)` would let a non-zero exit kill the loop
+		# under `set -e`. Capture status separately so a corrupt worktree
+		# becomes a STAT-ERR row instead of aborting the listing. Capture
+		# stderr (`2>&1`) too — the row alone gives no diagnostic, so we
+		# echo the underlying git error to stderr when STAT-ERR fires.
+		stat_ok=true
+		stat_err=""
+		if ! dirty=$(git -C "$path" status --porcelain 2>&1); then
+			stat_ok=false
+			stat_err="$dirty"
+			dirty=""
+		fi
 
 		# `gh pr list` failure here means we can't tell PR state for this
 		# branch; flag it as GH-ERR rather than masking it as NONE.
@@ -73,7 +86,13 @@ fi
 			pr_state="GH-ERR"
 		fi
 
-		[ -n "$dirty" ] && pr_state="DIRTY"
+		# Local-state overrides; STAT-ERR wins because we can't trust dirty.
+		if [ "$stat_ok" = false ]; then
+			pr_state="STAT-ERR"
+			printf 'wt-ls: %s git status: %s\n' "$rel" "$stat_err" >&2
+		elif [ -n "$dirty" ]; then
+			pr_state="DIRTY"
+		fi
 
 		printf '%s\t%s\t%s\t%s\n' "$rel" "$branch" "$pr_num" "$pr_state"
 	done

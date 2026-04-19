@@ -2,8 +2,16 @@
 # WorktreeRemove hook for Claude Code's `--worktree` feature.
 #
 # Best-effort cleanup. Claude Code ignores this hook's exit code, so we
-# never block removal — we only surface warnings the user might miss in a
-# busy session and prune stale `.git/worktrees/` refs.
+# never block removal — we only surface warnings the user might miss in
+# a busy session and prune stale `.git/worktrees/` refs.
+#
+# Hook contract (observed v2.1.114):
+#   stdin JSON: { "session_id", "transcript_path", "cwd",
+#                 "hook_event_name": "WorktreeRemove", "name": "<slug>" }
+#   Earlier Anthropic-documented payloads used ".source_path" /
+#   ".worktree_path" / ".branch"; we still read those if the v2.1.114
+#   fields are missing, so the hook keeps working across version drift.
+#   exit code is ignored by Claude Code; we only emit warnings to stderr.
 #
 # We intentionally do NOT use `set -e`: each check below is independent,
 # and a single failure shouldn't suppress the others. Failures are
@@ -12,19 +20,21 @@ set -uo pipefail
 
 payload=$(cat)
 
-# `jq -er` returns non-zero on null/missing. If we can't even parse the
-# payload there's no point continuing — print a clear error so the
-# user sees it in `claude --debug` output and exit 0 (don't pretend to
-# block removal; Claude Code ignores our exit code anyway).
-if ! worktree_path=$(printf '%s' "$payload" | jq -er '.worktree_path'); then
-	echo "wt-remove: payload missing .worktree_path" >&2
+# Field extraction. Primary keys (`.cwd`, `.name`) come from the v2.1.114
+# payload; the `// .source_path`, `// empty` fallbacks pick up the older
+# documented shape so we never silently no-op when the contract drifts.
+source_path=$(printf '%s' "$payload" | jq -r '.cwd // .source_path // empty')
+slug=$(printf '%s' "$payload" | jq -r '.name // empty')
+worktree_path=$(printf '%s' "$payload" | jq -r '.worktree_path // empty')
+
+if [ -z "$worktree_path" ] && [ -n "$source_path" ] && [ -n "$slug" ]; then
+	worktree_path="$source_path/.claude/worktrees/$slug"
+fi
+if [ -z "$source_path" ] || [ -z "$worktree_path" ]; then
+	echo "wt-remove: payload missing required fields; skipping" >&2
 	exit 0
 fi
-if ! source_path=$(printf '%s' "$payload" | jq -er '.source_path'); then
-	echo "wt-remove: payload missing .source_path" >&2
-	exit 0
-fi
-# .branch may legitimately be absent (detached worktrees).
+# `branch` is optional — newer payloads may omit it for a detached worktree.
 branch=$(printf '%s' "$payload" | jq -r '.branch // ""')
 
 if [ -d "$worktree_path" ]; then
@@ -44,7 +54,15 @@ if [ -d "$worktree_path" ]; then
 	fi
 fi
 
-# Let stderr through — a failure here usually means a corrupt
-# `.git/worktrees/<name>` entry that needs human attention; silencing it
-# is exactly the bug we don't want.
+# Only stdout is silenced; stderr is intentionally passed through because
+# a failure here usually means a corrupt `.git/worktrees/<name>` entry
+# that needs human attention. Without `set -e`, an unchecked non-zero
+# exit would be silently dropped, so capture it explicitly. (We can't
+# use `if ! cmd; then printf "$?"`: the `!` operator turns the pipeline
+# into its negated value, and that becomes the new `$?` — so the warning
+# would always print "exit 0".)
 git -C "$source_path" worktree prune >/dev/null
+prune_exit=$?
+if [ "$prune_exit" -ne 0 ]; then
+	printf 'wt-remove: git worktree prune failed (exit %d) in %s\n' "$prune_exit" "$source_path" >&2
+fi

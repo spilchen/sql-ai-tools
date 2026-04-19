@@ -93,7 +93,9 @@ Helpers in `scripts/`:
   origin pointed at the last time you fetched. Run `git fetch` first
   if you need the freshest base.
 - `scripts/wt-ls` — list worktrees with PR state (OPEN/MERGED/CLOSED/
-  NONE/DIRTY).
+  NONE/DIRTY/MISSING/GH-ERR/STAT-ERR). MISSING means the worktree
+  directory is gone; GH-ERR means the `gh` lookup failed; STAT-ERR
+  means `git status` failed (likely a corrupt worktree).
 - `scripts/wt-prune` — query `gh` for each worktree's branch; remove
   worktree + branch if its PR has merged. Skips dirty worktrees unless
   `--force`. Use `--dry-run` first if unsure.

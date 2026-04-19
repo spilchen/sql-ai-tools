@@ -9,9 +9,9 @@
 #   <gh-username>/gh-<N>/<YYMMDD>/<HHMM[a|p]>/<slug>
 # e.g. spilchen/gh-42/260419/0245p/validate-sql
 #
-# The branch is created by .claude/hooks/wt-create.sh after this script
-# execs `claude --worktree <slug>`. The worktree lives at
-# .claude/worktrees/<slug>/ (Claude Code's native default).
+# The branch and worktree directory (.claude/worktrees/<slug>/) are
+# created by .claude/hooks/wt-create.sh after this script execs
+# `claude --worktree <slug>`.
 set -euo pipefail
 
 usage() {
@@ -59,26 +59,52 @@ slug=$(printf '%s' "$slug" \
 command -v gh >/dev/null || { echo "wt-new: gh CLI is required" >&2; exit 1; }
 
 # Cache the gh username so we're not hitting the API every time.
-# Note: switching `gh auth` accounts will leave a stale cache; delete
-# `$cache_dir/gh-user` (printed below on cache miss) to refresh.
+# Note: switching `gh auth` accounts will leave a stale cache; delete the
+# cache file (its full path is printed by the empty-cache error path
+# below) to refresh.
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sql-ai-tools"
 mkdir -p "$cache_dir"
 user_cache="$cache_dir/gh-user"
 if [ -s "$user_cache" ]; then
-	# `read -r` strips the trailing newline if a human edits the file.
-	read -r user < "$user_cache"
+	# `read -r` exits 1 when it hits EOF without a newline (even after
+	# successfully reading the value), which would silently kill us under
+	# `set -e`. Tolerate that with `|| true`; the regex validation below
+	# catches both empty results and partial-read garbage from a real
+	# I/O error (permissions flipped, FS error, etc.).
+	read -r user < "$user_cache" || true
 else
 	user=$(gh api user --jq .login)
 	if [ -z "$user" ]; then
 		echo "wt-new: gh api user returned an empty login (auth issue?)" >&2
 		exit 1
 	fi
-	printf '%s' "$user" > "$user_cache"
+	# Trailing newline so `read -r` returns 0 next time (the `|| true`
+	# above already handles the no-newline case, but a clean exit is
+	# easier to reason about during ad-hoc inspection of the cache file).
+	printf '%s\n' "$user" > "$user_cache"
+fi
+# GitHub login: alphanumeric + hyphens, 1-39 chars, can't start with hyphen.
+# Anything else means an empty cache OR a partial/corrupt read; in either
+# case the safe move is to refuse rather than embed garbage in branch names.
+if [[ ! "${user:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]]; then
+	printf 'wt-new: gh-user cache at %s holds an invalid login (%q); delete it and retry\n' \
+		"$user_cache" "${user:-}" >&2
+	exit 1
 fi
 
-# Verify the issue exists (and isn't a PR).
-if ! gh issue view "$issue" --json number >/dev/null 2>&1; then
-	echo "wt-new: issue #$issue not found in this repo" >&2
+# Verify the issue exists (and isn't a PR). Capture stderr so we can
+# distinguish a real "not found" from auth/network/rate-limit failures,
+# which would otherwise all read as "no such issue" and send the user
+# down the wrong debugging path. Initialize gh_exit explicitly so a stale
+# value from the surrounding env can't confuse the `-ne 0` check.
+gh_exit=0
+gh_err=$(gh issue view "$issue" --json number 2>&1 >/dev/null) || gh_exit=$?
+if [ "$gh_exit" -ne 0 ]; then
+	if printf '%s' "$gh_err" | grep -qiE 'could not resolve|no issue found'; then
+		echo "wt-new: issue #$issue not found in this repo" >&2
+	else
+		printf 'wt-new: gh issue view failed (exit %d): %s\n' "$gh_exit" "$gh_err" >&2
+	fi
 	exit 1
 fi
 
@@ -92,7 +118,11 @@ if git show-ref --verify --quiet "refs/heads/$branch"; then
 	echo "wt-new: local branch ref $branch already exists" >&2
 	exit 1
 fi
-worktree_path=".claude/worktrees/$slug"
+# Anchor to the repo root so this check matches the absolute path the
+# WorktreeCreate hook computes — running wt-new from a sub-directory
+# would otherwise skip the collision check entirely.
+repo_root=$(git rev-parse --show-toplevel)
+worktree_path="$repo_root/.claude/worktrees/$slug"
 if [ -e "$worktree_path" ]; then
 	echo "wt-new: worktree directory $worktree_path already exists" >&2
 	exit 1

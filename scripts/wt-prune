@@ -10,9 +10,12 @@
 #   scripts/wt-prune --dry-run    # report what would happen, change nothing
 #   scripts/wt-prune --force      # also remove dirty merged worktrees
 #
-# A `gh` failure (auth, rate limit, network) is treated as fatal: we never
-# want to silently SKIP a branch that actually has a merged PR just
-# because the API was momentarily unhappy.
+# A `gh` failure (auth, rate limit, network) on one branch becomes a
+# loud per-entry SKIP with a warning rather than aborting the whole run.
+# Aborting would leave the user with a partially-pruned state and no
+# summary; per-entry SKIPs surface the failure but keep the rest of the
+# walk going. The final `removed / warnings` line tells the user how many
+# entries to retry on the next pass.
 set -euo pipefail
 
 usage() {
@@ -83,11 +86,19 @@ for entry in "${entries[@]}"; do
 	fi
 
 	# `gh pr list --jq '.[0].number // empty'` exits 0 with empty stdout
-	# when no PR matches and 0 with the number when one does. Letting
-	# `set -e` abort on non-zero exit keeps real gh failures (auth,
-	# network) from being misread as "no merged PR".
+	# when no PR matches and 0 with the number when one does. A non-zero
+	# exit means a real gh failure (auth, network, rate limit); capture
+	# stderr so the SKIP message names the cause instead of just "no
+	# merged PR" — which would be the wrong diagnosis.
+	gh_exit=0
 	merged_pr=$(gh pr list --head "$branch" --state merged \
-		--json number --jq '.[0].number // empty')
+		--json number --jq '.[0].number // empty' 2>&1) || gh_exit=$?
+	if [ "$gh_exit" -ne 0 ]; then
+		printf 'SKIP %s (gh pr list failed for %s: %s)\n' \
+			"$path" "$branch" "$merged_pr" >&2
+		warnings=$((warnings + 1))
+		continue
+	fi
 
 	if [ -z "$merged_pr" ]; then
 		printf 'SKIP %s (no merged PR for %s)\n' "$path" "$branch"
@@ -96,8 +107,14 @@ for entry in "${entries[@]}"; do
 
 	# Worktree's checkout state. If the directory is already gone (manual
 	# rm), git status fails — treat that as "clean enough to prune".
+	# Capture the exit code so a corrupt-but-present worktree becomes a
+	# warned SKIP instead of aborting the whole prune under `set -e`.
 	if [ -d "$path" ]; then
-		dirty=$(git -C "$path" status --porcelain)
+		if ! dirty=$(git -C "$path" status --porcelain 2>&1); then
+			printf 'SKIP %s (git status failed: %s)\n' "$path" "$dirty" >&2
+			warnings=$((warnings + 1))
+			continue
+		fi
 	else
 		dirty=""
 	fi
@@ -116,10 +133,12 @@ for entry in "${entries[@]}"; do
 
 	printf 'MERGED #%s: removing %s and branch %s\n' "$merged_pr" "$path" "$branch"
 
-	# `git worktree remove` needs --force to drop a worktree with local
-	# (committed) changes; a *second* --force is required when the tree
-	# is dirty. Don't pass --force on a clean tree — that would defeat
-	# the safety net the script's --force flag is supposed to gate.
+	# Single `--force` overrides git's refusal on locally-modified-but-
+	# committed state; a second `--force` is required to discard dirty
+	# working-tree changes. Pass neither on a clean tree — git's own
+	# checks already accept clean removals, and adding `--force` there
+	# would just suppress diagnostics we'd want to see if anything were
+	# actually wrong.
 	rm_flags=()
 	if [ -n "$dirty" ]; then
 		rm_flags=(--force --force)
