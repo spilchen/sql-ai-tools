@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# scripts/wt-new — create a worktree + Claude Code session for an issue.
+#
+# Usage:
+#   scripts/wt-new --issue <N> --slug <slug>
+#   scripts/wt-new -i 42 -s validate-sql
+#
+# Builds a branch named:
+#   <gh-username>/gh-<N>/<YYMMDD>/<HHMM[a|p]>/<slug>
+# e.g. spilchen/gh-42/260419/0245p/validate-sql
+#
+# The branch is created by .claude/hooks/wt-create.sh after this script
+# execs `claude --worktree <slug>`. The worktree lives at
+# .claude/worktrees/<slug>/ (Claude Code's native default).
+set -euo pipefail
+
+usage() {
+	cat <<'EOF' >&2
+Usage: scripts/wt-new --issue <N> --slug <slug>
+
+Options:
+  -i, --issue N       GitHub issue number this worktree addresses (required)
+  -s, --slug TEXT     Short slug for branch + directory name (required)
+  -h, --help          Show this help
+EOF
+	exit "${1:-1}"
+}
+
+issue=""
+slug=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-i|--issue|-s|--slug)
+			[ $# -ge 2 ] || { printf 'wt-new: missing value for %s\n' "$1" >&2; usage 1; }
+			case "$1" in
+				-i|--issue) issue="$2" ;;
+				-s|--slug)  slug="$2"  ;;
+			esac
+			shift 2
+			;;
+		-h|--help)  usage 0 ;;
+		*) printf 'wt-new: unexpected arg %q\n' "$1" >&2; usage 1 ;;
+	esac
+done
+
+[ -n "$issue" ] || { echo "wt-new: --issue is required" >&2; usage 1; }
+[ -n "$slug" ]  || { echo "wt-new: --slug is required"  >&2; usage 1; }
+
+case "$issue" in
+	''|*[!0-9]*) echo "wt-new: --issue must be a positive integer (got $issue)" >&2; exit 1 ;;
+esac
+
+# Slugify: lowercase, non-alnum -> '-', collapse repeats, trim ends.
+slug=$(printf '%s' "$slug" \
+	| tr '[:upper:]' '[:lower:]' \
+	| sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+[ -n "$slug" ] || { echo "wt-new: slug becomes empty after sanitization" >&2; exit 1; }
+
+command -v gh >/dev/null || { echo "wt-new: gh CLI is required" >&2; exit 1; }
+
+# Cache the gh username so we're not hitting the API every time.
+# Note: switching `gh auth` accounts will leave a stale cache; delete
+# `$cache_dir/gh-user` (printed below on cache miss) to refresh.
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/sql-ai-tools"
+mkdir -p "$cache_dir"
+user_cache="$cache_dir/gh-user"
+if [ -s "$user_cache" ]; then
+	# `read -r` strips the trailing newline if a human edits the file.
+	read -r user < "$user_cache"
+else
+	user=$(gh api user --jq .login)
+	if [ -z "$user" ]; then
+		echo "wt-new: gh api user returned an empty login (auth issue?)" >&2
+		exit 1
+	fi
+	printf '%s' "$user" > "$user_cache"
+fi
+
+# Verify the issue exists (and isn't a PR).
+if ! gh issue view "$issue" --json number >/dev/null 2>&1; then
+	echo "wt-new: issue #$issue not found in this repo" >&2
+	exit 1
+fi
+
+# Timestamp: YYMMDD/HHMM[a|p], 12-hour clock, lowercased meridiem, no M.
+# `LC_ALL=C` keeps the AM/PM literal stable across locales so the
+# AM/PM → a/p substitution always matches.
+ts=$(LC_ALL=C date +'%y%m%d/%I%M%p' | sed 's/AM$/a/; s/PM$/p/')
+branch="$user/gh-$issue/$ts/$slug"
+
+if git show-ref --verify --quiet "refs/heads/$branch"; then
+	echo "wt-new: local branch ref $branch already exists" >&2
+	exit 1
+fi
+worktree_path=".claude/worktrees/$slug"
+if [ -e "$worktree_path" ]; then
+	echo "wt-new: worktree directory $worktree_path already exists" >&2
+	exit 1
+fi
+
+command -v claude >/dev/null || { echo "wt-new: claude CLI is required" >&2; exit 1; }
+
+printf 'wt-new: creating worktree %s on branch %s\n' "$worktree_path" "$branch" >&2
+export SQLAI_WT_BRANCH="$branch"
+export SQLAI_WT_ISSUE="$issue"
+exec claude --worktree "$slug"
