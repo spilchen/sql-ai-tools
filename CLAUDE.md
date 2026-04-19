@@ -15,6 +15,17 @@ When reviewing, other than technical correctness, you should also focus on the
 above aspects. Do not over-emphasize on grammar and comment typos, prefix with
 "nit:" in reviews.
 
+### TODO Comments
+
+Every TODO in source code **must** reference an open GitHub issue in this
+repo using the form `TODO(#123)` (e.g. `// TODO(#42): handle NULL casts`).
+No other form is allowed — not `TODO`, not `TODO(name)`, not `FIXME`, not
+`XXX`.
+
+If no open issue covers the work, create one first using the
+`issue-create` skill, then use that issue's number in the TODO. Don't
+leave a TODO without a tracking issue.
+
 ### Resources
 
 - **Design Documents**: `/docs/`
