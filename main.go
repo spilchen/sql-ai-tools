@@ -1,3 +1,5 @@
+// Command sql-ai-tools is the CLI / MCP server entry point for the
+// agent-friendly CockroachDB SQL tooling described in the project README.
 package main
 
 import (

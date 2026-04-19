@@ -1,6 +1,8 @@
 module github.com/spilchen/sql-ai-tools
 
-go 1.24
+go 1.26
+
+toolchain go1.26.2
 
 require github.com/cockroachdb/cockroachdb-parser v0.26.2
 

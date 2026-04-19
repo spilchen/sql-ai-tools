@@ -79,21 +79,35 @@ and function validation against the builtins registry.
 
 ### Prerequisites
 
-- Go 1.23+
+- Go 1.26+ (Go's `toolchain` directive will auto-download the matching
+  toolchain on first build if your local install is older but compatible)
 
 ### Build
 
 ```bash
-go build -o sql-ai-tools .
+make build
 ```
+
+Produces `bin/sql-ai-tools`.
 
 ### Run
 
 ```bash
 # Parse and pretty-print a SQL statement
-./sql-ai-tools
+./bin/sql-ai-tools
 # Output: SELECT 1
 ```
+
+### Test & Lint
+
+```bash
+make test    # go test ./...
+make lint    # gofmt check + go vet + golangci-lint (CI gate)
+make fmt     # auto-format sources
+```
+
+`make lint` is the CI gate. `go fmt` violations do not block `make build`,
+so configure your editor to run `gofmt`/`goimports` on save.
 
 ## Project Status
 
