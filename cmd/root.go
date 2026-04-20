@@ -71,6 +71,7 @@ round-tripping through a live cluster.`,
 	root.PersistentFlags().StringP(outputFlag, "o", string(output.FormatText),
 		`output format: "text" or "json"`)
 	root.AddCommand(newVersionCmd(state))
+	root.AddCommand(newParseCmd(state))
 	root.AddCommand(newMCPCmd())
 	return root
 }

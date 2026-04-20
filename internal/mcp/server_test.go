@@ -67,17 +67,94 @@ func TestPingHandler(t *testing.T) {
 	}
 }
 
-// TestNewServerRegistersPing locks in that NewServer wires the ping
-// tool under its documented name. A future refactor that forgets to
-// call AddTool — or renames the tool — would silently break MCP
-// clients; this test surfaces it without speaking the protocol.
-func TestNewServerRegistersPing(t *testing.T) {
+// TestNewServerRegistersTools locks in that NewServer wires all tools
+// under their documented names. A future refactor that forgets to call
+// AddTool — or renames a tool — would silently break MCP clients; this
+// test surfaces it without speaking the protocol.
+func TestNewServerRegistersTools(t *testing.T) {
 	s := NewServer("v1.2.3", "v0.26.2")
 	require.NotNil(t, s)
 	tools := s.ListTools()
-	require.Contains(t, tools, PingToolName)
-	require.NotNil(t, tools[PingToolName].Handler,
-		"ping must be registered with a non-nil handler")
-	require.NotEmpty(t, tools[PingToolName].Tool.Description,
-		"ping description is part of the user-facing contract")
+
+	for _, name := range []string{PingToolName, ParseSQLToolName} {
+		require.Contains(t, tools, name)
+		require.NotNil(t, tools[name].Handler,
+			"%s must be registered with a non-nil handler", name)
+		require.NotEmpty(t, tools[name].Tool.Description,
+			"%s description is part of the user-facing contract", name)
+	}
+}
+
+// TestParseSQLHandler exercises the parse_sql tool handler directly,
+// bypassing the MCP transport.
+func TestParseSQLHandler(t *testing.T) {
+	tests := []struct {
+		name              string
+		args              map[string]any
+		expectedErr       bool
+		expectedStmtCount int
+		expectedType      string
+		expectedTag       string
+	}{
+		{
+			name:              "single DML",
+			args:              map[string]any{"sql": "SELECT 1"},
+			expectedStmtCount: 1,
+			expectedType:      "DML",
+			expectedTag:       "SELECT",
+		},
+		{
+			name:              "multi-statement",
+			args:              map[string]any{"sql": "SELECT 1; BEGIN"},
+			expectedStmtCount: 2,
+		},
+		{
+			name:        "parse error",
+			args:        map[string]any{"sql": "SELECTT 1"},
+			expectedErr: true,
+		},
+		{
+			name:        "empty sql",
+			args:        map[string]any{"sql": ""},
+			expectedErr: true,
+		},
+		{
+			name:        "missing sql param",
+			args:        map[string]any{},
+			expectedErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := parseSQLHandler("v0.26.2")
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = tc.args
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, res)
+
+			if tc.expectedErr {
+				require.True(t, res.IsError, "expected tool-level error")
+				return
+			}
+
+			require.False(t, res.IsError)
+			require.Len(t, res.Content, 1)
+
+			text, ok := res.Content[0].(mcpgo.TextContent)
+			require.True(t, ok)
+
+			var result parseSQLResult
+			require.NoError(t, json.Unmarshal([]byte(text.Text), &result))
+			require.Equal(t, "v0.26.2", result.ParserVersion)
+			require.Len(t, result.Statements, tc.expectedStmtCount)
+
+			if tc.expectedType != "" {
+				require.Equal(t, tc.expectedType, string(result.Statements[0].StatementType))
+				require.Equal(t, tc.expectedTag, result.Statements[0].Tag)
+			}
+		})
+	}
 }
