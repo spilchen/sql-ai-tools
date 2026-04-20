@@ -1,26 +1,23 @@
 name: Release
 
 on:
-  pull_request:
-    branches: [main]
   push:
+    branches: [main]
     tags: ['v*']
 
-# Cancel superseded snapshot runs on the same ref. Cancellation is scoped
-# to pull_request events so tag pushes (including a force-pushed tag, which
-# would re-use the same ref) cannot cancel an in-flight release mid-upload
-# and leave behind a half-populated draft.
+# Cancel superseded snapshot runs on the same ref. Tag pushes cannot cancel
+# an in-flight release mid-upload and leave behind a half-populated draft.
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
 
 jobs:
   snapshot:
-    name: snapshot build (PR)
-    if: github.event_name == 'pull_request'
+    name: snapshot build
+    if: github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
