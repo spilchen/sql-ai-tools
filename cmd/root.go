@@ -16,12 +16,31 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
+
+	"github.com/spilchen/sql-ai-tools/internal/output"
 )
+
+// rootState is the per-invocation container for cobra-resolved global
+// state that subcommands need to read. It is populated by the root
+// command's PersistentPreRunE (which runs after flag parsing, before
+// any subcommand RunE) and read by subcommand RunE closures via the
+// pointer captured at construction time.
+//
+// Lifecycle: one instance per newRootCmd call, discarded when Execute
+// returns. This is what keeps tests independent — package globals would
+// leak the previous test's --output value into the next.
+type rootState struct {
+	// outputFormat is the validated --output value. Subcommands read it
+	// after PersistentPreRunE has run; reading it earlier yields the
+	// zero value.
+	outputFormat output.Format
+}
 
 // newRootCmd builds a fresh root command with all subcommands attached.
 // Construct one per Execute call (and per test) so cobra's parsed-flag
 // state never leaks across invocations.
 func newRootCmd() *cobra.Command {
+	state := &rootState{}
 	root := &cobra.Command{
 		Use:   "crdb-sql",
 		Short: "Agent-friendly SQL tooling for CockroachDB",
@@ -36,11 +55,30 @@ round-tripping through a live cluster.`,
 		// these without updating that caller.
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			raw, err := cmd.Flags().GetString(outputFlag)
+			if err != nil {
+				return err
+			}
+			f, err := output.ParseFormat(raw)
+			if err != nil {
+				return err
+			}
+			state.outputFormat = f
+			return nil
+		},
 	}
-	root.AddCommand(newVersionCmd())
+	root.PersistentFlags().StringP(outputFlag, "o", string(output.FormatText),
+		`output format: "text" or "json"`)
+	root.AddCommand(newVersionCmd(state))
 	root.AddCommand(newMCPCmd())
 	return root
 }
+
+// outputFlag is the name of the persistent --output flag. It is shared
+// between the root command's flag registration and PersistentPreRunE
+// lookup so the two stay in sync.
+const outputFlag = "output"
 
 // Execute runs the root command against process arguments and returns
 // whatever cobra surfaces. It does not print the error or call

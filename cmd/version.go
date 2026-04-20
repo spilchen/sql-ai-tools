@@ -6,10 +6,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"runtime/debug"
-	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -22,6 +23,8 @@ import (
 	// "unknown" — see TestParserVersionFrom for the synthetic-BuildInfo
 	// coverage that exercises the real resolution branches.
 	_ "github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+
+	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
 // parserModulePath is the import path we look up in build info to
@@ -44,7 +47,7 @@ const devVersion = "dev"
 // Release tooling owns this value; do not mutate it from runtime code.
 var Version = devVersion
 
-func newVersionCmd() *cobra.Command {
+func newVersionCmd(state *rootState) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print binary and parser versions",
@@ -54,25 +57,32 @@ embedded Go build info, so it reflects whatever go.mod (including any
 replace directive) selected at build time.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			r := output.Renderer{Format: state.outputFormat, Out: cmd.OutOrStdout()}
+			// baseEnv is the partial context used on both the
+			// success path and the JSON-mode error path. The error
+			// path needs ConnectionStatus populated so agents see a
+			// well-formed envelope even when ParserVersion / Data
+			// resolution fails.
+			baseEnv := output.Envelope{
+				ConnectionStatus: output.ConnectionDisconnected,
+			}
 			parser, err := parserVersion(Version)
 			if err != nil {
-				return err
+				return r.RenderError(baseEnv, err)
 			}
-			// Suppress EPIPE: it's the normal outcome when a downstream
-			// consumer closes stdout early (e.g. piping into `head -n1`
-			// of a future longer-output subcommand). Surfacing it as a
-			// non-zero exit with a stderr "broken pipe" message is
-			// hostile for a tool meant to be piped. Partial output is
-			// acceptable for `version` (the user has already seen at
-			// least one useful line by the time the pipe closes). The
-			// EPIPE check is Linux/macOS only; Windows is not a
-			// supported target so we don't guard for ERROR_BROKEN_PIPE.
-			out := cmd.OutOrStdout()
-			_, werr := fmt.Fprintf(out, "crdb-sql: %s\ncockroachdb-parser: %s\n", Version, parser)
-			if werr != nil && !errors.Is(werr, syscall.EPIPE) {
+			data, err := json.Marshal(struct {
+				BinaryVersion string `json:"binary_version"`
+			}{BinaryVersion: Version})
+			if err != nil {
+				return r.RenderError(baseEnv, err)
+			}
+			env := baseEnv
+			env.ParserVersion = parser
+			env.Data = data
+			return r.Render(env, func(w io.Writer) error {
+				_, werr := fmt.Fprintf(w, "crdb-sql: %s\ncockroachdb-parser: %s\n", Version, parser)
 				return werr
-			}
-			return nil
+			})
 		},
 	}
 }

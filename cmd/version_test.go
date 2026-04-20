@@ -7,11 +7,14 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"runtime/debug"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
 // TestVersionCmd exercises the `version` subcommand end-to-end through
@@ -42,6 +45,55 @@ func TestVersionCmd(t *testing.T) {
 	parserLine := extractLine(got, "cockroachdb-parser: ")
 	require.NotEmpty(t, parserLine,
 		"version output missing cockroachdb-parser line; got:\n%s", got)
+}
+
+// TestVersionCmdJSON exercises --output json end-to-end. The
+// parser_version is checked for shape (see TestVersionCmd's note on
+// why it resolves to "unknown" under go test); binary_version inside
+// data is pinned to "dev" since release stamping happens via -ldflags.
+func TestVersionCmdJSON(t *testing.T) {
+	root := newRootCmd()
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"version", "--output", "json"})
+
+	require.NoError(t, root.Execute())
+
+	// JSON mode contract: stdout is the single source of truth.
+	// Anything on stderr would force agents to merge two streams.
+	require.Empty(t, stderr.String(), "JSON mode must not write to stderr")
+	require.NotContains(t, stdout.String(), "crdb-sql: ",
+		"JSON mode must not also emit text-mode lines")
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.NotEmpty(t, env.ParserVersion, "parser_version must be populated")
+	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
+	require.Equal(t, output.TierUnset, env.Tier, "version has no tier")
+	require.Empty(t, env.Errors)
+
+	var data struct {
+		BinaryVersion string `json:"binary_version"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &data))
+	require.Equal(t, "dev", data.BinaryVersion)
+}
+
+// TestRootRejectsBadOutput locks in the PersistentPreRunE validation:
+// any --output value other than text/json must fail with a message
+// naming the valid choices.
+func TestRootRejectsBadOutput(t *testing.T) {
+	root := newRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs([]string{"version", "--output", "xml"})
+
+	err := root.Execute()
+	require.Error(t, err)
+	require.ErrorContains(t, err, `"text"`)
+	require.ErrorContains(t, err, `"json"`)
 }
 
 // TestVersionCmdRejectsExtraArgs locks in the cobra.NoArgs contract on
