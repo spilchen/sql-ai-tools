@@ -7,8 +7,9 @@
 // SQL parsing utilities consumed by both the CLI and MCP layers.
 // The primary entry point is Classify, which parses a SQL string
 // and returns a per-statement classification (DDL/DML/DCL/TCL),
-// the statement tag (e.g. "SELECT", "ALTER TABLE"), and the
-// original SQL text.
+// the statement tag (e.g. "SELECT", "ALTER TABLE"), the original
+// SQL text, and a normalized form with literal constants replaced
+// by placeholders.
 package sqlparse
 
 import (
@@ -38,6 +39,13 @@ type ClassifiedStatement struct {
 	StatementType StatementType `json:"statement_type"`
 	Tag           string        `json:"tag"`
 	SQL           string        `json:"sql"`
+	// Normalized is the SQL text with literal constants replaced by
+	// placeholders, produced by tree.FormatStatementHideConstants.
+	// Numeric constants become _ and string literals become '_'
+	// (e.g. "SELECT * FROM t WHERE id = _"). Structurally identical
+	// queries that differ only in constant values share the same
+	// normalized form.
+	Normalized string `json:"normalized"`
 }
 
 // Classify parses sql using the CockroachDB parser and returns one
@@ -59,6 +67,7 @@ func Classify(sql string) ([]ClassifiedStatement, error) {
 			StatementType: mapStatementType(stmt.AST.StatementType()),
 			Tag:           stmt.AST.StatementTag(),
 			SQL:           stmt.SQL,
+			Normalized:    tree.FormatStatementHideConstants(stmt.AST),
 		}
 	}
 	return result, nil

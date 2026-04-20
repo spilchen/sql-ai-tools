@@ -13,47 +13,53 @@ import (
 
 func TestClassify(t *testing.T) {
 	tests := []struct {
-		name         string
-		input        string
-		expectedLen  int
-		expectedType StatementType
-		expectedTag  string
-		expectedErr  string
+		name               string
+		input              string
+		expectedLen        int
+		expectedType       StatementType
+		expectedTag        string
+		expectedNormalized string
+		expectedErr        string
 	}{
 		{
-			name:         "SELECT is DML",
-			input:        "SELECT 1",
-			expectedLen:  1,
-			expectedType: StatementTypeDML,
-			expectedTag:  "SELECT",
+			name:               "SELECT is DML",
+			input:              "SELECT 1",
+			expectedLen:        1,
+			expectedType:       StatementTypeDML,
+			expectedTag:        "SELECT",
+			expectedNormalized: "SELECT _",
 		},
 		{
-			name:         "INSERT is DML",
-			input:        "INSERT INTO t VALUES (1)",
-			expectedLen:  1,
-			expectedType: StatementTypeDML,
-			expectedTag:  "INSERT",
+			name:               "INSERT is DML",
+			input:              "INSERT INTO t VALUES (1)",
+			expectedLen:        1,
+			expectedType:       StatementTypeDML,
+			expectedTag:        "INSERT",
+			expectedNormalized: "INSERT INTO t VALUES (_)",
 		},
 		{
-			name:         "UPDATE is DML",
-			input:        "UPDATE t SET a = 1",
-			expectedLen:  1,
-			expectedType: StatementTypeDML,
-			expectedTag:  "UPDATE",
+			name:               "UPDATE is DML",
+			input:              "UPDATE t SET a = 1",
+			expectedLen:        1,
+			expectedType:       StatementTypeDML,
+			expectedTag:        "UPDATE",
+			expectedNormalized: "UPDATE t SET a = _",
 		},
 		{
-			name:         "DELETE is DML",
-			input:        "DELETE FROM t",
-			expectedLen:  1,
-			expectedType: StatementTypeDML,
-			expectedTag:  "DELETE",
+			name:               "DELETE is DML",
+			input:              "DELETE FROM t",
+			expectedLen:        1,
+			expectedType:       StatementTypeDML,
+			expectedTag:        "DELETE",
+			expectedNormalized: "DELETE FROM t",
 		},
 		{
-			name:         "CREATE TABLE is DDL",
-			input:        "CREATE TABLE t (a INT)",
-			expectedLen:  1,
-			expectedType: StatementTypeDDL,
-			expectedTag:  "CREATE TABLE",
+			name:               "CREATE TABLE is DDL",
+			input:              "CREATE TABLE t (a INT)",
+			expectedLen:        1,
+			expectedType:       StatementTypeDDL,
+			expectedTag:        "CREATE TABLE",
+			expectedNormalized: "CREATE TABLE t (a INT8)",
 		},
 		{
 			name:         "ALTER TABLE is DDL",
@@ -77,18 +83,20 @@ func TestClassify(t *testing.T) {
 			expectedTag:  "GRANT",
 		},
 		{
-			name:         "BEGIN is TCL",
-			input:        "BEGIN",
-			expectedLen:  1,
-			expectedType: StatementTypeTCL,
-			expectedTag:  "BEGIN",
+			name:               "BEGIN is TCL",
+			input:              "BEGIN",
+			expectedLen:        1,
+			expectedType:       StatementTypeTCL,
+			expectedTag:        "BEGIN",
+			expectedNormalized: "BEGIN TRANSACTION",
 		},
 		{
-			name:         "COMMIT is TCL",
-			input:        "COMMIT",
-			expectedLen:  1,
-			expectedType: StatementTypeTCL,
-			expectedTag:  "COMMIT",
+			name:               "COMMIT is TCL",
+			input:              "COMMIT",
+			expectedLen:        1,
+			expectedType:       StatementTypeTCL,
+			expectedTag:        "COMMIT",
+			expectedNormalized: "COMMIT TRANSACTION",
 		},
 		{
 			name:        "multi-statement input",
@@ -104,6 +112,22 @@ func TestClassify(t *testing.T) {
 			name:        "parse error",
 			input:       "SELECTT 1",
 			expectedErr: "syntax error",
+		},
+		{
+			name:               "normalized hides string literal",
+			input:              "SELECT * FROM t WHERE name = 'alice'",
+			expectedLen:        1,
+			expectedType:       StatementTypeDML,
+			expectedTag:        "SELECT",
+			expectedNormalized: "SELECT * FROM t WHERE name = '_'",
+		},
+		{
+			name:               "normalized hides multiple constants",
+			input:              "SELECT * FROM t WHERE id = 1 AND status = 'active'",
+			expectedLen:        1,
+			expectedType:       StatementTypeDML,
+			expectedTag:        "SELECT",
+			expectedNormalized: "SELECT * FROM t WHERE (id = _) AND (status = '_')",
 		},
 	}
 
@@ -121,6 +145,9 @@ func TestClassify(t *testing.T) {
 				require.Equal(t, tc.expectedType, stmts[0].StatementType)
 				require.Equal(t, tc.expectedTag, stmts[0].Tag)
 				require.NotEmpty(t, stmts[0].SQL)
+			}
+			if tc.expectedNormalized != "" {
+				require.Equal(t, tc.expectedNormalized, stmts[0].Normalized)
 			}
 		})
 	}
