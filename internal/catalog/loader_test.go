@@ -23,12 +23,12 @@ func writeSQL(t *testing.T, sql string) string {
 
 func TestLoadFiles(t *testing.T) {
 	tests := []struct {
-		name      string
-		sql       string
-		tableName string
-		wantTable Table
-		wantErr   string
-		wantNames []string
+		name          string
+		sql           string
+		tableName     string
+		expectedTable Table
+		expectedErr   string
+		expectedNames []string
 	}{
 		{
 			name: "basic columns",
@@ -38,7 +38,7 @@ func TestLoadFiles(t *testing.T) {
 				active BOOL
 			)`,
 			tableName: "users",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "users",
 				Columns: []Column{
 					{Name: "id", Type: "INT8", Nullable: true},
@@ -56,7 +56,7 @@ func TestLoadFiles(t *testing.T) {
 				label TEXT
 			)`,
 			tableName: "items",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "items",
 				Columns: []Column{
 					{Name: "id", Type: "INT8", Nullable: false},
@@ -75,7 +75,7 @@ func TestLoadFiles(t *testing.T) {
 				PRIMARY KEY (region, id)
 			)`,
 			tableName: "kv",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "kv",
 				Columns: []Column{
 					{Name: "region", Type: "STRING", Nullable: false},
@@ -93,7 +93,7 @@ func TestLoadFiles(t *testing.T) {
 				email TEXT UNIQUE
 			)`,
 			tableName: "accounts",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "accounts",
 				Columns: []Column{
 					{Name: "id", Type: "INT8", Nullable: false},
@@ -112,7 +112,7 @@ func TestLoadFiles(t *testing.T) {
 				email TEXT CONSTRAINT uq_email UNIQUE
 			)`,
 			tableName: "users",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "users",
 				Columns: []Column{
 					{Name: "id", Type: "INT8", Nullable: false},
@@ -132,7 +132,7 @@ func TestLoadFiles(t *testing.T) {
 				UNIQUE (store_id, order_num)
 			)`,
 			tableName: "orders",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "orders",
 				Columns: []Column{
 					{Name: "store_id", Type: "INT8", Nullable: true},
@@ -152,7 +152,7 @@ func TestLoadFiles(t *testing.T) {
 				INDEX idx_ts (ts)
 			)`,
 			tableName: "events",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "events",
 				Columns: []Column{
 					{Name: "id", Type: "INT8", Nullable: false},
@@ -172,7 +172,7 @@ func TestLoadFiles(t *testing.T) {
 				created_at TIMESTAMPTZ DEFAULT now()
 			)`,
 			tableName: "records",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "records",
 				Columns: []Column{
 					{Name: "id", Type: "INT8", Nullable: false},
@@ -190,7 +190,7 @@ func TestLoadFiles(t *testing.T) {
 				b INT8 NOT NULL
 			)`,
 			tableName: "t",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "t",
 				Columns: []Column{
 					{Name: "a", Type: "INT8", Nullable: true},
@@ -209,7 +209,7 @@ func TestLoadFiles(t *testing.T) {
 				INSERT INTO t VALUES (1);
 			`,
 			tableName: "t",
-			wantTable: Table{
+			expectedTable: Table{
 				Name: "t",
 				Columns: []Column{
 					{Name: "id", Type: "INT8", Nullable: false},
@@ -224,9 +224,9 @@ func TestLoadFiles(t *testing.T) {
 				CREATE TABLE a (id INT8 PRIMARY KEY);
 				CREATE TABLE b (id INT8 PRIMARY KEY);
 			`,
-			tableName: "b",
-			wantNames: []string{"a", "b"},
-			wantTable: Table{
+			tableName:     "b",
+			expectedNames: []string{"a", "b"},
+			expectedTable: Table{
 				Name: "b",
 				Columns: []Column{
 					{Name: "id", Type: "INT8", Nullable: false},
@@ -236,14 +236,14 @@ func TestLoadFiles(t *testing.T) {
 			},
 		},
 		{
-			name:    "empty file",
-			sql:     "",
-			wantErr: "",
+			name:        "empty file",
+			sql:         "",
+			expectedErr: "",
 		},
 		{
-			name:    "parse error",
-			sql:     "CREAT TABLE bad (id INT8);",
-			wantErr: "parse schema file",
+			name:        "parse error",
+			sql:         "CREAT TABLE bad (id INT8);",
+			expectedErr: "parse schema file",
 		},
 	}
 
@@ -252,14 +252,14 @@ func TestLoadFiles(t *testing.T) {
 			path := writeSQL(t, tc.sql)
 			cat, err := LoadFiles([]string{path})
 
-			if tc.wantErr != "" {
-				require.ErrorContains(t, err, tc.wantErr)
+			if tc.expectedErr != "" {
+				require.ErrorContains(t, err, tc.expectedErr)
 				return
 			}
 			require.NoError(t, err)
 
-			if tc.wantNames != nil {
-				require.Equal(t, tc.wantNames, cat.TableNames())
+			if tc.expectedNames != nil {
+				require.Equal(t, tc.expectedNames, cat.TableNames())
 			}
 
 			if tc.tableName == "" {
@@ -269,7 +269,7 @@ func TestLoadFiles(t *testing.T) {
 
 			tbl, ok := cat.Table(tc.tableName)
 			require.True(t, ok, "table %q not found in catalog", tc.tableName)
-			require.Equal(t, tc.wantTable, tbl)
+			require.Equal(t, tc.expectedTable, tbl)
 		})
 	}
 }
@@ -306,7 +306,7 @@ func TestLoadFilesDuplicateTableLastWins(t *testing.T) {
 
 func TestLoadFilesFileNotFound(t *testing.T) {
 	_, err := LoadFiles([]string{"/nonexistent/schema.sql"})
-	require.ErrorContains(t, err, "read schema file")
+	require.ErrorContains(t, err, "stat schema file")
 }
 
 func TestLoadFilesCaseInsensitiveLookup(t *testing.T) {
