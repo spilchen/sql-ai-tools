@@ -3,27 +3,25 @@
 // Use of this software is governed by the CockroachDB Software License
 // included in the /LICENSE file.
 
-// Command sql-ai-tools is the CLI / MCP server entry point for the
-// agent-friendly CockroachDB SQL tooling described in the project README.
+// Command crdb-sql is the CLI entry point for the agent-friendly
+// CockroachDB SQL tooling described in the project README. It is a thin
+// shell over the cobra command tree in package cmd; all behavior lives
+// there.
 package main
 
 import (
 	"fmt"
-	"log"
+	"os"
 
-	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
-	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
+	"github.com/spilchen/sql-ai-tools/cmd"
 )
 
 func main() {
-	stmt, err := parser.ParseOne("SELECT 1")
-	if err != nil {
-		log.Fatal(err)
+	if err := cmd.Execute(); err != nil {
+		// cmd.Execute() suppresses cobra's own error printing
+		// (SilenceErrors on rootCmd) so that this is the single
+		// place errors reach the user.
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
 	}
-	cfg := tree.DefaultPrettyCfg()
-	pretty, err := cfg.Pretty(stmt.AST)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(pretty)
 }

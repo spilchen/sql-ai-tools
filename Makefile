@@ -1,4 +1,4 @@
-BINARY                  := sql-ai-tools
+BINARY                  := crdb-sql
 BIN_DIR                 := bin
 BIN                     := $(BIN_DIR)/$(BINARY)
 GO_PKGS                 := ./...

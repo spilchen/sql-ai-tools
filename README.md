@@ -88,14 +88,18 @@ and function validation against the builtins registry.
 make build
 ```
 
-Produces `bin/sql-ai-tools`.
+Produces `bin/crdb-sql`.
 
 ### Run
 
 ```bash
-# Parse and pretty-print a SQL statement
-./bin/sql-ai-tools
-# Output: SELECT 1
+# Show available subcommands
+./bin/crdb-sql --help
+
+# Print binary and parser versions
+./bin/crdb-sql version
+# crdb-sql: dev
+# cockroachdb-parser: v0.26.2
 ```
 
 ### Test & Lint
