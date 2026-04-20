@@ -38,6 +38,7 @@ round-tripping through a live cluster.`,
 		SilenceErrors: true,
 	}
 	root.AddCommand(newVersionCmd())
+	root.AddCommand(newMCPCmd())
 	return root
 }
 
