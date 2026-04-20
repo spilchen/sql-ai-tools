@@ -22,7 +22,8 @@ import (
 // the -e flag, a positional file argument, or stdin, parses it with the
 // CockroachDB parser, and emits a per-statement classification
 // containing the statement type (DDL/DML/DCL/TCL), the statement tag
-// (e.g. "SELECT", "ALTER TABLE"), and the original SQL text.
+// (e.g. "SELECT", "ALTER TABLE"), the original SQL text, and a
+// normalized form with literal constants replaced by placeholders.
 //
 // This is a Tier 1 (zero-config) command: it works offline with no
 // schema files or cluster connection.
@@ -35,7 +36,8 @@ func newParseCmd(state *rootState) *cobra.Command {
 		Long: `Parse SQL and classify each statement. Input is read from the -e flag
 (inline SQL), a positional file argument, or stdin. For each statement
 the output includes the statement type (DDL, DML, DCL, or TCL), the
-statement tag (e.g. SELECT, ALTER TABLE), and the original SQL text.`,
+statement tag (e.g. SELECT, ALTER TABLE), the original SQL text, and a
+normalized form with literal constants replaced by placeholders.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r := output.Renderer{Format: state.outputFormat, Out: cmd.OutOrStdout()}
@@ -70,7 +72,7 @@ statement tag (e.g. SELECT, ALTER TABLE), and the original SQL text.`,
 
 			return r.Render(baseEnv, func(w io.Writer) error {
 				for _, s := range stmts {
-					if _, werr := fmt.Fprintf(w, "%s\t%s\t%s\n", s.StatementType, s.Tag, s.SQL); werr != nil {
+					if _, werr := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.StatementType, s.Tag, s.SQL, s.Normalized); werr != nil {
 						return werr
 					}
 				}

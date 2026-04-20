@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
 	"github.com/spilchen/sql-ai-tools/internal/testcorpus"
 	"github.com/stretchr/testify/require"
@@ -41,6 +42,17 @@ func TestFidelity(t *testing.T) {
 		}
 		if len(stmts) == 0 {
 			t.Fatal("parsed to zero statements; corpus files must contain at least one statement")
+		}
+
+		for i, stmt := range stmts {
+			normalized := tree.FormatStatementHideConstants(stmt.AST)
+			if normalized == "" {
+				t.Errorf("stmt[%d]: FormatStatementHideConstants returned empty string", i)
+				continue
+			}
+			if _, err := parser.Parse(normalized); err != nil {
+				t.Errorf("stmt[%d]: normalized form does not re-parse: %v\nnormalized: %s", i, err, normalized)
+			}
 		}
 	})
 }

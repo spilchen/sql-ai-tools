@@ -21,7 +21,7 @@ import (
 
 // TestParseCmdText exercises the parse subcommand's text output path
 // end-to-end. The input is piped via stdin; the output is tab-separated
-// TYPE\tTAG\tSQL per line.
+// TYPE\tTAG\tSQL\tNORMALIZED per line.
 func TestParseCmdText(t *testing.T) {
 	root := newRootCmd()
 	var stdout bytes.Buffer
@@ -33,7 +33,7 @@ func TestParseCmdText(t *testing.T) {
 	require.NoError(t, root.Execute())
 
 	got := stdout.String()
-	require.Contains(t, got, "DML\tSELECT\tSELECT 1")
+	require.Contains(t, got, "DML\tSELECT\tSELECT 1\tSELECT _")
 }
 
 // TestParseCmdJSON exercises --output json end-to-end, verifying the
@@ -65,6 +65,9 @@ func TestParseCmdJSON(t *testing.T) {
 
 	require.Equal(t, sqlparse.StatementTypeDDL, stmts[1].StatementType)
 	require.Equal(t, "CREATE TABLE", stmts[1].Tag)
+
+	require.NotEmpty(t, stmts[0].Normalized)
+	require.NotEmpty(t, stmts[1].Normalized)
 }
 
 // TestParseCmdExprFlag verifies the -e flag path.
