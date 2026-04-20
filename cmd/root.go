@@ -73,6 +73,7 @@ round-tripping through a live cluster.`,
 	root.AddCommand(newVersionCmd(state))
 	root.AddCommand(newParseCmd(state))
 	root.AddCommand(newFormatCmd(state))
+	root.AddCommand(newValidateCmd(state))
 	root.AddCommand(newMCPCmd())
 	return root
 }
