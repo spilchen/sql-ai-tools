@@ -14,6 +14,7 @@ package cmd
 
 import (
 	"context"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -34,6 +35,12 @@ type rootState struct {
 	// after PersistentPreRunE has run; reading it earlier yields the
 	// zero value.
 	outputFormat output.Format
+
+	// dsn is the resolved CockroachDB connection string. Empty when
+	// neither --dsn nor CRDB_DSN was provided; commands that require
+	// a connection check for empty and return a structured error.
+	// Populated by PersistentPreRunE.
+	dsn string
 }
 
 // newRootCmd builds a fresh root command with all subcommands attached.
@@ -65,12 +72,25 @@ round-tripping through a live cluster.`,
 				return err
 			}
 			state.outputFormat = f
+
+			dsn, err := cmd.Flags().GetString(dsnFlag)
+			if err != nil {
+				return err
+			}
+			if dsn != "" {
+				state.dsn = dsn
+			} else {
+				state.dsn = os.Getenv("CRDB_DSN")
+			}
 			return nil
 		},
 	}
 	root.PersistentFlags().StringP(outputFlag, "o", string(output.FormatText),
 		`output format: "text" or "json"`)
+	root.PersistentFlags().String(dsnFlag, "",
+		"CockroachDB connection string (overrides CRDB_DSN env var)")
 	root.AddCommand(newVersionCmd(state))
+	root.AddCommand(newPingCmd(state))
 	root.AddCommand(newParseCmd(state))
 	root.AddCommand(newFormatCmd(state))
 	root.AddCommand(newValidateCmd(state))
@@ -82,7 +102,10 @@ round-tripping through a live cluster.`,
 // outputFlag is the name of the persistent --output flag. It is shared
 // between the root command's flag registration and PersistentPreRunE
 // lookup so the two stay in sync.
-const outputFlag = "output"
+const (
+	outputFlag = "output"
+	dsnFlag    = "dsn"
+)
 
 // Execute runs the root command against process arguments and returns
 // whatever cobra surfaces. It does not print the error or call
