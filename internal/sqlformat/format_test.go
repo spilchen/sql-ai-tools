@@ -34,8 +34,9 @@ func TestFormat(t *testing.T) {
 			expectedOutput: "SELECT 1;\nSELECT 2",
 		},
 		{
-			name:  "complex DDL wraps lines",
-			input: "CREATE TABLE t (a INT PRIMARY KEY, b TEXT NOT NULL, c FLOAT)",
+			name:           "complex DDL wraps lines",
+			input:          "CREATE TABLE t (a INT PRIMARY KEY, b TEXT NOT NULL, c FLOAT)",
+			expectedOutput: "CREATE TABLE t (\n\ta INT8 PRIMARY KEY, b STRING NOT NULL, c FLOAT8\n)",
 		},
 		{
 			name:           "empty input",
@@ -57,16 +58,7 @@ func TestFormat(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-
-			if tc.expectedOutput != "" {
-				require.Equal(t, tc.expectedOutput, got)
-			}
-
-			// For the complex DDL case, verify multi-line output.
-			if tc.name == "complex DDL wraps lines" {
-				require.Contains(t, got, "CREATE TABLE")
-				require.Contains(t, got, "\n")
-			}
+			require.Equal(t, tc.expectedOutput, got)
 		})
 	}
 }

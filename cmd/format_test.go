@@ -90,6 +90,42 @@ func TestFormatCmdFileArg(t *testing.T) {
 	require.Contains(t, stdout.String(), "SELECT 1")
 }
 
+// TestFormatCmdMultiStatement verifies that multi-statement input is
+// formatted with semicolon-newline separators in both text and JSON.
+func TestFormatCmdMultiStatement(t *testing.T) {
+	t.Run("text", func(t *testing.T) {
+		root := newRootCmd()
+		var stdout bytes.Buffer
+		root.SetOut(&stdout)
+		root.SetErr(&bytes.Buffer{})
+		root.SetIn(strings.NewReader("select 1; select 2"))
+		root.SetArgs([]string{"format"})
+
+		require.NoError(t, root.Execute())
+		require.Equal(t, "SELECT 1;\nSELECT 2\n", stdout.String())
+	})
+
+	t.Run("json", func(t *testing.T) {
+		root := newRootCmd()
+		var stdout bytes.Buffer
+		root.SetOut(&stdout)
+		root.SetErr(&bytes.Buffer{})
+		root.SetIn(strings.NewReader("select 1; select 2"))
+		root.SetArgs([]string{"format", "--output", "json"})
+
+		require.NoError(t, root.Execute())
+
+		var env output.Envelope
+		require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+
+		var payload struct {
+			FormattedSQL string `json:"formatted_sql"`
+		}
+		require.NoError(t, json.Unmarshal(env.Data, &payload))
+		require.Equal(t, "SELECT 1;\nSELECT 2", payload.FormattedSQL)
+	})
+}
+
 // TestFormatCmdParseErrorText verifies that invalid SQL in text mode
 // surfaces as a non-nil error from Execute.
 func TestFormatCmdParseErrorText(t *testing.T) {
