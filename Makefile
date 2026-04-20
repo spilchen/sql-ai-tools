@@ -10,7 +10,7 @@ GOLANGCI_LINT           := $(BIN_DIR)/golangci-lint
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test fmt fmt-check vet lint clean tools wt-new wt-ls wt-prune
+.PHONY: help build test fmt fmt-check vet lint clean tools
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*?##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -52,12 +52,3 @@ lint: fmt-check vet $(GOLANGCI_LINT) ## Run gofmt check, go vet, and pinned gola
 
 clean: ## Remove build artifacts and installed tools.
 	rm -rf $(BIN_DIR)
-
-wt-new: ## Create a worktree (use: make wt-new ISSUE=42 SLUG=foo).
-	@scripts/wt-new --issue $(ISSUE) --slug $(SLUG)
-
-wt-ls: ## List worktrees with PR state.
-	@scripts/wt-ls
-
-wt-prune: ## Remove worktrees whose PRs have merged.
-	@scripts/wt-prune
