@@ -5,12 +5,12 @@
 
 // Package mcp builds the crdb-sql Model Context Protocol server.
 //
-// Today the server only registers the `ping` health-check tool; future
-// issues will hang real SQL-aware tools (validate_sql, format_sql, …)
-// off the same NewServer constructor. Keeping construction pure (no
-// transport, no I/O) lets the cmd layer pick a transport — currently
-// just stdio — and lets tests exercise individual tool handlers
-// directly.
+// The server registers a health-check tool (ping) and a SQL
+// classification tool (parse_sql); future issues will add more
+// SQL-aware tools (validate_sql, format_sql, …) to the same
+// NewServer constructor. Keeping construction pure (no transport,
+// no I/O) lets the cmd layer pick a transport — currently just
+// stdio — and lets tests exercise individual tool handlers directly.
 //
 // Versions are passed in by the caller rather than read from
 // debug.ReadBuildInfo here, so this package stays free of
@@ -25,12 +25,16 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+
+	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
 )
 
-// PingToolName is the registered name of the health-check tool. Exposed
-// as a constant so tests and the README/docs reference a single source
-// of truth.
-const PingToolName = "ping"
+// Tool name constants are exposed so tests and docs reference a single
+// source of truth.
+const (
+	PingToolName     = "ping"
+	ParseSQLToolName = "parse_sql"
+)
 
 // NewServer constructs an MCP server for crdb-sql. binaryVersion is the
 // crdb-sql binary version string (typically cmd.Version), and
@@ -54,6 +58,14 @@ func NewServer(binaryVersion, parserVersion string) *server.MCPServer {
 			mcp.WithDescription(`Health check. Returns {"ok": true, "parser_version": "<v>"} so clients can confirm the server is alive and see which cockroachdb-parser version it was built against.`),
 		),
 		pingHandler(parserVersion),
+	)
+	s.AddTool(
+		mcp.NewTool(
+			ParseSQLToolName,
+			mcp.WithDescription("Parse and classify SQL statements. Returns statement type (DDL/DML/DCL/TCL), tag, and original SQL for each statement in the input."),
+			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to parse (may contain multiple semicolon-separated statements)")),
+		),
+		parseSQLHandler(parserVersion),
 	)
 	return s
 }
@@ -82,4 +94,44 @@ func pingHandler(parserVersion string) server.ToolHandlerFunc {
 type pingResult struct {
 	OK            bool   `json:"ok"`
 	ParserVersion string `json:"parser_version"`
+}
+
+// parseSQLHandler returns the handler for the `parse_sql` tool. It
+// delegates to sqlparse.Classify for the actual parsing, so the MCP
+// and CLI layers share one implementation.
+func parseSQLHandler(parserVersion string) server.ToolHandlerFunc {
+	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		raw, exists := req.GetArguments()["sql"]
+		if !exists {
+			return mcp.NewToolResultError("sql parameter is required"), nil
+		}
+		sql, ok := raw.(string)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("sql parameter must be a string, got %T", raw)), nil
+		}
+		if sql == "" {
+			return mcp.NewToolResultError("sql parameter must not be empty"), nil
+		}
+
+		stmts, err := sqlparse.Classify(sql)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("parse error: %v", err)), nil
+		}
+
+		result := parseSQLResult{
+			ParserVersion: parserVersion,
+			Statements:    stmts,
+		}
+		body, err := json.Marshal(result)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("encode result: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+// parseSQLResult is the JSON shape returned by the `parse_sql` tool.
+type parseSQLResult struct {
+	ParserVersion string                         `json:"parser_version"`
+	Statements    []sqlparse.ClassifiedStatement `json:"statements"`
 }
