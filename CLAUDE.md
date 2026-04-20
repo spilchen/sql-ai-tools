@@ -71,7 +71,7 @@ All workflows go through the Makefile:
 - `make fmt-check` — fail if any file is not gofmt-clean
 - `make vet` — run `go vet ./...`
 - `make tools` — install pinned dev tools into `bin/` (currently `golangci-lint`)
-- `make lint` — run `fmt-check`, `vet`, then pinned `golangci-lint run` (the CI gate)
+- `make lint` — run `fmt-check`, `vet`, `tidy-check` (`go mod tidy -diff`), then pinned `golangci-lint run` (the CI gate)
 - `make clean` — remove `bin/` (binary and installed tools)
 
 The pinned `golangci-lint` version lives in the `Makefile` as
