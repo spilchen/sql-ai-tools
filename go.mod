@@ -4,7 +4,11 @@ go 1.26
 
 toolchain go1.26.2
 
-require github.com/cockroachdb/cockroachdb-parser v0.26.2
+require (
+	github.com/cockroachdb/cockroachdb-parser v0.0.0-00010101000000-000000000000
+	github.com/spf13/cobra v1.10.2
+	github.com/stretchr/testify v1.10.0
+)
 
 require (
 	github.com/bazelbuild/rules_go v0.46.0 // indirect
@@ -30,6 +34,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway v1.16.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.3 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jaegertracing/jaeger v1.18.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -41,8 +46,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	github.com/sasha-s/go-deadlock v0.3.1 // indirect
-	github.com/spf13/pflag v1.0.5 // indirect
-	github.com/stretchr/testify v1.10.0 // indirect
+	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/twpayne/go-geom v1.4.1 // indirect
 	github.com/twpayne/go-kml v1.5.2 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect

@@ -65,7 +65,7 @@ auto-installed into `bin/` by the Makefile — do not rely on a system install.
 
 All workflows go through the Makefile:
 
-- `make build` — compile to `bin/sql-ai-tools`
+- `make build` — compile to `bin/crdb-sql`
 - `make test` — run the Go test suite (`go test ./...`)
 - `make fmt` — auto-format sources with gofmt
 - `make fmt-check` — fail if any file is not gofmt-clean
