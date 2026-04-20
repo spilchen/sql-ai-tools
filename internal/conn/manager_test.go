@@ -1,0 +1,110 @@
+// Copyright 2026 The Cockroach Authors.
+//
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+package conn
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+// TestNewManagerDoesNotConnect verifies that construction stores the
+// DSN without initiating a TCP connection.
+func TestNewManagerDoesNotConnect(t *testing.T) {
+	mgr := NewManager("postgres://localhost:26257/defaultdb")
+	require.Nil(t, mgr.conn, "NewManager must not connect eagerly")
+}
+
+// TestCloseWhenNotConnected verifies that Close is a safe no-op when
+// no connection was ever established.
+func TestCloseWhenNotConnected(t *testing.T) {
+	mgr := NewManager("postgres://localhost:26257/defaultdb")
+	require.NoError(t, mgr.Close(context.Background()))
+}
+
+// TestPingEmptyDSN verifies that Ping with an empty DSN returns a
+// connection error rather than panicking.
+func TestPingEmptyDSN(t *testing.T) {
+	mgr := NewManager("")
+	_, err := mgr.Ping(context.Background())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "connect to CockroachDB")
+}
+
+// TestSanitizeConnErr verifies that credential patterns in connection
+// errors are redacted before reaching callers.
+func TestSanitizeConnErr(t *testing.T) {
+	tests := []struct {
+		name      string
+		inputErr  error
+		forbidden string
+		expected  string
+	}{
+		{
+			name:      "strips user:password from postgres URI",
+			inputErr:  fmt.Errorf("dial tcp postgres://admin:s3cret@host:26257/db: connection refused"),
+			forbidden: "s3cret",
+			expected:  "dial tcp postgres://REDACTED@host:26257/db: connection refused",
+		},
+		{
+			name:      "strips user-only (no password) from postgres URI",
+			inputErr:  fmt.Errorf("dial tcp postgres://root@host:26257/db: connection refused"),
+			forbidden: "",
+			expected:  "dial tcp postgres://REDACTED@host:26257/db: connection refused",
+		},
+		{
+			name:      "strips password containing literal @ character",
+			inputErr:  fmt.Errorf("dial tcp postgres://admin:p@ss@host:26257/db: connection refused"),
+			forbidden: "p@ss",
+			expected:  "dial tcp postgres://REDACTED@host:26257/db: connection refused",
+		},
+		{
+			name:      "strips credentials from postgresql:// scheme",
+			inputErr:  fmt.Errorf("dial tcp postgresql://user:secret@cloud-host:26257/db: timeout"),
+			forbidden: "secret",
+			expected:  "dial tcp postgresql://REDACTED@cloud-host:26257/db: timeout",
+		},
+		{
+			name:     "passes through error without URI unchanged",
+			inputErr: fmt.Errorf("connection refused"),
+			expected: "connection refused",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeConnErr(tc.inputErr)
+			require.Equal(t, tc.expected, got.Error())
+			if tc.forbidden != "" {
+				require.NotContains(t, got.Error(), tc.forbidden)
+			}
+		})
+	}
+}
+
+// TestSanitizeConnErrPreservesUnwrap verifies that sanitized errors
+// preserve the original error chain for errors.Is / errors.As.
+func TestSanitizeConnErrPreservesUnwrap(t *testing.T) {
+	sentinel := errors.New("connection refused")
+	wrapped := fmt.Errorf("postgres://admin:secret@host:26257/db: %w", sentinel)
+
+	got := sanitizeConnErr(wrapped)
+	require.NotContains(t, got.Error(), "secret")
+	require.ErrorIs(t, got, sentinel,
+		"sanitized error must preserve the original chain for errors.Is")
+}
+
+// TestSanitizeConnErrPassthroughPreservesIdentity verifies that errors
+// without credentials are returned as-is (no wrapping overhead).
+func TestSanitizeConnErrPassthroughPreservesIdentity(t *testing.T) {
+	original := fmt.Errorf("connection refused")
+	got := sanitizeConnErr(original)
+	require.Same(t, original, got,
+		"errors without credentials should be returned unchanged")
+}
