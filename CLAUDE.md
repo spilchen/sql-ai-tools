@@ -31,7 +31,9 @@ year the file is first added (do not bump on later edits):
 Exemptions: generated files (anything with a `// Code generated ... DO NOT
 EDIT.` marker, e.g. `*.pb.go`, `*_string.go`, mocks) and vendored code.
 
-Enforcement is currently manual. Automated checking is tracked in #40.
+Enforcement is automated: `make lint` runs `golangci-lint`'s `goheader`
+linter against this template (see `.golangci.yml`), so missing or incorrect
+headers fail CI.
 
 ### TODO Comments
 
