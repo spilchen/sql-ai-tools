@@ -1,0 +1,72 @@
+# goreleaser v2 config for crdb-sql.
+#
+# Builds are driven from CI (see .github/workflows/release.yml) but the file
+# is also runnable locally:
+#
+#   goreleaser release --snapshot --clean --skip=publish
+#
+# A separate workflow step (not goreleaser) enforces the 50 MiB binary cap;
+# keeping that gate outside this file keeps the size policy visible in CI.
+
+version: 2
+
+project_name: crdb-sql
+
+before:
+  hooks:
+    # Read-only: prime the module cache without mutating go.mod/go.sum.
+    # `go mod tidy` would risk a dirty-tree failure mid-release if any
+    # transitive checksum drifted; tidy assertions belong in CI lint.
+    - go mod download
+
+builds:
+  - id: crdb-sql
+    main: .
+    binary: crdb-sql
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    # -s -w strips the symbol table and DWARF; combined with -trimpath this
+    # makes builds reproducible and trims roughly a third off the binary.
+    # The -X stamp targets cmd.Version — do not rename the package path
+    # without updating that file in lockstep.
+    ldflags:
+      - -s -w -X github.com/spilchen/sql-ai-tools/cmd.Version={{.Version}}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  # PR snapshots get a stable, identifiable name like
+  # "crdb-sql_0.0.1-snapshot-abc1234_linux_amd64.tar.gz". incpatch bumps the
+  # last released tag so snapshots sort after it.
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  use: github
+  filters:
+    exclude:
+      - "^chore:"
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  # Draft so a human reviews the artifacts and notes before publishing.
+  draft: true

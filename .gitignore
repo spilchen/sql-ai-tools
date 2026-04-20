@@ -1,5 +1,6 @@
 # Build output
 /bin/
+/dist/
 
 # Go test/coverage artifacts
 *.test
