@@ -102,6 +102,40 @@ Produces `bin/crdb-sql`.
 # cockroachdb-parser: v0.26.2
 ```
 
+### Use as an MCP server
+
+`crdb-sql mcp` runs the binary as a Model Context Protocol server over
+stdio. The current build only registers a `ping` health-check tool;
+real SQL tools (`validate_sql`, `format_sql`, …) listed in the
+[Features](#features) table land in subsequent issues.
+
+Register the binary with Claude Code:
+
+```bash
+claude mcp add crdb-sql -- "$(pwd)/bin/crdb-sql" mcp
+```
+
+The leading `--` is required so the `mcp` argument is forwarded to
+`crdb-sql` instead of being parsed by the `claude` CLI. No transport
+flags are needed — `claude mcp add` defaults to stdio, which is what
+this server speaks.
+
+Verify discovery from inside Claude Code:
+
+```
+/mcp
+```
+
+`crdb-sql` should appear in the list with its `ping` tool. Calling
+`ping` returns:
+
+```json
+{"ok": true, "parser_version": "v0.26.2"}
+```
+
+The `parser_version` value should match the `cockroachdb-parser:` line
+from `./bin/crdb-sql version`.
+
 ### Test & Lint
 
 ```bash
