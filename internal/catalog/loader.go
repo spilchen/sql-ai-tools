@@ -27,13 +27,17 @@ func LoadFiles(paths []string) (*Catalog, error) {
 	cat := &Catalog{byName: make(map[string]int)}
 
 	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, fmt.Errorf("stat schema file %s: %w", path, err)
+		}
+		if info.Size() > maxSchemaFileSize {
+			return nil, fmt.Errorf("schema file %s is too large (%d bytes, max %d)",
+				path, info.Size(), maxSchemaFileSize)
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, fmt.Errorf("read schema file %s: %w", path, err)
-		}
-		if int64(len(data)) > maxSchemaFileSize {
-			return nil, fmt.Errorf("schema file %s is too large (%d bytes, max %d)",
-				path, len(data), maxSchemaFileSize)
 		}
 
 		stmts, err := parser.Parse(string(data))
@@ -50,6 +54,8 @@ func LoadFiles(paths []string) (*Catalog, error) {
 			}
 			tableName := ct.Table.Table()
 			if tableName == "" {
+				cat.warnings = append(cat.warnings,
+					fmt.Sprintf("%s: skipped CREATE TABLE with empty table name", path))
 				continue
 			}
 			tbl := extractTable(ct)
