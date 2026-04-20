@@ -10,6 +10,7 @@
 package sqlformat
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
@@ -19,8 +20,8 @@ import (
 // Format parses sql using the CockroachDB parser and returns the
 // pretty-printed canonical form. Multiple statements in the input
 // are separated by ";\n" in the output. An empty input returns an
-// empty string with no error. Parse errors are returned as a Go
-// error; the caller decides how to surface them.
+// empty string with no error. Parse or formatting errors are
+// returned as a Go error; the caller decides how to surface them.
 func Format(sql string) (string, error) {
 	stmts, err := parser.Parse(sql)
 	if err != nil {
@@ -38,7 +39,7 @@ func Format(sql string) (string, error) {
 		}
 		pretty, err := cfg.Pretty(stmt.AST)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("format statement %d: %w", i+1, err)
 		}
 		buf.WriteString(pretty)
 	}
