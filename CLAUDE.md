@@ -15,6 +15,24 @@ When reviewing, other than technical correctness, you should also focus on the
 above aspects. Do not over-emphasize on grammar and comment typos, prefix with
 "nit:" in reviews.
 
+### License Header
+
+Every `.go` file **must** begin with this header (followed by a blank line
+before the package doc or `package` clause). Replace `{YEAR}` with the
+year the file is first added (do not bump on later edits):
+
+```go
+// Copyright {YEAR} The Cockroach Authors.
+//
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+```
+
+Exemptions: generated files (anything with a `// Code generated ... DO NOT
+EDIT.` marker, e.g. `*.pb.go`, `*_string.go`, mocks) and vendored code.
+
+Enforcement is currently manual. Automated checking is tracked in #40.
+
 ### TODO Comments
 
 Every TODO in source code **must** reference an open GitHub issue in this
