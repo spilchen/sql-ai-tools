@@ -72,6 +72,7 @@ round-tripping through a live cluster.`,
 		`output format: "text" or "json"`)
 	root.AddCommand(newVersionCmd(state))
 	root.AddCommand(newParseCmd(state))
+	root.AddCommand(newFormatCmd(state))
 	root.AddCommand(newMCPCmd())
 	return root
 }
