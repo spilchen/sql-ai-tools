@@ -1,13 +1,6 @@
 # Build output
 /bin/
 
-# Override a global ignore of .claude/: this repo ships hooks, settings,
-# rules, and skills that need to live with the code.
-!/.claude/
-
-# But never commit local worktrees Claude Code creates inside the repo.
-/.claude/worktrees/
-
 # Go test/coverage artifacts
 *.test
 *.out

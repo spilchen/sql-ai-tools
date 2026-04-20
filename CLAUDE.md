@@ -65,45 +65,6 @@ fail `make lint`, which is what CI runs. Configure your editor to run
 
 There is no git pre-commit hook; `make lint` is the single source of truth.
 
-## Worktree Workflow
-
-Parallel feature work happens in ephemeral git worktrees driven by Claude
-Code's native `--worktree` flag. Each worktree maps 1:1 to a GitHub issue
-and is expected to produce exactly one PR before being torn down.
-
-Worktrees live at `.claude/worktrees/<slug>/` (gitignored). Each gets its
-own `bin/`, so builds don't collide across parallel sessions.
-
-Branch name format (date is `YYMMDD`, time is 12-hour `HHMM` + `a`/`p`):
-
-    <gh-username>/gh-<issue#>/<YYMMDD>/<HHMM[a|p]>/<slug>
-    e.g. spilchen/gh-42/260419/0245p/validate-sql  # 2026-04-19, 2:45pm
-
-The slashes are real ref hierarchy — they group cleanly in `gh pr list`
-and the GitHub UI. The timestamp prevents collisions when reopening the
-same issue under a new slug.
-
-Helpers in `scripts/`:
-
-- `scripts/wt-new -i <issue#> -s <slug>` — verifies the issue exists,
-  computes the branch, and execs `claude --worktree <slug>`. The
-  `WorktreeCreate` hook in `.claude/settings.json` creates the actual
-  branch off `origin/HEAD`. Note: `origin/HEAD` is a *local* symbolic
-  ref — no `git fetch` runs, so the worktree starts from whatever
-  origin pointed at the last time you fetched. Run `git fetch` first
-  if you need the freshest base.
-- `scripts/wt-ls` — list worktrees with PR state (OPEN/MERGED/CLOSED/
-  NONE/DIRTY).
-- `scripts/wt-prune` — query `gh` for each worktree's branch; remove
-  worktree + branch if its PR has merged. Skips dirty worktrees unless
-  `--force`. Use `--dry-run` first if unsure.
-
-Direct `claude --worktree <slug>` (without `wt-new`) still works — the
-hook falls back to a `wt/<slug>` branch.
-
-Make wrappers: `make wt-new ISSUE=42 SLUG=foo`, `make wt-ls`,
-`make wt-prune`.
-
 # Interaction Style
 
 * Be direct and honest.
