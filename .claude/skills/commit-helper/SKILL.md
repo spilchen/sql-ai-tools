@@ -16,7 +16,7 @@ Help the user create properly formatted commit messages and release notes that f
 4. **Write the subject line**: Imperative mood, no period, under 72 characters
 5. **Write the body**: Explain the before/after, why the change was needed
 6. **Add issue references**: Include Resolves as appropriate
-8. **Create the commit** using the properly formatted message
+7. **Create the commit** using the properly formatted message
 
 ## Commit Message Structure
 
@@ -52,5 +52,38 @@ Resolves: #123
 - Explain the "why" behind changes, not just the "what"
 
 ## Pull Request Guidelines
-- **Single-commit PRs**: PR title should match commit title, PR body should match commit body
-- **Multi-commit PRs**: The body should summarize the end goal that the set of commits achieves and give the reader the context necessary to review the PR commit by commit (for example, the first commits might get refactors out of the way so that the last commit can hook everything up). When there isn't an overarching connection between the commits (maybe the PR groups a few mechanical changes that are not related) it is fine to say that the individual commits speak for themselves.
+
+**Default: one commit per PR.** Squash WIP, "address review", and other
+incremental commits before opening or updating the PR. The PR title and
+body should mirror the single commit's title and body.
+
+**Multi-commit PRs are allowed only when each commit is independently
+meaningful and stands on its own.** Typical valid shapes:
+- A pure refactor commit followed by a feature commit that depends on it
+- Two or more unrelated mechanical changes grouped for reviewer convenience
+
+If commits don't stand on their own (e.g. one fixes a bug introduced by
+another, or one is a partial step toward the next), squash them. When in
+doubt, prefer one commit.
+
+For multi-commit PRs, the PR body must summarize the end goal and
+describe each commit so the reviewer can read commit-by-commit. When the
+commits are unrelated mechanical changes, it's fine to say the
+individual commits speak for themselves.
+
+## Applying Review Feedback
+
+**Always amend the relevant existing commit(s) in the PR rather than
+adding fixup-style follow-up commits.** Use `git commit --amend` for the
+tip commit, or `git rebase -i` to edit earlier commits, then force-push
+with `--force-with-lease`.
+
+Do **not** create commits like "address review feedback", "fix bug in
+previous commit", or "retry approach from prior commit". They clutter
+`git log`, make bisect harder, and obscure the final intent of each
+change. The end state of the PR branch should look as if the feedback
+had been incorporated from the start.
+
+Exception: if the reviewer explicitly asks for a separate commit (for
+example, to make a specific change easy to revert), follow their
+request.
