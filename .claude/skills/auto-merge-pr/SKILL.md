@@ -154,10 +154,10 @@ EOF
 If `should_merge == true`, queue the merge:
 
 ```bash
-gh pr merge <pr> --auto --merge
+gh pr merge <pr> --auto --rebase
 ```
 
-`--auto` makes GitHub merge the PR once required checks pass. `--merge` uses a merge commit (not squash, not rebase).
+`--auto` makes GitHub merge the PR once required checks pass. `--rebase` rebases the PR commits onto the base branch (this repo disallows merge commits).
 
 If `gh pr merge --auto` fails with `auto-merge is not enabled for this repository`, the repo's settings → "Pull Requests" → "Allow auto-merge" checkbox is off. Report the failure to the user along with the verdict, but do NOT attempt a non-auto merge as a fallback (the user may have other reasons for wanting a human gate).
 
