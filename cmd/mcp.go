@@ -19,10 +19,7 @@ import (
 // can spawn the binary and discover the registered tools. The command
 // blocks until the client disconnects (stdin closes); a clean
 // disconnect returns nil, anything else surfaces as the cobra error.
-//
-// Today the only registered tool is the `ping` skeleton from
-// internal/mcp; future issues attach the real tools to the same server
-// constructor.
+// The registered tools are defined in internal/mcp.NewServer.
 func newMCPCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mcp",
