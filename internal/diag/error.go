@@ -24,6 +24,33 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
+// FromTypeError converts a type-check error into a structured
+// output.Error. exprText is the formatted expression that failed
+// (used to locate the error position within fullSQL via substring
+// match). Position is nil when exprText cannot be found.
+func FromTypeError(err error, exprText string, fullSQL string) output.Error {
+	code := pgerror.GetPGCode(err).String()
+
+	sev := pgerror.GetSeverity(err)
+	if sev == "" {
+		sev = string(output.SeverityError)
+	}
+
+	var pos *output.Position
+	if exprText != "" {
+		if idx := strings.Index(fullSQL, exprText); idx >= 0 {
+			pos = PositionFromByteOffset(fullSQL, idx)
+		}
+	}
+
+	return output.Error{
+		Code:     code,
+		Severity: output.Severity(sev),
+		Message:  err.Error(),
+		Position: pos,
+	}
+}
+
 // FromParseError converts a Go error returned by parser.Parse into a
 // structured output.Error with SQLSTATE code, severity, message, and
 // source position. fullSQL is the complete SQL input; it is used to

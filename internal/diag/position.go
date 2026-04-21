@@ -90,6 +90,21 @@ func caretColumn(line string) int {
 	return idx
 }
 
+// PositionFromByteOffset converts a 0-based byte offset within fullSQL
+// into a 1-based line/column Position. Returns nil if byteOffset is
+// negative.
+func PositionFromByteOffset(fullSQL string, byteOffset int) *output.Position {
+	if byteOffset < 0 {
+		return nil
+	}
+	line, col := lineColumn(fullSQL, byteOffset)
+	return &output.Position{
+		Line:       line,
+		Column:     col,
+		ByteOffset: byteOffset,
+	}
+}
+
 // lineColumn converts a 0-based byte offset within sql into a 1-based
 // line and column. The column counts bytes from the last newline (or
 // start of string), not runes, matching the CockroachDB parser's

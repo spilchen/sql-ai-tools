@@ -172,6 +172,61 @@ func TestValidateCmdMultiStatementSuccess(t *testing.T) {
 	require.Equal(t, "Valid.\n", stdout.String())
 }
 
+// TestValidateCmdTypeErrorText verifies that a type mismatch in text
+// mode outputs an error line with the SQLSTATE code.
+func TestValidateCmdTypeErrorText(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"validate", "-e", "SELECT 1 + 'hello'"})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	got := stdout.String()
+	require.Contains(t, got, "unsupported binary operator")
+}
+
+// TestValidateCmdTypeErrorJSON verifies that a type mismatch in JSON
+// mode produces an envelope with a structured error and nil data.
+func TestValidateCmdTypeErrorJSON(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"validate", "--output", "json", "-e", "SELECT 1 + 'hello'"})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 1)
+	require.Nil(t, env.Data)
+
+	diagErr := env.Errors[0]
+	require.NotEmpty(t, diagErr.Code)
+	require.Equal(t, output.SeverityError, diagErr.Severity)
+	require.Contains(t, diagErr.Message, "unsupported binary operator")
+	require.NotNil(t, diagErr.Position)
+	require.Equal(t, 1, diagErr.Position.Line)
+}
+
+// TestValidateCmdColumnRefNoTypeError verifies that SQL with column
+// references does not produce false-positive type errors.
+func TestValidateCmdColumnRefNoTypeError(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetIn(strings.NewReader("SELECT a + 1 FROM t"))
+	root.SetArgs([]string{"validate"})
+
+	require.NoError(t, root.Execute())
+	require.Equal(t, "Valid.\n", stdout.String())
+}
+
 // TestValidateCmdMultiStatementError verifies that an error in a later
 // statement reports the correct position relative to the full input.
 func TestValidateCmdMultiStatementError(t *testing.T) {

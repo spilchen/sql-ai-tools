@@ -16,6 +16,7 @@ import (
 
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/semcheck"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
 )
 
@@ -61,8 +62,13 @@ position (line/column/byte offset). Input is read from the -e flag
 			// stdin/file do not skew position reporting.
 			sql = strings.TrimSpace(sql)
 
-			if _, parseErr := parser.Parse(sql); parseErr != nil {
+			stmts, parseErr := parser.Parse(sql)
+			if parseErr != nil {
 				return renderParseError(r, baseEnv, parseErr, sql)
+			}
+
+			if typeErrs := semcheck.CheckExprTypes(stmts, sql); len(typeErrs) > 0 {
+				return renderDiagErrors(r, baseEnv, typeErrs)
 			}
 
 			data, err := json.Marshal(struct {
@@ -90,18 +96,29 @@ position (line/column/byte offset). Input is read from the -e flag
 // bypasses Renderer.RenderError (which uses a generic
 // "internal_error" code) so that agents receive the real SQLSTATE.
 func renderParseError(r output.Renderer, env output.Envelope, parseErr error, sql string) error {
-	diagErr := diag.FromParseError(parseErr, sql)
-	env.Errors = []output.Error{diagErr}
+	return renderDiagErrors(r, env, []output.Error{diag.FromParseError(parseErr, sql)})
+}
+
+// renderDiagErrors renders one or more diagnostic errors (parse or
+// type-check) through the standard envelope path.
+func renderDiagErrors(r output.Renderer, env output.Envelope, errs []output.Error) error {
+	env.Errors = errs
 	env.Data = nil
 
 	if err := r.Render(env, func(w io.Writer) error {
-		pos := diagErr.Position
-		if pos != nil {
-			_, werr := fmt.Fprintf(w, "%d:%d: %s [%s]\n", pos.Line, pos.Column, diagErr.Message, diagErr.Code)
-			return werr
+		for _, diagErr := range errs {
+			pos := diagErr.Position
+			if pos != nil {
+				if _, werr := fmt.Fprintf(w, "%d:%d: %s [%s]\n", pos.Line, pos.Column, diagErr.Message, diagErr.Code); werr != nil {
+					return werr
+				}
+			} else {
+				if _, werr := fmt.Fprintf(w, "%s [%s]\n", diagErr.Message, diagErr.Code); werr != nil {
+					return werr
+				}
+			}
 		}
-		_, werr := fmt.Fprintf(w, "%s [%s]\n", diagErr.Message, diagErr.Code)
-		return werr
+		return nil
 	}); err != nil {
 		return err
 	}
