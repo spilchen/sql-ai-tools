@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -54,9 +55,11 @@ statement tag (e.g. SELECT, ALTER TABLE), and the original SQL text.`,
 				return r.RenderError(baseEnv, err)
 			}
 
+			sql = strings.TrimSpace(sql)
+
 			stmts, err := sqlparse.Classify(sql)
 			if err != nil {
-				return r.RenderError(baseEnv, err)
+				return renderParseError(r, baseEnv, err, sql)
 			}
 
 			data, err := json.Marshal(stmts)
