@@ -99,6 +99,7 @@ func TestValidateCmdJSONError(t *testing.T) {
 	diagErr := env.Errors[0]
 	require.Equal(t, "42601", diagErr.Code)
 	require.Equal(t, output.SeverityError, diagErr.Severity)
+	require.Equal(t, "syntax_error", diagErr.Category)
 	require.Contains(t, diagErr.Message, "syntax error")
 	require.NotNil(t, diagErr.Position)
 	require.Equal(t, 1, diagErr.Position.Line)

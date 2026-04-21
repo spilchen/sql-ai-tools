@@ -82,5 +82,6 @@ func FromParseError(err error, fullSQL string) output.Error {
 		Severity: output.Severity(sev),
 		Message:  err.Error(),
 		Position: ExtractPosition(detail, fullSQL),
+		Category: CategoryForCode(code),
 	}
 }
