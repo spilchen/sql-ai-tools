@@ -60,8 +60,8 @@ func TestFidelity(t *testing.T) {
 // TestFidelityClassify verifies that every corpus file classifies
 // cleanly through sqlparse.Classify and that each resulting statement
 // carries a non-empty StatementType, Tag, SQL, and Normalized field. This
-// complements TestFidelity, which only asserts that the raw parser
-// accepts the corpus without error.
+// complements TestFidelity, which asserts that the raw parser accepts
+// the corpus and that the normalized form round-trips cleanly.
 func TestFidelityClassify(t *testing.T) {
 	testcorpus.ForEachFile(t, corpusDir, func(t *testing.T, sql string) {
 		stmts, err := sqlparse.Classify(sql)
