@@ -5,13 +5,12 @@
 
 // Package mcp builds the crdb-sql Model Context Protocol server.
 //
-// The server registers a health-check tool (ping), a SQL
-// classification tool (parse_sql), and a risk-detection tool
-// (detect_risky_query); future issues will add more SQL-aware
-// tools (validate_sql, format_sql, …) to the same NewServer
-// constructor. Keeping construction pure (no transport,
-// no I/O) lets the cmd layer pick a transport — currently just
-// stdio — and lets tests exercise individual tool handlers directly.
+// The server registers a health-check tool (ping), three Tier 1 SQL
+// tools (parse_sql, validate_sql, format_sql) via the tools subpackage,
+// and a risk-detection tool (detect_risky_query). Keeping construction
+// pure (no transport, no I/O) lets the cmd layer pick a transport —
+// currently just stdio — and lets tests exercise individual tool
+// handlers directly.
 //
 // Versions are passed in by the caller rather than read from
 // debug.ReadBuildInfo here, so this package stays free of
@@ -27,15 +26,14 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/spilchen/sql-ai-tools/internal/mcp/tools"
 	"github.com/spilchen/sql-ai-tools/internal/risk"
-	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
 )
 
-// Tool name constants are exposed so tests and docs reference a single
-// source of truth.
+// Tool name constants for tools defined in this file. The three Tier 1
+// SQL tool names live in the tools subpackage.
 const (
 	PingToolName             = "ping"
-	ParseSQLToolName         = "parse_sql"
 	DetectRiskyQueryToolName = "detect_risky_query"
 )
 
@@ -43,9 +41,9 @@ const (
 // crdb-sql binary version string (typically cmd.Version), and
 // parserVersion is the resolved cockroachdb-parser module version
 // (typically the result of cmd.parserVersion). Both are reported
-// verbatim — by the server handshake (binaryVersion) and by the `ping`
-// tool (parserVersion) — so callers should resolve them before invoking
-// NewServer.
+// verbatim — binaryVersion in the server handshake, and parserVersion
+// in every tool response — so callers should resolve them before
+// invoking NewServer.
 //
 // The returned server has no transport bound; callers wire it to stdio
 // (or, in the future, sse/http) themselves.
@@ -62,14 +60,9 @@ func NewServer(binaryVersion, parserVersion string) *server.MCPServer {
 		),
 		pingHandler(parserVersion),
 	)
-	s.AddTool(
-		mcp.NewTool(
-			ParseSQLToolName,
-			mcp.WithDescription("Parse and classify SQL statements. Returns statement type (DDL/DML/DCL/TCL), tag, and original SQL for each statement in the input."),
-			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to parse (may contain multiple semicolon-separated statements)")),
-		),
-		parseSQLHandler(parserVersion),
-	)
+	s.AddTool(tools.ParseSQLTool(), tools.ParseSQLHandler(parserVersion))
+	s.AddTool(tools.ValidateSQLTool(), tools.ValidateSQLHandler(parserVersion))
+	s.AddTool(tools.FormatSQLTool(), tools.FormatSQLHandler(parserVersion))
 	s.AddTool(
 		mcp.NewTool(
 			DetectRiskyQueryToolName,
@@ -105,46 +98,6 @@ func pingHandler(parserVersion string) server.ToolHandlerFunc {
 type pingResult struct {
 	OK            bool   `json:"ok"`
 	ParserVersion string `json:"parser_version"`
-}
-
-// parseSQLHandler returns the handler for the `parse_sql` tool. It
-// delegates to sqlparse.Classify for the actual parsing, so the MCP
-// and CLI layers share one implementation.
-func parseSQLHandler(parserVersion string) server.ToolHandlerFunc {
-	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		raw, exists := req.GetArguments()["sql"]
-		if !exists {
-			return mcp.NewToolResultError("sql parameter is required"), nil
-		}
-		sql, ok := raw.(string)
-		if !ok {
-			return mcp.NewToolResultError(fmt.Sprintf("sql parameter must be a string, got %T", raw)), nil
-		}
-		if sql == "" {
-			return mcp.NewToolResultError("sql parameter must not be empty"), nil
-		}
-
-		stmts, err := sqlparse.Classify(sql)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("parse error: %v", err)), nil
-		}
-
-		result := parseSQLResult{
-			ParserVersion: parserVersion,
-			Statements:    stmts,
-		}
-		body, err := json.Marshal(result)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("encode result: %v", err)), nil
-		}
-		return mcp.NewToolResultText(string(body)), nil
-	}
-}
-
-// parseSQLResult is the JSON shape returned by the `parse_sql` tool.
-type parseSQLResult struct {
-	ParserVersion string                         `json:"parser_version"`
-	Statements    []sqlparse.ClassifiedStatement `json:"statements"`
 }
 
 // detectRiskyQueryHandler returns the handler for the
