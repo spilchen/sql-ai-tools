@@ -52,7 +52,7 @@ func newRootCmd() *cobra.Command {
 		Use:   "crdb-sql",
 		Short: "Agent-friendly SQL tooling for CockroachDB",
 		Long: `crdb-sql exposes CockroachDB's parser, type system, and structured
-error infrastructure as a CLI (and, eventually, an MCP server) so that
+error infrastructure as a CLI and MCP server so that
 AI agents can validate, format, and reason about CockroachDB SQL without
 round-tripping through a live cluster.`,
 		// Both silences are deliberate: cobra should neither print the
@@ -95,6 +95,7 @@ round-tripping through a live cluster.`,
 	root.AddCommand(newFormatCmd(state))
 	root.AddCommand(newValidateCmd(state))
 	root.AddCommand(newDescribeCmd(state))
+	root.AddCommand(newRiskCmd(state))
 	root.AddCommand(newMCPCmd())
 	return root
 }
