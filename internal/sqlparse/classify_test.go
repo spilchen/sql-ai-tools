@@ -163,4 +163,7 @@ func TestClassifyMultiStatementDetails(t *testing.T) {
 
 	require.Equal(t, StatementTypeDDL, stmts[1].StatementType)
 	require.Equal(t, "CREATE TABLE", stmts[1].Tag)
+
+	require.Equal(t, "SELECT _", stmts[0].Normalized)
+	require.Equal(t, "CREATE TABLE t (a INT8)", stmts[1].Normalized)
 }
