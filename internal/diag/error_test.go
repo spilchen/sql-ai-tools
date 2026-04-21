@@ -22,6 +22,7 @@ func TestFromParseError(t *testing.T) {
 		expectedSeverity output.Severity
 		expectedMsgSub   string
 		expectedPos      *output.Position
+		expectedCategory string
 	}{
 		{
 			name:             "syntax error at EOF",
@@ -34,6 +35,7 @@ func TestFromParseError(t *testing.T) {
 				Column:     12,
 				ByteOffset: 11,
 			},
+			expectedCategory: "syntax_error",
 		},
 		{
 			name:             "misspelled keyword",
@@ -46,6 +48,7 @@ func TestFromParseError(t *testing.T) {
 				Column:     1,
 				ByteOffset: 0,
 			},
+			expectedCategory: "syntax_error",
 		},
 		{
 			name:             "multi-statement error on second",
@@ -58,6 +61,7 @@ func TestFromParseError(t *testing.T) {
 				Column:     12,
 				ByteOffset: 21,
 			},
+			expectedCategory: "syntax_error",
 		},
 	}
 
@@ -70,6 +74,8 @@ func TestFromParseError(t *testing.T) {
 			require.Equal(t, tc.expectedCode, diagErr.Code)
 			require.Equal(t, tc.expectedSeverity, diagErr.Severity)
 			require.Contains(t, diagErr.Message, tc.expectedMsgSub)
+
+			require.Equal(t, tc.expectedCategory, diagErr.Category)
 
 			if tc.expectedPos == nil {
 				require.Nil(t, diagErr.Position)
