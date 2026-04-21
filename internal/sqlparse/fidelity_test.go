@@ -59,7 +59,7 @@ func TestFidelity(t *testing.T) {
 
 // TestFidelityClassify verifies that every corpus file classifies
 // cleanly through sqlparse.Classify and that each resulting statement
-// carries a non-empty StatementType, Tag, and SQL field. This
+// carries a non-empty StatementType, Tag, SQL, and Normalized field. This
 // complements TestFidelity, which only asserts that the raw parser
 // accepts the corpus without error.
 func TestFidelityClassify(t *testing.T) {
@@ -72,6 +72,7 @@ func TestFidelityClassify(t *testing.T) {
 			require.NotEmpty(t, stmt.StatementType, "statement %d has empty StatementType", i)
 			require.NotEmpty(t, stmt.Tag, "statement %d has empty Tag", i)
 			require.NotEmpty(t, stmt.SQL, "statement %d has empty SQL", i)
+			require.NotEmpty(t, stmt.Normalized, "statement %d has empty Normalized", i)
 		}
 	})
 }

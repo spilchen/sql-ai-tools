@@ -39,9 +39,10 @@ type ClassifiedStatement struct {
 	StatementType StatementType `json:"statement_type"`
 	Tag           string        `json:"tag"`
 	SQL           string        `json:"sql"`
-	// Normalized is the SQL text with literal constants replaced by
-	// placeholders, produced by tree.FormatStatementHideConstants.
-	// Numeric constants become _ and string literals become '_'
+	// Normalized is the SQL text with literal constants (numbers,
+	// strings, booleans, NULL, etc.) replaced by placeholders,
+	// produced by tree.FormatStatementHideConstants. Constants become
+	// _ (or '_' for string literals), and long lists are shortened
 	// (e.g. "SELECT * FROM t WHERE id = _"). Structurally identical
 	// queries that differ only in constant values share the same
 	// normalized form.
