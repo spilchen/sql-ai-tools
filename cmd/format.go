@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/pgwire/pgerror"
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/output"
@@ -52,8 +54,16 @@ CockroachDB parser's built-in formatter. Input is read from the -e flag
 				return r.RenderError(baseEnv, err)
 			}
 
+			sql = strings.TrimSpace(sql)
+
 			formatted, err := sqlformat.Format(sql)
 			if err != nil {
+				// Format can fail during parsing (candidate PGCODE
+				// present) or during pretty-printing (no candidate
+				// code). Only parser errors get the enriched path.
+				if pgerror.HasCandidateCode(err) {
+					return renderParseError(r, baseEnv, err, sql)
+				}
 				return r.RenderError(baseEnv, err)
 			}
 

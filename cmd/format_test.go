@@ -127,34 +127,52 @@ func TestFormatCmdMultiStatement(t *testing.T) {
 }
 
 // TestFormatCmdParseErrorText verifies that invalid SQL in text mode
-// surfaces as a non-nil error from Execute.
+// renders an enriched diagnostic with position and SQLSTATE code.
 func TestFormatCmdParseErrorText(t *testing.T) {
 	root := newRootCmd()
-	root.SetOut(&bytes.Buffer{})
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
 	root.SetErr(&bytes.Buffer{})
-	root.SetIn(strings.NewReader("SELECTT 1"))
+	root.SetIn(strings.NewReader("SELECT FROM"))
 	root.SetArgs([]string{"format"})
 
-	require.Error(t, root.Execute())
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	got := stdout.String()
+	require.Contains(t, got, "1:12:")
+	require.Contains(t, got, "syntax error")
+	require.Contains(t, got, "42601")
 }
 
 // TestFormatCmdParseErrorJSON verifies that invalid SQL in JSON mode
-// produces an envelope with errors and nil data.
+// produces an envelope with a structured error containing SQLSTATE
+// code, severity, category, and source position.
 func TestFormatCmdParseErrorJSON(t *testing.T) {
 	root := newRootCmd()
 	var stdout bytes.Buffer
 	root.SetOut(&stdout)
 	root.SetErr(&bytes.Buffer{})
-	root.SetIn(strings.NewReader("SELECTT 1"))
+	root.SetIn(strings.NewReader("SELECT FROM"))
 	root.SetArgs([]string{"format", "--output", "json"})
 
 	err := root.Execute()
-	require.Error(t, err)
+	require.ErrorIs(t, err, output.ErrRendered)
 
 	var env output.Envelope
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
-	require.NotEmpty(t, env.Errors)
+	require.Len(t, env.Errors, 1)
 	require.Nil(t, env.Data)
+
+	diagErr := env.Errors[0]
+	require.Equal(t, "42601", diagErr.Code)
+	require.Equal(t, output.SeverityError, diagErr.Severity)
+	require.Equal(t, "syntax_error", diagErr.Category)
+	require.Contains(t, diagErr.Message, "syntax error")
+	require.NotNil(t, diagErr.Position)
+	require.Equal(t, 1, diagErr.Position.Line)
+	require.Equal(t, 12, diagErr.Position.Column)
+	require.Equal(t, 11, diagErr.Position.ByteOffset)
 }
 
 // TestFormatCmdEmptyInput verifies that empty stdin produces an error.
