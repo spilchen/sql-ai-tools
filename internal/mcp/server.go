@@ -5,10 +5,11 @@
 
 // Package mcp builds the crdb-sql Model Context Protocol server.
 //
-// The server registers a health-check tool (ping) and a SQL
-// classification tool (parse_sql); future issues will add more
-// SQL-aware tools (validate_sql, format_sql, …) to the same
-// NewServer constructor. Keeping construction pure (no transport,
+// The server registers a health-check tool (ping), a SQL
+// classification tool (parse_sql), and a risk-detection tool
+// (detect_risky_query); future issues will add more SQL-aware
+// tools (validate_sql, format_sql, …) to the same NewServer
+// constructor. Keeping construction pure (no transport,
 // no I/O) lets the cmd layer pick a transport — currently just
 // stdio — and lets tests exercise individual tool handlers directly.
 //
@@ -26,14 +27,16 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/spilchen/sql-ai-tools/internal/risk"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
 )
 
 // Tool name constants are exposed so tests and docs reference a single
 // source of truth.
 const (
-	PingToolName     = "ping"
-	ParseSQLToolName = "parse_sql"
+	PingToolName             = "ping"
+	ParseSQLToolName         = "parse_sql"
+	DetectRiskyQueryToolName = "detect_risky_query"
 )
 
 // NewServer constructs an MCP server for crdb-sql. binaryVersion is the
@@ -66,6 +69,14 @@ func NewServer(binaryVersion, parserVersion string) *server.MCPServer {
 			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to parse (may contain multiple semicolon-separated statements)")),
 		),
 		parseSQLHandler(parserVersion),
+	)
+	s.AddTool(
+		mcp.NewTool(
+			DetectRiskyQueryToolName,
+			mcp.WithDescription("Detect risky SQL patterns such as DELETE/UPDATE without WHERE, DROP TABLE, and SELECT *. Returns findings with reason codes, severity, and fix hints."),
+			mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to analyze for risky patterns")),
+		),
+		detectRiskyQueryHandler(parserVersion),
 	)
 	return s
 }
@@ -134,4 +145,45 @@ func parseSQLHandler(parserVersion string) server.ToolHandlerFunc {
 type parseSQLResult struct {
 	ParserVersion string                         `json:"parser_version"`
 	Statements    []sqlparse.ClassifiedStatement `json:"statements"`
+}
+
+// detectRiskyQueryHandler returns the handler for the
+// `detect_risky_query` tool. It delegates to risk.Analyze for the
+// actual analysis, so the MCP and CLI layers share one implementation.
+func detectRiskyQueryHandler(parserVersion string) server.ToolHandlerFunc {
+	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		raw, exists := req.GetArguments()["sql"]
+		if !exists {
+			return mcp.NewToolResultError("sql parameter is required"), nil
+		}
+		sql, ok := raw.(string)
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("sql parameter must be a string, got %T", raw)), nil
+		}
+		if sql == "" {
+			return mcp.NewToolResultError("sql parameter must not be empty"), nil
+		}
+
+		findings, err := risk.Analyze(sql)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("parse error: %v", err)), nil
+		}
+
+		result := detectRiskyQueryResult{
+			ParserVersion: parserVersion,
+			Findings:      findings,
+		}
+		body, err := json.Marshal(result)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("encode result: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(body)), nil
+	}
+}
+
+// detectRiskyQueryResult is the JSON shape returned by the
+// `detect_risky_query` tool.
+type detectRiskyQueryResult struct {
+	ParserVersion string         `json:"parser_version"`
+	Findings      []risk.Finding `json:"findings"`
 }

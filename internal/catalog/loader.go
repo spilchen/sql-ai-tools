@@ -27,6 +27,8 @@ func LoadFiles(paths []string) (*Catalog, error) {
 	cat := &Catalog{byName: make(map[string]int)}
 
 	for _, path := range paths {
+		// Stat before ReadFile so we reject oversized files without
+		// allocating their contents into memory.
 		info, err := os.Stat(path)
 		if err != nil {
 			return nil, fmt.Errorf("stat schema file %s: %w", path, err)
