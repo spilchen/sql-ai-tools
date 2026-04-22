@@ -641,3 +641,207 @@ func TestCheckColumnNamesEmptyStatements(t *testing.T) {
 	cat := usersAndOrdersCatalog(t)
 	require.Empty(t, CheckColumnNames(nil, "", cat))
 }
+
+// TestCheckTableNamesSuggestions covers the structured fix payload
+// added by issue #15 for unknown_table errors. Each case asserts the
+// first suggestion's replacement and (where relevant) that the byte
+// range covers the misspelled token in the input.
+func TestCheckTableNamesSuggestions(t *testing.T) {
+	cat := usersOnlyCatalog(t)
+	tests := []struct {
+		name                string
+		sql                 string
+		expectedFirst       string // first suggestion replacement; "" → expect none
+		expectedRangeStart  int
+		expectedRangeEnd    int
+		expectedSuggestions int
+	}{
+		{
+			name:                "close miss suggests users",
+			sql:                 "SELECT * FROM usrs",
+			expectedFirst:       "users",
+			expectedRangeStart:  14,
+			expectedRangeEnd:    18,
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "completely unrelated name yields no suggestion",
+			sql:                 "SELECT * FROM completely_different_thing",
+			expectedSuggestions: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stmts, err := parser.Parse(tc.sql)
+			require.NoError(t, err)
+			errs := CheckTableNames(stmts, tc.sql, cat)
+			require.Len(t, errs, 1)
+			require.Len(t, errs[0].Suggestions, tc.expectedSuggestions)
+			if tc.expectedSuggestions == 0 {
+				return
+			}
+			require.Equal(t, tc.expectedFirst, errs[0].Suggestions[0].Replacement)
+			require.Equal(t, tc.expectedRangeStart, errs[0].Suggestions[0].Range.Start)
+			require.Equal(t, tc.expectedRangeEnd, errs[0].Suggestions[0].Range.End)
+		})
+	}
+}
+
+// TestCheckColumnNamesSuggestions covers the structured fix payload
+// for unknown_column errors across the four call sites: qualified ref
+// against a known source, unqualified ref, USING-clause typo, and bad
+// qualifier (where the suggestion targets the qualifier itself).
+func TestCheckColumnNamesSuggestions(t *testing.T) {
+	cat := usersAndOrdersCatalog(t)
+	tests := []struct {
+		name                string
+		sql                 string
+		expectedFirst       string
+		expectedSuggestions int
+	}{
+		{
+			name:                "unqualified column typo suggests name",
+			sql:                 "SELECT nme FROM users",
+			expectedFirst:       "name",
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "qualified column typo suggests name",
+			sql:                 "SELECT users.nme FROM users",
+			expectedFirst:       "name",
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "USING clause typo suggests id",
+			sql:                 "SELECT * FROM users JOIN orders USING (idd)",
+			expectedFirst:       "id",
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "bad qualifier suggests in-scope alias",
+			sql:                 "SELECT usrs.id FROM users",
+			expectedFirst:       "users",
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "short typo below threshold yields no suggestion",
+			sql:                 "SELECT xy FROM users",
+			expectedSuggestions: 0,
+		},
+		{
+			name:                "ambiguous ref does not suggest",
+			sql:                 "SELECT id FROM users JOIN orders ON users.id = orders.user_id",
+			expectedSuggestions: 0,
+		},
+		{
+			name:                "INSERT target column typo suggests name",
+			sql:                 "INSERT INTO users (nme) VALUES ('x')",
+			expectedFirst:       "name",
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "UPDATE SET LHS typo suggests name",
+			sql:                 "UPDATE users SET nme = 'x'",
+			expectedFirst:       "name",
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "DELETE WHERE typo suggests name",
+			sql:                 "DELETE FROM users WHERE nme = 'x'",
+			expectedFirst:       "name",
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "RETURNING typo suggests name",
+			sql:                 "INSERT INTO users (id) VALUES (1) RETURNING nme",
+			expectedFirst:       "name",
+			expectedSuggestions: 1,
+		},
+		{
+			name:                "ON CONFLICT target typo suggests id",
+			sql:                 "INSERT INTO users (id) VALUES (1) ON CONFLICT (idd) DO NOTHING",
+			expectedFirst:       "id",
+			expectedSuggestions: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stmts, err := parser.Parse(tc.sql)
+			require.NoError(t, err)
+			errs := CheckColumnNames(stmts, tc.sql, cat)
+			require.NotEmpty(t, errs)
+			require.Len(t, errs[0].Suggestions, tc.expectedSuggestions)
+			if tc.expectedSuggestions == 0 {
+				return
+			}
+			require.Equal(t, tc.expectedFirst, errs[0].Suggestions[0].Replacement)
+		})
+	}
+}
+
+// TestCheckColumnNamesSuggestionRange verifies that the suggestion's
+// byte range targets the correct occurrence of the misspelled token
+// across two important scenarios:
+//
+//   - When the typo appears multiple times in one statement, dedup
+//     records only one error and the range must point at the first
+//     occurrence (not span both, not point past them).
+//   - When the typo appears in the second of multiple statements,
+//     the range must be inside that statement's bytes, not the first
+//     statement's bytes.
+//
+// Both invariants are load-bearing: an agent applies the fix by
+// slicing sql[Range.Start:Range.End] and replacing it. A wrong offset
+// corrupts the SQL.
+func TestCheckColumnNamesSuggestionRange(t *testing.T) {
+	cat := usersAndOrdersCatalog(t)
+	tests := []struct {
+		name               string
+		sql                string
+		expectedRangeStart int
+		expectedRangeEnd   int
+		expectedToken      string
+	}{
+		{
+			name:               "multiple occurrences pin range to first",
+			sql:                "SELECT nme FROM users WHERE nme = 'x'",
+			expectedRangeStart: 7,
+			expectedRangeEnd:   10,
+			expectedToken:      "nme",
+		},
+		{
+			name:               "typo in second statement uses second-statement offset",
+			sql:                "SELECT id FROM users; SELECT nme FROM users",
+			expectedRangeStart: 29,
+			expectedRangeEnd:   32,
+			expectedToken:      "nme",
+		},
+		{
+			// The bad-qualifier site routes through reportFor with the
+			// qualifier as both dedup key and misspelled token. A
+			// regression that mistakenly passes ref.name would point
+			// the range at "id" (bytes 12-14) and an agent applying
+			// the suggestion would corrupt the SQL into "users.users".
+			name:               "bad qualifier targets qualifier bytes, not column bytes",
+			sql:                "SELECT usrs.id FROM users",
+			expectedRangeStart: 7,
+			expectedRangeEnd:   11,
+			expectedToken:      "usrs",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stmts, err := parser.Parse(tc.sql)
+			require.NoError(t, err)
+			errs := CheckColumnNames(stmts, tc.sql, cat)
+			require.Len(t, errs, 1)
+			require.NotEmpty(t, errs[0].Suggestions)
+			require.Equal(t, tc.expectedRangeStart, errs[0].Suggestions[0].Range.Start)
+			require.Equal(t, tc.expectedRangeEnd, errs[0].Suggestions[0].Range.End)
+			// Sanity: the byte slice the agent would replace equals
+			// the misspelled token verbatim.
+			require.Equal(t, tc.expectedToken,
+				tc.sql[errs[0].Suggestions[0].Range.Start:errs[0].Suggestions[0].Range.End])
+		})
+	}
+}

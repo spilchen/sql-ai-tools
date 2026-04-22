@@ -104,7 +104,9 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 				return envelopeResult(env)
 			}
 			schemawarn.Append(&env, cat)
-			if nameErrs := semcheck.CheckTableNames(stmts, sql, cat); len(nameErrs) > 0 {
+			nameErrs := semcheck.CheckTableNames(stmts, sql, cat)
+			nameErrs = append(nameErrs, semcheck.CheckColumnNames(stmts, sql, cat)...)
+			if len(nameErrs) > 0 {
 				env.Errors = append(env.Errors, nameErrs...)
 				return envelopeResult(env)
 			}

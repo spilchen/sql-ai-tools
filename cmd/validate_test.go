@@ -140,6 +140,67 @@ func TestValidateCmdJSONError(t *testing.T) {
 	require.Equal(t, 11, diagErr.Position.ByteOffset)
 }
 
+// TestValidateCmdSuggestionsJSON verifies that name-resolution errors
+// surface structured suggestions through the JSON envelope. Anchors
+// the end-to-end wiring of #15: semcheck attaches Suggestions, the
+// envelope serializes the field with the expected replacement and
+// byte range.
+func TestValidateCmdSuggestionsJSON(t *testing.T) {
+	dir := t.TempDir()
+	schema := writeFile(t, dir, "schema.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY, name TEXT);\n")
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--output", "json",
+		"--schema", schema,
+		"-e", "SELECT nme FROM users",
+	})
+
+	require.ErrorIs(t, root.Execute(), output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 1)
+	require.Equal(t, "42703", env.Errors[0].Code)
+	require.NotEmpty(t, env.Errors[0].Suggestions)
+	first := env.Errors[0].Suggestions[0]
+	require.Equal(t, "name", first.Replacement)
+	require.Equal(t, 7, first.Range.Start)
+	require.Equal(t, 10, first.Range.End)
+	require.Equal(t, "levenshtein_distance_1", first.Reason)
+}
+
+// TestValidateCmdSuggestionsText verifies that text-mode rendering
+// prints "did you mean: X" lines under errors. Locks in the renderer
+// tweak so a future refactor cannot silently drop the field.
+func TestValidateCmdSuggestionsText(t *testing.T) {
+	dir := t.TempDir()
+	schema := writeFile(t, dir, "schema.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY, name TEXT);\n")
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--schema", schema,
+		"-e", "SELECT nme FROM users",
+	})
+
+	require.ErrorIs(t, root.Execute(), output.ErrRendered)
+	// Lock both the replacement and the percentage format. A future
+	// refactor that drops the "(NN% confidence)" suffix or shifts
+	// rounding (e.g. removing the +0.5 bias) would silently change
+	// every text-mode user's output without this assertion.
+	require.Contains(t, stdout.String(), "did you mean: name (75% confidence)")
+}
+
 // TestValidateCmdExprFlag verifies the -e flag path.
 func TestValidateCmdExprFlag(t *testing.T) {
 	root := newRootCmd()
