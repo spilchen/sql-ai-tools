@@ -60,6 +60,18 @@ make lint
 make test
 ```
 
+```bash
+make test-integration
+```
+
+`make test-integration` runs the build-tagged integration suite. The
+tests `t.Skip` cleanly when no cockroach binary is reachable, so this
+step is safe to run on a machine that has not installed cockroach. Set
+`COCKROACH_BIN=/path/to/cockroach` (or `CRDB_TEST_DSN=postgres://...`)
+to actually exercise the integration suite — these tests are
+intentionally not in CI, so the dev-loop is the place that catches
+regressions in cluster-touching code.
+
 ### 1b. Handle failures
 
 If any command fails:
@@ -231,6 +243,13 @@ make lint
 ```bash
 make test
 ```
+
+```bash
+make test-integration
+```
+
+(Same notes as Step 1a apply: integration tests skip cleanly without
+`COCKROACH_BIN` / `CRDB_TEST_DSN`.)
 
 If `make fmt` modified any files, stage and amend before proceeding:
 
