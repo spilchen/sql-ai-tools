@@ -38,6 +38,21 @@ type ClusterInfo struct {
 	Version   string `json:"version"`
 }
 
+// ExplainResult is the structured form of a default `EXPLAIN <stmt>`.
+//
+// Header captures the leading `key: value` rows that appear before the
+// operator tree (typically distribution and vectorized). Plan is the
+// parsed operator forest. RawRows is the original tabular output the
+// cluster returned, retained so the CLI text mode can render the plan
+// exactly as `cockroach sql` would and so agents can re-parse if they
+// need to. ExplainResult is only constructed on the success path; any
+// failure (query, scan, parse) returns the zero value plus an error.
+type ExplainResult struct {
+	Header  map[string]string `json:"header,omitempty"`
+	Plan    []PlanNode        `json:"plan"`
+	RawRows []string          `json:"raw_rows"`
+}
+
 // Manager manages a lazy pgwire connection to a CockroachDB cluster.
 // It stores a DSN at construction time and defers the actual TCP
 // handshake until the first method that needs a live connection.
@@ -81,6 +96,64 @@ func (m *Manager) Ping(ctx context.Context) (ClusterInfo, error) {
 		return ClusterInfo{}, fmt.Errorf("query cluster info: %w", err)
 	}
 	return info, nil
+}
+
+// Explain runs `EXPLAIN <sql>` against the cluster and returns the
+// parsed plan tree alongside the raw tabular output.
+//
+// EXPLAIN (without ANALYZE) does not execute the wrapped statement, so
+// no read-only safety wrapper is applied here; the dedicated allowlist
+// (issue #21) layers on top. Cluster errors (syntax in the wrapped
+// statement, perm denied, etc.) are returned wrapped; callers surface
+// them as generic envelope errors today. SQLSTATE-aware enrichment for
+// pgwire errors is a future enhancement, not a current contract.
+//
+// On any query/scan/parse failure after a successful connect, the
+// underlying connection is closed and the Manager reverts to its
+// pre-connect state, mirroring Ping's recovery contract.
+func (m *Manager) Explain(ctx context.Context, sql string) (ExplainResult, error) {
+	if err := m.connect(ctx); err != nil {
+		return ExplainResult{}, err
+	}
+
+	result, err := m.runExplain(ctx, sql)
+	if err != nil {
+		m.conn.Close(ctx) //nolint:errcheck // best-effort cleanup
+		m.conn = nil
+		return ExplainResult{}, err
+	}
+	return result, nil
+}
+
+// runExplain is the inner half of Explain that owns the query/scan/parse
+// pipeline. Splitting it out lets Explain centralize the connection
+// recovery: any error returned here triggers the same close-and-nil
+// sequence in the caller, so the three failure modes (Query, Scan,
+// rows.Err, parse) cannot drift apart.
+func (m *Manager) runExplain(ctx context.Context, sql string) (ExplainResult, error) {
+	rows, err := m.conn.Query(ctx, "EXPLAIN "+sql)
+	if err != nil {
+		return ExplainResult{}, fmt.Errorf("run EXPLAIN: %w", err)
+	}
+	defer rows.Close()
+
+	var raw []string
+	for rows.Next() {
+		var info string
+		if err := rows.Scan(&info); err != nil {
+			return ExplainResult{}, fmt.Errorf("scan EXPLAIN row: %w", err)
+		}
+		raw = append(raw, info)
+	}
+	if err := rows.Err(); err != nil {
+		return ExplainResult{}, fmt.Errorf("read EXPLAIN rows: %w", err)
+	}
+
+	header, plan, err := parseExplainTree(raw)
+	if err != nil {
+		return ExplainResult{}, fmt.Errorf("parse EXPLAIN output: %w", err)
+	}
+	return ExplainResult{Header: header, Plan: plan, RawRows: raw}, nil
 }
 
 // Close closes the underlying connection if one was established.

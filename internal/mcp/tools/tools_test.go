@@ -34,6 +34,62 @@ func requireEnvelope(t *testing.T, res *mcpgo.CallToolResult) output.Envelope {
 	return env
 }
 
+// TestExplainSQLHandlerParameterValidation covers the tool-level error
+// path for explain_sql. Cluster round-trips are not exercised here
+// because the handler does not gain new logic beyond parameter
+// validation and conn.Manager wiring; an end-to-end smoke is documented
+// in the issue verification plan.
+func TestExplainSQLHandlerParameterValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "missing both params", args: map[string]any{}},
+		{name: "missing dsn", args: map[string]any{"sql": "SELECT 1"}},
+		{name: "missing sql", args: map[string]any{"dsn": "postgres://h:26257/db"}},
+		{name: "empty sql", args: map[string]any{"sql": "", "dsn": "postgres://h:26257/db"}},
+		{name: "empty dsn", args: map[string]any{"sql": "SELECT 1", "dsn": ""}},
+		{name: "wrong type sql", args: map[string]any{"sql": 1, "dsn": "postgres://h:26257/db"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := ExplainSQLHandler(testParserVersion)
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = tc.args
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, res)
+			require.True(t, res.IsError, "expected tool-level error")
+		})
+	}
+}
+
+// TestExplainSQLHandlerConnectionFailureSurfacesEnvelopeError verifies
+// that when the cluster is unreachable, the handler returns a successful
+// MCP tool result whose envelope carries the error — not a tool-level
+// error. This is the discipline documented in tools.go: SQL/cluster
+// problems live in the envelope so agents can read them uniformly.
+func TestExplainSQLHandlerConnectionFailureSurfacesEnvelopeError(t *testing.T) {
+	handler := ExplainSQLHandler(testParserVersion)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql": "SELECT 1",
+		// Unreachable host — connection will fail before any query.
+		"dsn": "postgres://nope:1/db?connect_timeout=1",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+	require.Equal(t, output.TierConnected, env.Tier)
+	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus,
+		"failed connect must leave status disconnected")
+	require.Len(t, env.Errors, 1)
+	require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
+}
+
 func TestExtractSQL(t *testing.T) {
 	tests := []struct {
 		name        string
