@@ -56,12 +56,14 @@ the error includes the SQLSTATE code, severity, message, and source
 position (line/column/byte offset). Input is read from the -e flag
 (inline SQL), a positional file argument, or stdin.
 
-When --schema FILE is supplied (repeatable), table references in
-SELECT/INSERT/UPDATE/DELETE statements are checked against the loaded
-catalog and unknown tables are reported as 42P01 errors with an
-"available_tables" context list. Without --schema, name resolution is
-skipped and a capability_required warning is added to the envelope so
-agents can tell that the check did not run.
+When --schema FILE is supplied (repeatable), table and column
+references in SELECT/INSERT/UPDATE/DELETE statements are checked
+against the loaded catalog. Unknown tables are reported as 42P01
+errors with an "available_tables" context list; unknown columns as
+42703 errors with "available_columns"; ambiguous unqualified refs
+as 42702. Without --schema, name resolution is skipped and a
+capability_required warning is added to the envelope so agents can
+tell that the check did not run.
 
 If no -e and no file argument are given and a crdb-sql.yaml config is
 present in the working directory, validate iterates every query file
@@ -117,7 +119,9 @@ matched by the config and reports per-file results in one envelope.`,
 					return renderSchemaLoadError(r, baseEnv, err)
 				}
 				appendSchemaWarnings(&baseEnv, cat)
-				if nameErrs := semcheck.CheckTableNames(stmts, sql, cat); len(nameErrs) > 0 {
+				nameErrs := semcheck.CheckTableNames(stmts, sql, cat)
+				nameErrs = append(nameErrs, semcheck.CheckColumnNames(stmts, sql, cat)...)
+				if len(nameErrs) > 0 {
 					return renderDiagErrors(r, baseEnv, nameErrs)
 				}
 				checks.NameResolution = validateresult.CheckOK
@@ -144,7 +148,7 @@ matched by the config and reports per-file results in one envelope.`,
 
 	cmd.Flags().StringVarP(&expr, "expression", "e", "", "inline SQL to validate")
 	cmd.Flags().StringArrayVar(&schemaFiles, "schema", nil,
-		"schema SQL file(s) to enable table name resolution (repeatable)")
+		"schema SQL file(s) to enable table and column name resolution (repeatable)")
 
 	return cmd
 }
@@ -279,6 +283,9 @@ func validateQueryFile(path string, cat *catalog.Catalog) (errs []output.Error, 
 	}
 	if cat != nil {
 		for _, e := range semcheck.CheckTableNames(stmts, sql, cat) {
+			fileErrs = append(fileErrs, tagFile(e, path))
+		}
+		for _, e := range semcheck.CheckColumnNames(stmts, sql, cat) {
 			fileErrs = append(fileErrs, tagFile(e, path))
 		}
 	}
