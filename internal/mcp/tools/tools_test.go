@@ -16,6 +16,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/risk"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
+	"github.com/spilchen/sql-ai-tools/internal/validateresult"
 )
 
 const testParserVersion = "v0.26.2"
@@ -234,40 +235,138 @@ func TestParseSQLHandler(t *testing.T) {
 	}
 }
 
+// TestValidateSQLHandlerStampsTargetVersionOnSchemaFilePath locks in
+// the contract that when a client supplies both schemas and
+// target_version, the resolved target is stamped onto the Tier 2
+// envelope. The bug this guards against is a silent drop on the
+// schema_file path when both args are present.
+func TestValidateSQLHandlerStampsTargetVersionOnSchemaFilePath(t *testing.T) {
+	const usersDDL = "CREATE TABLE users (id INT PRIMARY KEY, email TEXT)"
+
+	handler := ValidateSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":            "SELECT id FROM users",
+		"schemas":        []any{map[string]any{"sql": usersDDL}},
+		"target_version": "v25.4",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+	require.Equal(t, output.TierSchemaFile, env.Tier)
+	// resolveTargetVersion canonicalises by stripping the leading "v",
+	// matching the CLI's --target-version handling.
+	require.Equal(t, "25.4", env.TargetVersion,
+		"target_version must be stamped even on the schema_file path")
+}
+
 func TestValidateSQLHandler(t *testing.T) {
+	const usersDDL = "CREATE TABLE users (id INT PRIMARY KEY, email TEXT)"
+
 	tests := []struct {
-		name            string
-		args            map[string]any
-		expectedToolErr bool
-		expectedValid   bool
-		expectedEnvErrs bool
-		expectedCode    string
+		name                   string
+		args                   map[string]any
+		expectedToolErr        bool
+		expectedValid          bool
+		expectedEnvErrs        bool
+		expectedCode           string
+		expectedTier           output.Tier
+		expectedNameResolution validateresult.CheckStatus
+		expectCapabilityWarn   bool
+		expectSchemaWarning    bool
 	}{
 		{
-			name:          "valid SQL",
-			args:          map[string]any{"sql": "SELECT 1"},
-			expectedValid: true,
+			name:                   "valid SQL without schema reports name_resolution skipped",
+			args:                   map[string]any{"sql": "SELECT 1"},
+			expectedValid:          true,
+			expectedTier:           output.TierZeroConfig,
+			expectedNameResolution: validateresult.CheckSkipped,
+			expectCapabilityWarn:   true,
 		},
 		{
 			name:            "syntax error",
 			args:            map[string]any{"sql": "SELECT FROM"},
 			expectedEnvErrs: true,
 			expectedCode:    "42601",
+			expectedTier:    output.TierZeroConfig,
 		},
 		{
 			name:            "type mismatch",
 			args:            map[string]any{"sql": "SELECT 1 + 'hello'"},
 			expectedEnvErrs: true,
+			expectedTier:    output.TierZeroConfig,
 		},
 		{
-			name:          "column ref does not false-positive",
-			args:          map[string]any{"sql": "SELECT a + 1 FROM t"},
-			expectedValid: true,
+			name:                   "column ref does not false-positive",
+			args:                   map[string]any{"sql": "SELECT a + 1 FROM t"},
+			expectedValid:          true,
+			expectedTier:           output.TierZeroConfig,
+			expectedNameResolution: validateresult.CheckSkipped,
+			expectCapabilityWarn:   true,
 		},
 		{
-			name:          "whitespace trimmed",
-			args:          map[string]any{"sql": "  SELECT 1  \n"},
-			expectedValid: true,
+			name:                   "whitespace trimmed",
+			args:                   map[string]any{"sql": "  SELECT 1  \n"},
+			expectedValid:          true,
+			expectedTier:           output.TierZeroConfig,
+			expectedNameResolution: validateresult.CheckSkipped,
+			expectCapabilityWarn:   true,
+		},
+		{
+			name: "schemas present and table resolves",
+			args: map[string]any{
+				"sql":     "SELECT id FROM users",
+				"schemas": []any{map[string]any{"sql": usersDDL}},
+			},
+			expectedValid:          true,
+			expectedTier:           output.TierSchemaFile,
+			expectedNameResolution: validateresult.CheckOK,
+		},
+		{
+			name: "schemas present and table missing yields 42P01",
+			args: map[string]any{
+				"sql":     "SELECT id FROM nope",
+				"schemas": []any{map[string]any{"sql": usersDDL}},
+			},
+			expectedEnvErrs: true,
+			expectedCode:    "42P01",
+			expectedTier:    output.TierSchemaFile,
+		},
+		{
+			name: "malformed schema DDL yields envelope parse error",
+			args: map[string]any{
+				"sql":     "SELECT 1",
+				"schemas": []any{map[string]any{"sql": "CREATE TABLEE bad (id INT)"}},
+			},
+			expectedEnvErrs: true,
+			expectedCode:    "42601",
+			expectedTier:    output.TierSchemaFile,
+		},
+		{
+			name: "duplicate-table schema surfaces schema_warning alongside successful resolution",
+			args: map[string]any{
+				"sql": "SELECT id FROM users",
+				"schemas": []any{
+					map[string]any{"sql": usersDDL},
+					map[string]any{"sql": usersDDL},
+				},
+			},
+			expectedValid:          true,
+			expectedTier:           output.TierSchemaFile,
+			expectedNameResolution: validateresult.CheckOK,
+			expectSchemaWarning:    true,
+		},
+		{
+			name: "empty schemas array still skips name resolution",
+			args: map[string]any{
+				"sql":     "SELECT 1",
+				"schemas": []any{},
+			},
+			expectedValid:          true,
+			expectedTier:           output.TierZeroConfig,
+			expectedNameResolution: validateresult.CheckSkipped,
+			expectCapabilityWarn:   true,
 		},
 		{
 			name:            "missing sql param",
@@ -277,6 +376,14 @@ func TestValidateSQLHandler(t *testing.T) {
 		{
 			name:            "empty sql",
 			args:            map[string]any{"sql": ""},
+			expectedToolErr: true,
+		},
+		{
+			name: "malformed schemas yields tool error",
+			args: map[string]any{
+				"sql":     "SELECT 1",
+				"schemas": "not-an-array",
+			},
 			expectedToolErr: true,
 		},
 	}
@@ -298,7 +405,7 @@ func TestValidateSQLHandler(t *testing.T) {
 
 			env := requireEnvelope(t, res)
 			require.Equal(t, testParserVersion, env.ParserVersion)
-			require.Equal(t, output.TierZeroConfig, env.Tier)
+			require.Equal(t, tc.expectedTier, env.Tier)
 			require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
 
 			if tc.expectedEnvErrs {
@@ -310,15 +417,27 @@ func TestValidateSQLHandler(t *testing.T) {
 				return
 			}
 
-			require.Empty(t, env.Errors)
 			require.NotNil(t, env.Data)
 
-			if tc.expectedValid {
-				var data struct {
-					Valid bool `json:"valid"`
-				}
-				require.NoError(t, json.Unmarshal(env.Data, &data))
-				require.True(t, data.Valid)
+			var result validateresult.Result
+			require.NoError(t, json.Unmarshal(env.Data, &result))
+			require.Equal(t, tc.expectedValid, result.Valid)
+			require.Equal(t, validateresult.CheckOK, result.Checks.Syntax)
+			require.Equal(t, validateresult.CheckOK, result.Checks.TypeCheck)
+			require.Equal(t, tc.expectedNameResolution, result.Checks.NameResolution)
+
+			switch {
+			case tc.expectCapabilityWarn:
+				require.Len(t, env.Errors, 1)
+				require.Equal(t, validateresult.CapabilityRequiredCode, env.Errors[0].Code)
+				require.Equal(t, output.SeverityWarning, env.Errors[0].Severity)
+				require.Equal(t, validateresult.CapabilityNameResolution, env.Errors[0].Context["capability"])
+			case tc.expectSchemaWarning:
+				require.Len(t, env.Errors, 1)
+				require.Equal(t, "schema_warning", env.Errors[0].Code)
+				require.Equal(t, output.SeverityWarning, env.Errors[0].Severity)
+			default:
+				require.Empty(t, env.Errors)
 			}
 		})
 	}

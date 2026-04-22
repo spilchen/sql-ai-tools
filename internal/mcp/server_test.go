@@ -78,7 +78,16 @@ func TestNewServerRegistersTools(t *testing.T) {
 	require.NotNil(t, s)
 	registered := s.ListTools()
 
-	for _, name := range []string{PingToolName, tools.ParseSQLToolName, tools.ValidateSQLToolName, tools.FormatSQLToolName, tools.DetectRiskyQueryToolName, tools.ExplainSQLToolName} {
+	for _, name := range []string{
+		PingToolName,
+		tools.ParseSQLToolName,
+		tools.ValidateSQLToolName,
+		tools.FormatSQLToolName,
+		tools.DetectRiskyQueryToolName,
+		tools.ExplainSQLToolName,
+		tools.ListTablesToolName,
+		tools.DescribeTableToolName,
+	} {
 		require.Contains(t, registered, name)
 		require.NotNil(t, registered[name].Handler,
 			"%s must be registered with a non-nil handler", name)
