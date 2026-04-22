@@ -23,6 +23,15 @@ import (
 // on it without parsing the message.
 const unknownTableCode = "42P01"
 
+// unknownColumnCode is the SQLSTATE for "undefined_column" (PG 42703).
+// ambiguousColumnCode is the SQLSTATE for "ambiguous_column" (PG 42702),
+// emitted when an unqualified ref resolves to columns in two or more
+// in-scope sources.
+const (
+	unknownColumnCode   = "42703"
+	ambiguousColumnCode = "42702"
+)
+
 // CheckTableNames walks every statement in stmts and reports table
 // references that do not resolve in cat. CTE names from WITH clauses
 // and table aliases are added to a per-statement scope so they are not
@@ -33,8 +42,9 @@ const unknownTableCode = "42P01"
 // two. The first reference's source position is reported.
 //
 // fullSQL is the original SQL text used to compute 1-based line/column
-// positions. cat must be non-nil; the caller decides whether to call
-// this based on whether a catalog is available.
+// positions. A nil cat or empty stmts returns nil with no work; the
+// catalog-required wiring lives in the caller (cmd/validate.go), which
+// only invokes this when --schema was supplied.
 func CheckTableNames(stmts statements.Statements, fullSQL string, cat *catalog.Catalog) []output.Error {
 	if cat == nil || len(stmts) == 0 {
 		return nil
@@ -262,4 +272,897 @@ func withClause(stmt tree.Statement) *tree.With {
 		return s.With
 	}
 	return nil
+}
+
+// CheckColumnNames walks every statement in stmts and reports column
+// references that do not resolve in the per-statement table scope.
+//
+// Each query block (SELECT/INSERT/UPDATE/DELETE) gets a scope built
+// from its FROM/JOIN/USING/INSERT-target/UPDATE-target sources. Every
+// source is one of:
+//
+//   - a catalog table — its columns are known and refs against it are
+//     checked;
+//   - an unresolved table (CheckTableNames already flagged it), CTE
+//     name, subquery in FROM, or numeric TableRef — recorded with
+//     columns=nil so refs against it are silently skipped, avoiding a
+//     cascade of false-positive unknown_column errors. CTE/subquery
+//     column inference is deferred to issue #98.
+//
+// Subqueries appearing in expressions (WHERE, SELECT-list, HAVING,
+// ...) push a child scope so correlated refs to the outer scope still
+// resolve.
+//
+// Errors are deduplicated by (qualifier, column) across the whole
+// input — the same missing column referenced from two statements
+// produces one error, not two. The first reference's source position
+// is reported. fullSQL is the original SQL text used to compute
+// 1-based line/column positions. A nil cat or empty stmts returns
+// nil with no work; the catalog-required wiring lives in the caller
+// (cmd/validate.go), which only invokes this when --schema was
+// supplied.
+func CheckColumnNames(stmts statements.Statements, fullSQL string, cat *catalog.Catalog) []output.Error {
+	if cat == nil || len(stmts) == 0 {
+		return nil
+	}
+
+	var errs []output.Error
+	seen := make(map[string]struct{})
+
+	stmtStart := 0
+	for i := range stmts {
+		stmt := stmts[i].AST
+		if stmt == nil {
+			continue
+		}
+		stmtSQL := stmts[i].SQL
+		stmtEnd := stmtStart + len(stmtSQL)
+		if rel := strings.Index(fullSQL[stmtStart:], stmtSQL); rel >= 0 {
+			stmtStart += rel
+			stmtEnd = stmtStart + len(stmtSQL)
+		}
+
+		c := &columnChecker{
+			cat:       cat,
+			fullSQL:   fullSQL,
+			stmtStart: stmtStart,
+			stmtEnd:   stmtEnd,
+			seen:      seen,
+			errs:      &errs,
+		}
+		c.checkStatement(stmt)
+
+		stmtStart = stmtEnd
+	}
+	return errs
+}
+
+// columnChecker holds the per-statement state for column resolution.
+//
+// Lifecycle: one checker per statement; created by CheckColumnNames
+// and discarded once checkStatement returns. seen is shared across
+// statements: Go maps are reference-typed, so the same map header
+// copied into each checker dedups across the whole input. errs is a
+// pointer to the caller's accumulator slice. stmtStart/stmtEnd bound
+// the byte range searched by positionFor, mirroring tableNameVisitor.
+type columnChecker struct {
+	cat       *catalog.Catalog
+	fullSQL   string
+	stmtStart int
+	stmtEnd   int
+	seen      map[string]struct{}
+	errs      *[]output.Error
+}
+
+// scope is a column-resolution frame for a single query block. Each
+// SELECT/INSERT/UPDATE/DELETE creates a new scope linked to its
+// enclosing scope via parent so correlated refs walk the chain.
+//
+// sources holds the FROM/JOIN/CTE entries visible in this scope. The
+// list preserves source order so available_columns lists in error
+// payloads appear in the order the user wrote them.
+//
+// selectAliases is populated by SELECT-list parsing for use by GROUP
+// BY / HAVING / ORDER BY: an unqualified ref that matches an alias is
+// treated as resolved (skipped) to avoid false-positive unknown_column
+// errors for SELECT a + b AS sum FROM t ORDER BY sum.
+type scope struct {
+	parent        *scope
+	sources       []source
+	selectAliases map[string]struct{}
+}
+
+// source is one entry in a scope. alias is the name a qualified
+// reference must use — the explicit alias when present, otherwise the
+// bare table name; empty alias marks a placeholder that contributes
+// only to cascade suppression (no qualified ref can match it).
+//
+// Invariant: columns == nil means "columns unknown — skip refs against
+// this source". An empty-but-non-nil slice would mean "the catalog says
+// this table has no columns", which is a different (and currently
+// impossible) state. Callers MUST use columnsKnown() to test, never
+// len(columns) == 0 — the project-wide convention to prefer len-checks
+// over nil-checks does not apply to this field.
+type source struct {
+	alias   string
+	columns []string
+}
+
+// columnsKnown reports whether the source has authoritative columns.
+// All resolution paths gate on this rather than testing columns
+// directly, so the nil-vs-empty distinction lives in one place.
+func (s source) columnsKnown() bool {
+	return s.columns != nil
+}
+
+// unknownSource builds a placeholder for any source whose columns we
+// cannot enumerate: CTE names, subqueries in FROM, numeric TableRefs,
+// catalog-missing tables, ROWS FROM(...), and set-op (UNION/etc.)
+// results. Refs against the alias are silently skipped, and any
+// scope frame containing one suppresses unknown_column for unmatched
+// unqualified refs (the ref might belong to the unknown source).
+func unknownSource(alias string) source {
+	return source{alias: alias, columns: nil}
+}
+
+// columnRef is a single resolved-or-not column reference extracted
+// from the AST. qualifier is the table prefix ("t" in t.c) or empty
+// for unqualified refs. name is the bare column identifier. They are
+// used for both lookup (via aliasMatch / equalFold) and dedup keying.
+type columnRef struct {
+	qualifier string
+	name      string
+}
+
+// checkStatement dispatches on the top-level statement type. Each
+// supported statement constructs its own root scope (no parent) since
+// this is the outermost block; nested SELECTs in subqueries push
+// child scopes via walkExpr.
+func (c *columnChecker) checkStatement(stmt tree.Statement) {
+	switch s := stmt.(type) {
+	case *tree.Select:
+		c.checkSelect(s, nil)
+	case *tree.Insert:
+		c.checkInsert(s, nil)
+	case *tree.Update:
+		c.checkUpdate(s, nil)
+	case *tree.Delete:
+		c.checkDelete(s, nil)
+	}
+}
+
+// checkSelect handles a top-level Select node. CTE names from the
+// WITH clause are pushed onto a dedicated parent frame so they are
+// visible both to the inner SelectStatement and to any FROM-subquery
+// inside it (CTEs and FROM-sibling sources live in different layers).
+// Refs against CTE aliases are silently skipped because their columns
+// are unknown — deferred to #98. ORDER BY and LIMIT walk in the same
+// scope as the inner SelectClause so they see SELECT-list aliases.
+//
+// Set-op and ParenSelect results are recorded as unknown placeholder
+// sources by checkSelectStatement so ORDER BY refs against the
+// combined columns are silently skipped rather than false-positived;
+// VALUES blocks have no projection labels and do not get a
+// placeholder.
+func (c *columnChecker) checkSelect(sel *tree.Select, parent *scope) {
+	parent = c.pushCTEs(parent, sel.With)
+	sc := &scope{parent: parent}
+	c.checkSelectStatement(sel.Select, sc)
+	for _, item := range sel.OrderBy {
+		c.walkExpr(item.Expr, sc)
+	}
+	if sel.Limit != nil {
+		c.walkExpr(sel.Limit.Count, sc)
+		c.walkExpr(sel.Limit.Offset, sc)
+	}
+}
+
+// checkSelectStatement dispatches on the SelectStatement variants the
+// parser produces. Set operations (UNION/INTERSECT/EXCEPT) check each
+// branch independently in the parent scope; the branches do not share
+// FROM scope but do share the enclosing CTE/correlation scope.
+//
+// For set ops and ParenSelect, the result has columns the caller's
+// ORDER BY/LIMIT may reference. Inferring those columns requires #98,
+// so we append an unknown placeholder to sc — that suppresses
+// unknown_column for unmatched refs without falsely accepting them.
+func (c *columnChecker) checkSelectStatement(s tree.SelectStatement, sc *scope) {
+	switch t := s.(type) {
+	case *tree.SelectClause:
+		c.checkSelectClause(t, sc)
+	case *tree.UnionClause:
+		c.checkSelect(t.Left, sc.parent)
+		c.checkSelect(t.Right, sc.parent)
+		sc.sources = append(sc.sources, unknownSource(""))
+	case *tree.ParenSelect:
+		c.checkSelect(t.Select, sc.parent)
+		sc.sources = append(sc.sources, unknownSource(""))
+	case *tree.ValuesClause:
+		for _, row := range t.Rows {
+			for _, expr := range row {
+				c.walkExpr(expr, sc)
+			}
+		}
+	}
+}
+
+// checkSelectClause builds the FROM scope, collects SELECT-list
+// aliases, then walks every column-bearing clause in this block.
+// Order matters: aliases must be in scope before HAVING/GROUP BY
+// walk, and FROM sources before any expression walk.
+func (c *columnChecker) checkSelectClause(sel *tree.SelectClause, sc *scope) {
+	for _, te := range sel.From.Tables {
+		c.addTableExpr(sc, te)
+	}
+	if sc.selectAliases == nil {
+		sc.selectAliases = make(map[string]struct{})
+	}
+	for _, se := range sel.Exprs {
+		if se.As != "" {
+			sc.selectAliases[strings.ToLower(string(se.As))] = struct{}{}
+		}
+	}
+	for _, se := range sel.Exprs {
+		c.walkExpr(se.Expr, sc)
+	}
+	if sel.Where != nil {
+		c.walkExpr(sel.Where.Expr, sc)
+	}
+	for _, gb := range sel.GroupBy {
+		c.walkExpr(gb, sc)
+	}
+	if sel.Having != nil {
+		c.walkExpr(sel.Having.Expr, sc)
+	}
+}
+
+// checkInsert handles INSERT. The target column list (INSERT INTO t
+// (a, b) ...) is checked against the target table; the source rows
+// are checked as a Select in a fresh scope so they cannot see the
+// target's columns (which is correct: VALUES (...) cannot reference
+// the target). ON CONFLICT and RETURNING extensions are walked
+// against the target scope.
+func (c *columnChecker) checkInsert(ins *tree.Insert, parent *scope) {
+	parent = c.pushCTEs(parent, ins.With)
+	sc := &scope{parent: parent}
+
+	target := c.targetSource(ins.Table)
+	sc.sources = append(sc.sources, target)
+	if target.columnsKnown() {
+		for _, name := range ins.Columns {
+			c.resolveRef(columnRef{qualifier: target.alias, name: string(name)}, sc)
+		}
+	}
+	// When the target's columns are unknown (e.g. INSERT INTO [123 AS
+	// t] (a, b) ...), skip ins.Columns resolution entirely — claiming
+	// "a does not exist" against an unresolvable target would be a
+	// false positive.
+
+	if ins.Rows != nil {
+		// Source rows are parented to the CTE frame, not sc itself,
+		// so VALUES (...) cannot reference target columns. CTEs from
+		// ins.With remain visible because pushCTEs put them on
+		// `parent`.
+		c.checkSelect(ins.Rows, parent)
+	}
+
+	if ins.OnConflict != nil {
+		c.walkOnConflict(ins.OnConflict, target, sc)
+	}
+	c.walkReturning(ins.Returning, sc)
+}
+
+// checkUpdate handles UPDATE. The target table is added to the scope
+// so SET-LHS column refs and WHERE/SET-RHS expressions can resolve
+// against it. Update.From (the optional FROM clause for joins) adds
+// extra sources; RETURNING is walked against the same scope.
+func (c *columnChecker) checkUpdate(upd *tree.Update, parent *scope) {
+	parent = c.pushCTEs(parent, upd.With)
+	sc := &scope{parent: parent}
+	sc.sources = append(sc.sources, c.targetSource(upd.Table))
+	for _, te := range upd.From {
+		c.addTableExpr(sc, te)
+	}
+	for _, ue := range upd.Exprs {
+		for _, name := range ue.Names {
+			c.resolveRef(columnRef{name: string(name)}, sc)
+		}
+		c.walkExpr(ue.Expr, sc)
+	}
+	if upd.Where != nil {
+		c.walkExpr(upd.Where.Expr, sc)
+	}
+	c.walkReturning(upd.Returning, sc)
+}
+
+// checkDelete handles DELETE. The target table joins the scope along
+// with any USING sources (DELETE FROM users USING orders WHERE ...).
+// RETURNING is walked against the same scope.
+func (c *columnChecker) checkDelete(del *tree.Delete, parent *scope) {
+	parent = c.pushCTEs(parent, del.With)
+	sc := &scope{parent: parent}
+	sc.sources = append(sc.sources, c.targetSource(del.Table))
+	for _, te := range del.Using {
+		c.addTableExpr(sc, te)
+	}
+	if del.Where != nil {
+		c.walkExpr(del.Where.Expr, sc)
+	}
+	c.walkReturning(del.Returning, sc)
+}
+
+// walkOnConflict handles INSERT's ON CONFLICT (target_cols) DO UPDATE
+// SET ... WHERE ... clause. Conflict-target columns must exist on the
+// target table; the SET expressions, predicate, and arbiter predicate
+// are walked against an inner scope that adds the special "excluded"
+// pseudo-source (whose columns are unknown — refs to excluded.col are
+// silently skipped). The target itself is already in sc, so the inner
+// scope only adds excluded; that avoids duplicating target and tripping
+// the ambiguity check.
+//
+// SET LHS column names are resolved directly against the target rather
+// than via resolveRef, so the cascade-suppression triggered by
+// excluded's unknown columns does not also hide a real typo on the
+// LHS — provided the target's columns are known. When the target is
+// unresolvable (e.g. a TableRef), every ref in the ON CONFLICT body is
+// silently skipped along with the rest, by the same cascade-
+// suppression rule that already protects unknown FROM sources.
+func (c *columnChecker) walkOnConflict(oc *tree.OnConflict, target source, sc *scope) {
+	if target.columnsKnown() {
+		for _, elem := range oc.Columns {
+			c.resolveRef(columnRef{qualifier: target.alias, name: string(elem)}, sc)
+		}
+	}
+	innerScope := &scope{
+		parent:  sc,
+		sources: []source{unknownSource("excluded")},
+	}
+	for _, ue := range oc.Exprs {
+		if target.columnsKnown() {
+			for _, name := range ue.Names {
+				c.resolveRef(columnRef{qualifier: target.alias, name: string(name)}, sc)
+			}
+		}
+		c.walkExpr(ue.Expr, innerScope)
+	}
+	if oc.Where != nil {
+		c.walkExpr(oc.Where.Expr, innerScope)
+	}
+	c.walkExpr(oc.ArbiterPredicate, innerScope)
+}
+
+// walkReturning resolves column refs in a RETURNING clause against
+// sc. RETURNING permits both bare column refs and arbitrary
+// expressions, so each ReturningExpr's expression is walked normally.
+// A nil or no-op clause (the common case) is a no-op.
+func (c *columnChecker) walkReturning(ret tree.ReturningClause, sc *scope) {
+	exprs, ok := ret.(*tree.ReturningExprs)
+	if !ok {
+		return
+	}
+	for _, se := range *exprs {
+		c.walkExpr(se.Expr, sc)
+	}
+}
+
+// pushCTEs returns parent unchanged when with is nil; otherwise it
+// returns a new frame whose parent is the original parent and whose
+// sources are one unknownSource per CTE alias. The CTE frame sits
+// above the per-statement scope so that both the SELECT body and any
+// FROM-subquery within it can resolve refs against the CTE alias via
+// the parent chain.
+//
+// Each CTE body is also walked here so refs inside the body (e.g.
+// "WITH x AS (SELECT bad FROM users)") are checked against their own
+// scope rather than silently skipped.
+func (c *columnChecker) pushCTEs(parent *scope, with *tree.With) *scope {
+	if with == nil || len(with.CTEList) == 0 {
+		return parent
+	}
+	frame := &scope{parent: parent}
+	for _, cte := range with.CTEList {
+		if cte == nil {
+			continue
+		}
+		name := string(cte.Name.Alias)
+		if name != "" {
+			// TODO(#98): infer columns from cte.Stmt and cte.Name.Cols.
+			frame.sources = append(frame.sources, unknownSource(name))
+		}
+		if cte.Stmt != nil {
+			c.checkStatement(cte.Stmt)
+		}
+	}
+	return frame
+}
+
+// targetSource resolves the table appearing in the target slot of an
+// INSERT/UPDATE/DELETE. Returns an unknownSource (with the alias the
+// user wrote, when available) for non-plain-table targets such as
+// numeric TableRefs — refs against those targets are then suppressed
+// instead of falsely reported.
+func (c *columnChecker) targetSource(te tree.TableExpr) source {
+	switch t := te.(type) {
+	case *tree.AliasedTableExpr:
+		alias := string(t.As.Alias)
+		if name, ok := tableNameOf(t.Expr); ok {
+			if alias == "" {
+				alias = name
+			}
+			return c.sourceForTable(alias, name)
+		}
+		return unknownSource(alias)
+	case *tree.TableName:
+		return c.sourceForTable(t.Table(), t.Table())
+	case *tree.ParenTableExpr:
+		return c.targetSource(t.Expr)
+	}
+	return unknownSource("")
+}
+
+// sourceForTable looks up name in the catalog and returns a source
+// with the discovered columns. When the table is missing the source
+// is recorded as unknown so refs against it are skipped — the missing
+// table is already flagged by CheckTableNames.
+func (c *columnChecker) sourceForTable(alias, name string) source {
+	tbl, ok := c.cat.Table(name)
+	if !ok {
+		return unknownSource(alias)
+	}
+	cols := make([]string, len(tbl.Columns))
+	for i, col := range tbl.Columns {
+		cols[i] = col.Name
+	}
+	return source{alias: alias, columns: cols}
+}
+
+// addTableExpr walks a FROM/JOIN/USING TableExpr, appending one
+// source per table-shaped leaf. JOIN ON conditions are walked in the
+// already-extended scope so both sides are visible to the predicate;
+// JOIN USING column names are resolved against that same scope so
+// USING (id) catches typos like USING (idd). Subqueries and other
+// non-table sources are recorded as unknownSource so refs against
+// their alias are skipped (deferred to #98).
+func (c *columnChecker) addTableExpr(sc *scope, te tree.TableExpr) {
+	switch t := te.(type) {
+	case *tree.AliasedTableExpr:
+		alias := string(t.As.Alias)
+		switch inner := t.Expr.(type) {
+		case *tree.TableName:
+			name := inner.Table()
+			if alias == "" {
+				alias = name
+			}
+			sc.sources = append(sc.sources, c.sourceForTable(alias, name))
+		case *tree.Subquery:
+			// The body is recursed with sc.parent (not sc) so it sees
+			// neither its own alias (about to be appended below) nor
+			// any sibling FROM items — non-LATERAL FROM subqueries
+			// can only reference the enclosing query.
+			c.checkSelectStatement(inner.Select, &scope{parent: sc.parent})
+			// TODO(#98): infer columns from inner.Select's projection
+			// list (and t.As.Cols if explicit).
+			sc.sources = append(sc.sources, unknownSource(alias))
+		case *tree.ParenTableExpr:
+			c.addTableExpr(sc, &tree.AliasedTableExpr{Expr: tree.StripTableParens(inner), As: t.As})
+		default:
+			// TableRef, RowsFromExpr, StatementSource, and any other
+			// future TableExpr shapes land here. Record the alias as
+			// unknown so qualified refs against it resolve to "skip"
+			// rather than "missing FROM-clause entry".
+			sc.sources = append(sc.sources, unknownSource(alias))
+		}
+	case *tree.JoinTableExpr:
+		c.addTableExpr(sc, t.Left)
+		c.addTableExpr(sc, t.Right)
+		switch cond := t.Cond.(type) {
+		case *tree.OnJoinCond:
+			c.walkExpr(cond.Expr, sc)
+		case *tree.UsingJoinCond:
+			// USING (col) is the join condition itself, not an
+			// expression ref — col existing in both joined sides is
+			// the whole point, so the unqualified-ambiguity check
+			// would always fire and is wrong here. Just verify the
+			// column appears in some in-scope source (or that scope
+			// has an unknown source that might contain it); flag it
+			// if neither holds.
+			for _, name := range cond.Cols {
+				colName := string(name)
+				if !columnExistsInScope(sc, colName) {
+					c.report(columnRef{name: colName}, output.Error{
+						Code:     unknownColumnCode,
+						Severity: output.SeverityError,
+						Message:  fmt.Sprintf("column %q does not exist", colName),
+						Category: diag.CategoryUnknownColumn,
+						Context: map[string]any{
+							"available_columns": availableColumns(sc),
+						},
+					})
+				}
+			}
+		}
+	case *tree.TableName:
+		sc.sources = append(sc.sources, c.sourceForTable(t.Table(), t.Table()))
+	case *tree.ParenTableExpr:
+		c.addTableExpr(sc, t.Expr)
+	default:
+		// Bare Subquery / RowsFromExpr / StatementSource without an
+		// AliasedTableExpr wrapper. No alias to record; just recurse
+		// into anything that might contain refs.
+		if sub, ok := te.(*tree.Subquery); ok && sub.Select != nil {
+			c.checkSelectStatement(sub.Select, &scope{parent: sc.parent})
+		}
+		sc.sources = append(sc.sources, unknownSource(""))
+	}
+}
+
+// walkExpr descends through an expression tree, resolving every
+// column reference against sc and recursing into any nested
+// subqueries with sc as parent. Stars (* and t.*) are skipped — they
+// are not column-name references in the resolution sense.
+func (c *columnChecker) walkExpr(expr tree.Expr, sc *scope) {
+	if expr == nil {
+		return
+	}
+	v := &exprVisitor{checker: c, scope: sc}
+	tree.WalkExprConst(v, expr)
+}
+
+// exprVisitor is an Expr-tree visitor wired to the checker. It is
+// allocated fresh per walkExpr call so the checker/scope it carries
+// match the current frame.
+type exprVisitor struct {
+	checker *columnChecker
+	scope   *scope
+}
+
+var _ tree.Visitor = (*exprVisitor)(nil)
+
+func (v *exprVisitor) VisitPre(expr tree.Expr) (bool, tree.Expr) {
+	switch n := expr.(type) {
+	case *tree.UnresolvedName:
+		v.checker.resolveRef(refFromUnresolved(n), v.scope)
+		return false, expr
+	case *tree.ColumnItem:
+		v.checker.resolveRef(refFromColumnItem(n), v.scope)
+		return false, expr
+	case *tree.Subquery:
+		// Push a child scope so correlated refs (e.g. EXISTS (SELECT
+		// 1 FROM o WHERE o.x = outer.y)) walk back to outer via the
+		// parent pointer. Returning false stops WalkExprConst from
+		// re-entering the subquery via Subquery.Walk.
+		if n.Select != nil {
+			v.checker.checkSelectStatement(n.Select, &scope{parent: v.scope})
+		}
+		return false, expr
+	case tree.UnqualifiedStar, *tree.AllColumnsSelector:
+		return false, expr
+	}
+	return true, expr
+}
+
+func (v *exprVisitor) VisitPost(expr tree.Expr) tree.Expr { return expr }
+
+// refFromUnresolved extracts the column qualifier and name from an
+// UnresolvedName. UnresolvedName.Parts is stored in reverse order
+// (column, table, schema, catalog), so Parts[0] is always the column
+// and Parts[1], when present, is the table-or-alias qualifier.
+func refFromUnresolved(n *tree.UnresolvedName) columnRef {
+	if n.Star || n.NumParts == 0 {
+		return columnRef{}
+	}
+	r := columnRef{name: n.Parts[0]}
+	if n.NumParts >= 2 {
+		r.qualifier = n.Parts[1]
+	}
+	return r
+}
+
+// refFromColumnItem extracts the column qualifier and name from a
+// ColumnItem. Most refs surface as UnresolvedName; ColumnItem appears
+// after some normalization passes and is handled here so callers
+// don't have to special-case it.
+func refFromColumnItem(c *tree.ColumnItem) columnRef {
+	r := columnRef{name: string(c.ColumnName)}
+	if c.TableName != nil && c.TableName.NumParts >= 1 {
+		r.qualifier = c.TableName.Parts[0]
+	}
+	return r
+}
+
+// resolveRef classifies ref against sc and emits at most one error
+// per (qualifier, column) pair across the whole input. Outcomes:
+//
+//   - Empty ref (e.g. extracted from a star) — silently ignored.
+//   - Qualified ref against a known source whose columns include the
+//     name — resolved, no error.
+//   - Qualified ref against an unknown qualifier — unknown_column
+//     ("missing FROM-clause entry"); Context lists in-scope tables.
+//   - Qualified ref against a known source whose columns do NOT
+//     include the name — unknown_column with available_columns from
+//     that source.
+//   - Unqualified ref matching a SELECT-list alias — resolved (keeps
+//     ORDER BY over aliases quiet).
+//   - Unqualified ref hitting two or more sources — 42702
+//     ambiguous_reference with the matching tables in Context.
+//   - Unqualified ref hitting zero sources — unknown_column with the
+//     union of all in-scope columns.
+//
+// Sources with columns unknown (CTE, subquery, unresolved table) are
+// treated as "may contain anything" — they suppress every outcome
+// except a positive match elsewhere, preventing cascades.
+func (c *columnChecker) resolveRef(ref columnRef, sc *scope) {
+	if ref.name == "" {
+		return
+	}
+	if ref.qualifier != "" {
+		c.resolveQualified(ref, sc)
+		return
+	}
+	c.resolveUnqualified(ref, sc)
+}
+
+// resolveQualified handles "t.c" refs. Walks the scope chain looking
+// for a source whose alias matches t. If the source's columns are
+// known, c must appear in them; otherwise we skip silently.
+func (c *columnChecker) resolveQualified(ref columnRef, sc *scope) {
+	src, found := lookupSource(sc, ref.qualifier)
+	if !found {
+		c.report(ref, output.Error{
+			Code:     unknownColumnCode,
+			Severity: output.SeverityError,
+			Message:  fmt.Sprintf("missing FROM-clause entry for table %q", ref.qualifier),
+			Category: diag.CategoryUnknownColumn,
+			Context: map[string]any{
+				"missing_table":    ref.qualifier,
+				"available_tables": availableAliases(sc),
+			},
+		})
+		return
+	}
+	if !src.columnsKnown() {
+		return
+	}
+	if containsFold(src.columns, ref.name) {
+		return
+	}
+	c.report(ref, output.Error{
+		Code:     unknownColumnCode,
+		Severity: output.SeverityError,
+		Message:  fmt.Sprintf("column %q does not exist", ref.name),
+		Category: diag.CategoryUnknownColumn,
+		Context: map[string]any{
+			"table":             src.alias,
+			"available_columns": src.columns,
+		},
+	})
+}
+
+// resolveUnqualified handles bare column refs. Counts the in-scope
+// sources that contain the name (sources with unknown columns count
+// as "skip" — they do not match and do not error). A SELECT-list
+// alias matching name is also a positive resolution to keep ORDER BY
+// over aliases quiet.
+func (c *columnChecker) resolveUnqualified(ref columnRef, sc *scope) {
+	if matchesAlias(sc, ref.name) {
+		return
+	}
+	hasUnknownSource := scopeHasUnknownSource(sc)
+	matches := matchingSources(sc, ref.name)
+	switch {
+	case len(matches) == 1:
+		return
+	case len(matches) >= 2:
+		c.report(ref, output.Error{
+			Code:     ambiguousColumnCode,
+			Severity: output.SeverityError,
+			Message:  fmt.Sprintf("column reference %q is ambiguous", ref.name),
+			Category: diag.CategoryAmbiguousReference,
+			Context: map[string]any{
+				"column": ref.name,
+				"tables": matches,
+			},
+		})
+	default:
+		if hasUnknownSource {
+			// At least one source has unknown columns; the ref might
+			// belong to it. Skip rather than false-positive.
+			return
+		}
+		c.report(ref, output.Error{
+			Code:     unknownColumnCode,
+			Severity: output.SeverityError,
+			Message:  fmt.Sprintf("column %q does not exist", ref.name),
+			Category: diag.CategoryUnknownColumn,
+			Context: map[string]any{
+				"available_columns": availableColumns(sc),
+			},
+		})
+	}
+}
+
+// report deduplicates by lowercased "qualifier.name" and attaches the
+// position computed against the statement currently being checked.
+// The reported position is therefore the first non-duplicate
+// occurrence of the (qualifier, column) pair in input order — i.e. in
+// the first statement where the pair appears, not necessarily the
+// textually-first occurrence in the input. Position uses the same
+// word-boundary-aware substring search as the table walker.
+func (c *columnChecker) report(ref columnRef, e output.Error) {
+	key := strings.ToLower(ref.qualifier + "." + ref.name)
+	if _, dup := c.seen[key]; dup {
+		return
+	}
+	c.seen[key] = struct{}{}
+	e.Position = c.positionFor(ref.name)
+	*c.errs = append(*c.errs, e)
+}
+
+// positionFor mirrors tableNameVisitor.positionFor.
+func (c *columnChecker) positionFor(name string) *output.Position {
+	if name == "" {
+		return nil
+	}
+	stmtText := c.fullSQL[c.stmtStart:c.stmtEnd]
+	for off := 0; off < len(stmtText); {
+		rel := indexFold(stmtText[off:], name)
+		if rel < 0 {
+			return nil
+		}
+		abs := c.stmtStart + off + rel
+		if isWordBoundary(c.fullSQL, abs, abs+len(name)) {
+			return diag.PositionFromByteOffset(c.fullSQL, abs)
+		}
+		off += rel + 1
+	}
+	return nil
+}
+
+// tableNameOf strips down to the bare table name from a TableExpr,
+// returning ok=false for derived sources (subqueries, refs, etc.)
+// that have no catalog lookup.
+func tableNameOf(te tree.TableExpr) (string, bool) {
+	switch t := te.(type) {
+	case *tree.TableName:
+		return t.Table(), true
+	case *tree.AliasedTableExpr:
+		return tableNameOf(t.Expr)
+	case *tree.ParenTableExpr:
+		return tableNameOf(t.Expr)
+	}
+	return "", false
+}
+
+// lookupSource walks the scope chain to find a source whose alias
+// case-insensitively matches qualifier. Returns the matching source
+// and true on hit; zero source and false on miss.
+func lookupSource(sc *scope, qualifier string) (source, bool) {
+	want := strings.ToLower(qualifier)
+	for s := sc; s != nil; s = s.parent {
+		for _, src := range s.sources {
+			if strings.ToLower(src.alias) == want {
+				return src, true
+			}
+		}
+	}
+	return source{}, false
+}
+
+// matchesAlias reports whether name matches a SELECT-list alias in
+// any frame of the scope chain. Used to suppress unknown_column
+// errors for ORDER BY/GROUP BY/HAVING refs to SELECT aliases.
+func matchesAlias(sc *scope, name string) bool {
+	want := strings.ToLower(name)
+	for s := sc; s != nil; s = s.parent {
+		if _, ok := s.selectAliases[want]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// matchingSources returns the alias of every source whose columns
+// contain name (case-insensitive). The scope chain is walked across
+// all frames — we intentionally count matches more strictly than
+// PostgreSQL (which shadows outer scopes) so that a ref which would
+// silently bind to an outer column when the user likely meant the
+// inner is flagged as ambiguous.
+func matchingSources(sc *scope, name string) []string {
+	var matches []string
+	for s := sc; s != nil; s = s.parent {
+		for _, src := range s.sources {
+			if !src.columnsKnown() {
+				continue
+			}
+			if containsFold(src.columns, name) {
+				matches = append(matches, src.alias)
+			}
+		}
+	}
+	return matches
+}
+
+// columnExistsInScope reports whether name appears in at least one
+// in-scope source's columns, or whether any source has unknown
+// columns (in which case we conservatively assume existence to
+// suppress cascades). Used by USING-clause resolution where
+// unqualified-ambiguity is the wrong outcome — USING (col) requires
+// col on both sides by construction.
+func columnExistsInScope(sc *scope, name string) bool {
+	for s := sc; s != nil; s = s.parent {
+		for _, src := range s.sources {
+			if !src.columnsKnown() {
+				return true
+			}
+			if containsFold(src.columns, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// scopeHasUnknownSource reports whether any source in the scope chain
+// has unknown columns. When true, an unqualified ref that matches no
+// known source is silently skipped rather than reported, because the
+// ref might belong to the unknown source (CTE, subquery, unresolved
+// table) — flagging it would be a false positive cascade.
+func scopeHasUnknownSource(sc *scope) bool {
+	for s := sc; s != nil; s = s.parent {
+		for _, src := range s.sources {
+			if !src.columnsKnown() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// availableColumns returns the union of all known column names in
+// scope, in source order, with duplicates collapsed. Used to populate
+// the available_columns context on unqualified-unknown errors.
+func availableColumns(sc *scope) []string {
+	var out []string
+	seen := make(map[string]struct{})
+	for s := sc; s != nil; s = s.parent {
+		for _, src := range s.sources {
+			for _, col := range src.columns {
+				key := strings.ToLower(col)
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+				out = append(out, col)
+			}
+		}
+	}
+	return out
+}
+
+// availableAliases returns the alias of every source in scope, in
+// declaration order. Used as available_tables context when a
+// qualified ref names a missing FROM-clause entry.
+func availableAliases(sc *scope) []string {
+	var out []string
+	for s := sc; s != nil; s = s.parent {
+		for _, src := range s.sources {
+			if src.alias != "" {
+				out = append(out, src.alias)
+			}
+		}
+	}
+	return out
+}
+
+// containsFold reports whether names contains target under ASCII
+// case folding. Catalog column names are stored as authored, so a
+// case-insensitive compare is needed for refs like "SELECT ID FROM
+// users" against a column declared lowercase.
+func containsFold(names []string, target string) bool {
+	for _, n := range names {
+		if strings.EqualFold(n, target) {
+			return true
+		}
+	}
+	return false
 }

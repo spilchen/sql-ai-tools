@@ -677,6 +677,44 @@ func TestValidateCmdSchemaKnownTable(t *testing.T) {
 	require.Equal(t, "ok", payload.Checks.NameResolution)
 }
 
+// TestValidateCmdSchemaUnknownColumn verifies that --schema enables
+// column-name resolution and that an unknown column produces a 42703
+// envelope error with the table's columns in available_columns. This
+// is the end-to-end demo from issue #14.
+func TestValidateCmdSchemaUnknownColumn(t *testing.T) {
+	dir := t.TempDir()
+	schema := filepath.Join(dir, "schema.sql")
+	require.NoError(t, os.WriteFile(schema,
+		[]byte("CREATE TABLE users (id INT PRIMARY KEY, name TEXT);"), 0644))
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"validate", "--output", "json",
+		"--schema", schema, "-e", "SELECT nme FROM users"})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, output.TierSchemaFile, env.Tier)
+	require.Len(t, env.Errors, 1)
+	require.Nil(t, env.Data)
+
+	diagErr := env.Errors[0]
+	require.Equal(t, "42703", diagErr.Code)
+	require.Equal(t, "unknown_column", diagErr.Category)
+	require.Contains(t, diagErr.Message, "nme")
+	require.NotNil(t, diagErr.Position)
+	require.Equal(t, 1, diagErr.Position.Line)
+	require.Equal(t, 8, diagErr.Position.Column)
+	avail, ok := diagErr.Context["available_columns"].([]any)
+	require.True(t, ok, "available_columns must be a JSON array")
+	require.Equal(t, []any{"id", "name"}, avail)
+}
+
 // TestValidateCmdSchemaUnknownTableText verifies that unknown-table
 // errors render in text mode with line/column and the SQLSTATE code.
 func TestValidateCmdSchemaUnknownTableText(t *testing.T) {
