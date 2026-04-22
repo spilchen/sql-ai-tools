@@ -20,44 +20,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/semcheck"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
-)
-
-// validateChecks records which validation phases ran on the success
-// path. Each field is "ok" (ran and passed) or "skipped" (prerequisite
-// missing). A failing phase aborts the command via an envelope error,
-// so "fail" never appears here.
-type validateChecks struct {
-	Syntax         string `json:"syntax"`
-	TypeCheck      string `json:"type_check"`
-	NameResolution string `json:"name_resolution"`
-}
-
-// validateResult is the JSON payload emitted by `crdb-sql validate` on
-// the success path. The expanded shape (vs. a bare {valid: true})
-// exposes which phases ran, so agents can tell whether name resolution
-// was skipped due to a missing --schema. Adding a phase means adding a
-// field here and updating the rendering code to set it.
-type validateResult struct {
-	Valid  bool           `json:"valid"`
-	Checks validateChecks `json:"checks"`
-}
-
-const (
-	checkOK      = "ok"
-	checkSkipped = "skipped"
-
-	// capabilityRequiredCode is the envelope error code emitted when a
-	// validation phase is skipped because its prerequisite (e.g.
-	// --schema) is not satisfied. The matching category is the same
-	// string so agents can branch on either field.
-	capabilityRequiredCode     = "capability_required"
-	capabilityRequiredCategory = "capability_required"
-
-	// capabilityNameResolution is the canonical identifier for the
-	// table-name-resolution phase. It is shared between the phase's
-	// skipped-warning Context and any human-readable message text so
-	// the two cannot drift.
-	capabilityNameResolution = "name_resolution"
+	"github.com/spilchen/sql-ai-tools/internal/validateresult"
 )
 
 // newValidateCmd builds the `crdb-sql validate` subcommand. It reads
@@ -136,15 +99,15 @@ matched by the config and reports per-file results in one envelope.`,
 				return renderDiagErrors(r, baseEnv, typeErrs)
 			}
 
-			checks := validateChecks{
-				Syntax:    checkOK,
-				TypeCheck: checkOK,
+			checks := validateresult.Checks{
+				Syntax:    validateresult.CheckOK,
+				TypeCheck: validateresult.CheckOK,
 			}
 
 			if len(schemaFiles) == 0 {
-				checks.NameResolution = checkSkipped
-				baseEnv.Errors = append(baseEnv.Errors, capabilityRequiredError(
-					capabilityNameResolution,
+				checks.NameResolution = validateresult.CheckSkipped
+				baseEnv.Errors = append(baseEnv.Errors, validateresult.CapabilityRequiredError(
+					validateresult.CapabilityNameResolution,
 					"name resolution skipped: --schema not provided",
 					"pass --schema FILE to enable table name resolution",
 				))
@@ -157,10 +120,10 @@ matched by the config and reports per-file results in one envelope.`,
 				if nameErrs := semcheck.CheckTableNames(stmts, sql, cat); len(nameErrs) > 0 {
 					return renderDiagErrors(r, baseEnv, nameErrs)
 				}
-				checks.NameResolution = checkOK
+				checks.NameResolution = validateresult.CheckOK
 			}
 
-			data, err := json.Marshal(validateResult{Valid: true, Checks: checks})
+			data, err := json.Marshal(validateresult.Result{Valid: true, Checks: checks})
 			if err != nil {
 				return r.RenderError(baseEnv, err)
 			}
@@ -170,7 +133,7 @@ matched by the config and reports per-file results in one envelope.`,
 				if _, werr := fmt.Fprintln(w, "Valid."); werr != nil {
 					return werr
 				}
-				if checks.NameResolution == checkSkipped {
+				if checks.NameResolution == validateresult.CheckSkipped {
 					_, werr := fmt.Fprintln(w, "note: name resolution skipped (pass --schema to enable)")
 					return werr
 				}
@@ -392,26 +355,6 @@ func renderConfigText(w io.Writer, results []fileResult, errs []output.Error) er
 		}
 	}
 	return nil
-}
-
-// capabilityRequiredError builds the warning entry that signals a
-// validation phase was skipped because its prerequisite is missing.
-// capability is the short identifier of the skipped phase (e.g.
-// "name_resolution"); message is the user-facing summary; hint tells
-// the user how to enable the phase. The result is appended to the
-// envelope's Errors list rather than aborting the command — exit code
-// stays 0 because the phases that did run all passed.
-func capabilityRequiredError(capability, message, hint string) output.Error {
-	return output.Error{
-		Code:     capabilityRequiredCode,
-		Severity: output.SeverityWarning,
-		Message:  message,
-		Category: capabilityRequiredCategory,
-		Context: map[string]any{
-			"capability": capability,
-			"hint":       hint,
-		},
-	}
 }
 
 // renderParseError enriches a parser error with SQLSTATE code and

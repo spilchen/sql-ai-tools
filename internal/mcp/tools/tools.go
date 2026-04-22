@@ -37,6 +37,8 @@ const (
 	FormatSQLToolName        = "format_sql"
 	DetectRiskyQueryToolName = "detect_risky_query"
 	ExplainSQLToolName       = "explain_sql"
+	ListTablesToolName       = "list_tables"
+	DescribeTableToolName    = "describe_table"
 )
 
 // TargetVersionParamName is the optional MCP tool parameter name that
@@ -94,6 +96,26 @@ func extractSQL(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
 func baseEnvelope(parserVersion, targetVersion string) output.Envelope {
 	env := output.Envelope{
 		Tier:             output.TierZeroConfig,
+		ParserVersion:    parserVersion,
+		ConnectionStatus: output.ConnectionDisconnected,
+	}
+	stampTargetVersion(&env, parserVersion, targetVersion)
+	return env
+}
+
+// schemaFileEnvelope returns a pre-populated Envelope for Tier 2
+// (schema_file, disconnected) tools — list_tables, describe_table,
+// and validate_sql when given an inline schemas argument. targetVersion
+// follows the same contract as baseEnvelope: empty means "no
+// target-version stamping," non-empty stamps the field and (when
+// MAJOR.MINOR diverges from parserVersion) appends a mismatch
+// warning. Tools that do not yet accept the target_version argument
+// (list_tables, describe_table) pass "" so they get today's behaviour
+// unchanged; validate_sql passes its resolved value so a client
+// supplying target_version alongside schemas still gets the stamping.
+func schemaFileEnvelope(parserVersion, targetVersion string) output.Envelope {
+	env := output.Envelope{
+		Tier:             output.TierSchemaFile,
 		ParserVersion:    parserVersion,
 		ConnectionStatus: output.ConnectionDisconnected,
 	}

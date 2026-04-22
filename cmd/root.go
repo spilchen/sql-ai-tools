@@ -25,6 +25,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/config"
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/schemawarn"
 )
 
 // rootState is the per-invocation container for cobra-resolved global
@@ -218,19 +219,10 @@ func newEnvelope(
 	return r, env, nil
 }
 
-// appendSchemaWarnings copies any non-fatal issues recorded by the
-// catalog loader (skipped statements, duplicate definitions) into env
-// as warning-severity envelope entries. Subcommands that consume a
-// catalog call this once after Load/LoadFiles so agents see the
-// loader's diagnostics in the same Errors stream as everything else.
+// appendSchemaWarnings is a thin alias for schemawarn.Append kept on
+// the cmd package so subcommand code stays terse.
 func appendSchemaWarnings(env *output.Envelope, cat *catalog.Catalog) {
-	for _, w := range cat.Warnings() {
-		env.Errors = append(env.Errors, output.Error{
-			Code:     "schema_warning",
-			Severity: output.SeverityWarning,
-			Message:  w,
-		})
-	}
+	schemawarn.Append(env, cat)
 }
 
 // renderSchemaLoadError surfaces a catalog.Load/LoadFiles failure as
