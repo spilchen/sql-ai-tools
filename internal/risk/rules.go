@@ -35,8 +35,39 @@ func DefaultRules() []Rule {
 		deleteNoWhereRule,
 		updateNoWhereRule,
 		dropTableRule,
+		dropDatabaseRule,
+		alterTableDropColumnRule,
+		selectForUpdateNoWhereRule,
+		selectForShareNoWhereRule,
 		selectStarRule,
 	}
+}
+
+// selectHasLockingStrength reports whether sel carries a locking clause
+// with the given strength (e.g. FOR UPDATE, FOR SHARE).
+func selectHasLockingStrength(sel *tree.Select, strength tree.LockingStrength) bool {
+	for _, item := range sel.Locking {
+		if item != nil && item.Strength == strength {
+			return true
+		}
+	}
+	return false
+}
+
+// selectHasWhere reports whether the inner SelectClause of sel has a
+// WHERE clause. For non-SelectClause inner statements (UNION, VALUES,
+// ParenSelect, etc.) it conservatively returns false even though such
+// shapes can carry a meaningful predicate, e.g. `(SELECT id FROM t
+// WHERE id=1) FOR UPDATE`. This means the FOR UPDATE / FOR SHARE rules
+// will flag those as missing-WHERE — a deliberate trade-off in favor
+// of a simple, AST-shape-only check; recursing into inner selects is
+// future work if the false-positive rate becomes a problem.
+func selectHasWhere(sel *tree.Select) bool {
+	sc, ok := sel.Select.(*tree.SelectClause)
+	if !ok {
+		return false
+	}
+	return sc.Where != nil
 }
 
 // deleteNoWhereRule flags DELETE statements that have neither a WHERE
@@ -104,6 +135,111 @@ var dropTableRule = Rule{
 			Message:  fmt.Sprintf("DROP TABLE %s permanently removes the table and all its data", strings.Join(names, ", ")),
 			Position: &input.Position,
 			FixHint:  "Verify the table name and consider backing up data first",
+		}}
+	},
+}
+
+// dropDatabaseRule flags all DROP DATABASE statements. DROP DATABASE
+// is irreversible and cascades to every schema, table, and row the
+// database contains, so it is always treated as critical regardless of
+// IF EXISTS or DROP behavior modifiers.
+var dropDatabaseRule = Rule{
+	ReasonCode: "DROP_DATABASE",
+	Severity:   SeverityCritical,
+	Category:   "data_safety",
+	Check: func(input CheckInput) []Finding {
+		dd, ok := input.AST.(*tree.DropDatabase)
+		if !ok {
+			return nil
+		}
+		return []Finding{{
+			Message:  fmt.Sprintf("DROP DATABASE %s permanently removes the database and all its objects", dd.Name.String()),
+			Position: &input.Position,
+			FixHint:  "Verify the database name and consider backing up data first",
+		}}
+	},
+}
+
+// alterTableDropColumnRule flags every DROP COLUMN command inside an
+// ALTER TABLE statement. A single ALTER TABLE may carry multiple
+// commands (e.g. `ALTER TABLE t DROP COLUMN a, DROP COLUMN b`); each
+// drop produces its own finding so callers can act on them
+// independently.
+var alterTableDropColumnRule = Rule{
+	ReasonCode: "ALTER_TABLE_DROP_COLUMN",
+	Severity:   SeverityHigh,
+	Category:   "schema_safety",
+	Check: func(input CheckInput) []Finding {
+		at, ok := input.AST.(*tree.AlterTable)
+		if !ok {
+			return nil
+		}
+		var findings []Finding
+		table := at.Table.String()
+		for _, cmd := range at.Cmds {
+			drop, ok := cmd.(*tree.AlterTableDropColumn)
+			if !ok {
+				continue
+			}
+			findings = append(findings, Finding{
+				Message:  fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s permanently removes the column and its data", table, drop.Column.String()),
+				Position: &input.Position,
+				FixHint:  "Confirm no application reads or writes this column before dropping",
+			})
+		}
+		return findings
+	},
+}
+
+// selectForUpdateNoWhereRule flags `SELECT ... FOR UPDATE` queries that
+// have neither a WHERE clause nor a LIMIT. Without a predicate, the
+// statement takes a write lock on every row in the table, matching
+// CockroachDB's sql_safe_updates behavior.
+var selectForUpdateNoWhereRule = Rule{
+	ReasonCode: "SELECT_FOR_UPDATE_NO_WHERE",
+	Severity:   SeverityCritical,
+	Category:   "data_safety",
+	Check: func(input CheckInput) []Finding {
+		sel, ok := input.AST.(*tree.Select)
+		if !ok {
+			return nil
+		}
+		if !selectHasLockingStrength(sel, tree.ForUpdate) {
+			return nil
+		}
+		if sel.Limit != nil || selectHasWhere(sel) {
+			return nil
+		}
+		return []Finding{{
+			Message:  "SELECT ... FOR UPDATE without WHERE or LIMIT locks every row in the table",
+			Position: &input.Position,
+			FixHint:  "Add a WHERE clause or LIMIT to scope the lock",
+		}}
+	},
+}
+
+// selectForShareNoWhereRule flags `SELECT ... FOR SHARE` queries that
+// have neither a WHERE clause nor a LIMIT. Like FOR UPDATE, a missing
+// predicate causes the lock to span every row in the table.
+var selectForShareNoWhereRule = Rule{
+	ReasonCode: "SELECT_FOR_SHARE_NO_WHERE",
+	Severity:   SeverityHigh,
+	Category:   "data_safety",
+	Check: func(input CheckInput) []Finding {
+		sel, ok := input.AST.(*tree.Select)
+		if !ok {
+			return nil
+		}
+		if !selectHasLockingStrength(sel, tree.ForShare) {
+			return nil
+		}
+		if sel.Limit != nil || selectHasWhere(sel) {
+			return nil
+		}
+		return []Finding{{
+			Message:  "SELECT ... FOR SHARE without WHERE or LIMIT locks every row in the table",
+			Position: &input.Position,
+			FixHint:  "Add a WHERE clause or LIMIT to scope the lock",
 		}}
 	},
 }

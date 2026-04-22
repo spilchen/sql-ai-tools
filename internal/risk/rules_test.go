@@ -87,6 +87,81 @@ func TestAnalyze(t *testing.T) {
 			sql:                 "DELETE FROM users; SELECT * FROM t; UPDATE t SET x = 1",
 			expectedReasonCodes: []string{"DELETE_NO_WHERE", "SELECT_STAR", "UPDATE_NO_WHERE"},
 		},
+		{
+			name:                "DROP DATABASE",
+			sql:                 "DROP DATABASE d",
+			expectedReasonCodes: []string{"DROP_DATABASE"},
+		},
+		{
+			name:                "DROP DATABASE IF EXISTS CASCADE",
+			sql:                 "DROP DATABASE IF EXISTS d CASCADE",
+			expectedReasonCodes: []string{"DROP_DATABASE"},
+		},
+		{
+			name:                "ALTER TABLE DROP COLUMN",
+			sql:                 "ALTER TABLE t DROP COLUMN c",
+			expectedReasonCodes: []string{"ALTER_TABLE_DROP_COLUMN"},
+		},
+		{
+			name:                "ALTER TABLE DROP COLUMN multiple columns yields per-column findings",
+			sql:                 "ALTER TABLE t DROP COLUMN a, DROP COLUMN b",
+			expectedReasonCodes: []string{"ALTER_TABLE_DROP_COLUMN", "ALTER_TABLE_DROP_COLUMN"},
+		},
+		{
+			name:                "ALTER TABLE mixed commands flags only DROP COLUMN",
+			sql:                 "ALTER TABLE t ADD COLUMN x INT, DROP COLUMN y",
+			expectedReasonCodes: []string{"ALTER_TABLE_DROP_COLUMN"},
+		},
+		{
+			name:                "ALTER TABLE ADD COLUMN is safe",
+			sql:                 "ALTER TABLE t ADD COLUMN c INT",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "SELECT FOR UPDATE without WHERE or LIMIT",
+			sql:                 "SELECT id FROM t FOR UPDATE",
+			expectedReasonCodes: []string{"SELECT_FOR_UPDATE_NO_WHERE"},
+		},
+		{
+			name:                "SELECT FOR UPDATE with star fires both rules",
+			sql:                 "SELECT * FROM t FOR UPDATE",
+			expectedReasonCodes: []string{"SELECT_FOR_UPDATE_NO_WHERE", "SELECT_STAR"},
+		},
+		{
+			name:                "SELECT FOR UPDATE with WHERE is safe",
+			sql:                 "SELECT id FROM t WHERE id = 1 FOR UPDATE",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "SELECT FOR UPDATE with LIMIT is safe",
+			sql:                 "SELECT id FROM t LIMIT 10 FOR UPDATE",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "SELECT FOR SHARE without WHERE or LIMIT",
+			sql:                 "SELECT id FROM t FOR SHARE",
+			expectedReasonCodes: []string{"SELECT_FOR_SHARE_NO_WHERE"},
+		},
+		{
+			name:                "SELECT FOR SHARE with WHERE is safe",
+			sql:                 "SELECT id FROM t WHERE id = 1 FOR SHARE",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "SELECT FOR SHARE with LIMIT is safe",
+			sql:                 "SELECT id FROM t LIMIT 10 FOR SHARE",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "SELECT FOR UPDATE on union conservatively flagged",
+			sql:                 "(SELECT id FROM t WHERE id = 1) FOR UPDATE",
+			expectedReasonCodes: []string{"SELECT_FOR_UPDATE_NO_WHERE"},
+		},
+		{
+			name:                "multi-statement covers new rules in order",
+			sql:                 "DROP DATABASE d; ALTER TABLE t DROP COLUMN c; SELECT id FROM t FOR UPDATE",
+			expectedReasonCodes: []string{"DROP_DATABASE", "ALTER_TABLE_DROP_COLUMN", "SELECT_FOR_UPDATE_NO_WHERE"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -140,6 +215,26 @@ func TestFindingSeverity(t *testing.T) {
 			sql:              "SELECT * FROM t",
 			expectedSeverity: SeverityLow,
 		},
+		{
+			name:             "DROP_DATABASE is critical",
+			sql:              "DROP DATABASE d",
+			expectedSeverity: SeverityCritical,
+		},
+		{
+			name:             "ALTER_TABLE_DROP_COLUMN is high",
+			sql:              "ALTER TABLE t DROP COLUMN c",
+			expectedSeverity: SeverityHigh,
+		},
+		{
+			name:             "SELECT_FOR_UPDATE_NO_WHERE is critical",
+			sql:              "SELECT id FROM t FOR UPDATE",
+			expectedSeverity: SeverityCritical,
+		},
+		{
+			name:             "SELECT_FOR_SHARE_NO_WHERE is high",
+			sql:              "SELECT id FROM t FOR SHARE",
+			expectedSeverity: SeverityHigh,
+		},
 	}
 
 	for _, tc := range tests {
@@ -174,4 +269,19 @@ func TestDropTableMessage(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, findings, 1)
 	require.Contains(t, findings[0].Message, "users")
+}
+
+func TestDropDatabaseMessage(t *testing.T) {
+	findings, err := Analyze("DROP DATABASE inventory")
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	require.Contains(t, findings[0].Message, "inventory")
+}
+
+func TestAlterTableDropColumnMessage(t *testing.T) {
+	findings, err := Analyze("ALTER TABLE users DROP COLUMN email")
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	require.Contains(t, findings[0].Message, "users")
+	require.Contains(t, findings[0].Message, "email")
 }
