@@ -30,17 +30,10 @@ version. The connection string is read from the --dsn flag or the
 CRDB_DSN environment variable (flag takes precedence).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			r := output.Renderer{Format: state.outputFormat, Out: cmd.OutOrStdout()}
-			baseEnv := output.Envelope{
-				Tier:             output.TierConnected,
-				ConnectionStatus: output.ConnectionDisconnected,
-			}
-
-			parserVer, err := parserVersion(Version)
+			r, baseEnv, err := newEnvelope(state, output.TierConnected, cmd)
 			if err != nil {
 				return r.RenderError(baseEnv, err)
 			}
-			baseEnv.ParserVersion = parserVer
 
 			if state.dsn == "" {
 				return r.RenderError(baseEnv,

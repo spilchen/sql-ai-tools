@@ -40,17 +40,10 @@ statement tag (e.g. SELECT, ALTER TABLE), the original SQL text, and a
 normalized form with literal constants replaced by placeholders.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r := output.Renderer{Format: state.outputFormat, Out: cmd.OutOrStdout()}
-			baseEnv := output.Envelope{
-				Tier:             output.TierZeroConfig,
-				ConnectionStatus: output.ConnectionDisconnected,
-			}
-
-			parserVer, err := parserVersion(Version)
+			r, baseEnv, err := newEnvelope(state, output.TierZeroConfig, cmd)
 			if err != nil {
 				return r.RenderError(baseEnv, err)
 			}
-			baseEnv.ParserVersion = parserVer
 
 			sql, err := sqlinput.ReadSQL(expr, args, cmd.InOrStdin())
 			if err != nil {

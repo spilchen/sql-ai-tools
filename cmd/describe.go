@@ -44,17 +44,10 @@ Then describe any table:
   crdb-sql describe users --schema schema.sql`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r := output.Renderer{Format: state.outputFormat, Out: cmd.OutOrStdout()}
-			baseEnv := output.Envelope{
-				Tier:             output.TierSchemaFile,
-				ConnectionStatus: output.ConnectionDisconnected,
-			}
-
-			parserVer, err := parserVersion(Version)
+			r, baseEnv, err := newEnvelope(state, output.TierSchemaFile, cmd)
 			if err != nil {
 				return r.RenderError(baseEnv, err)
 			}
-			baseEnv.ParserVersion = parserVer
 
 			if len(schemaFiles) == 0 {
 				return r.RenderError(baseEnv,
