@@ -4,10 +4,10 @@
 // included in the /LICENSE file.
 
 // Package catalog provides a lightweight in-memory representation of a
-// SQL schema loaded from CREATE TABLE DDL files. The primary entry
-// point is LoadFiles, which parses one or more .sql files using the
-// CockroachDB parser and builds a Catalog mapping table names to their
-// columns, primary key, and indexes.
+// SQL schema loaded from CREATE TABLE DDL. The primary entry point is
+// Load, which accepts a mix of file paths and raw SQL strings via
+// SchemaSource. LoadFiles is a convenience wrapper for file-only
+// callers.
 //
 // The catalog is the foundation for Tier 2 (schema-aware) analysis:
 // name resolution, column type lookup, and "did you mean?" suggestions

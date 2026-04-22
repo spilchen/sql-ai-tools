@@ -243,7 +243,7 @@ func TestLoadFiles(t *testing.T) {
 		{
 			name:        "parse error",
 			sql:         "CREAT TABLE bad (id INT8);",
-			expectedErr: "parse schema file",
+			expectedErr: "parse schema",
 		},
 	}
 
@@ -352,11 +352,114 @@ func TestLoadFilesFileTooLarge(t *testing.T) {
 
 	f, err := os.Create(path)
 	require.NoError(t, err)
-	require.NoError(t, f.Truncate(maxSchemaFileSize+1))
+	require.NoError(t, f.Truncate(MaxSchemaFileSize+1))
 	require.NoError(t, f.Close())
 
 	_, err = LoadFiles([]string{path})
 	require.ErrorContains(t, err, "too large")
+}
+
+func TestLoad(t *testing.T) {
+	tests := []struct {
+		name          string
+		sources       []SchemaSource
+		tableName     string
+		expectedTable Table
+		expectedErr   string
+	}{
+		{
+			name: "raw SQL source",
+			sources: []SchemaSource{
+				{SQL: `CREATE TABLE t (id INT8 PRIMARY KEY, name TEXT)`, Label: "test"},
+			},
+			tableName: "t",
+			expectedTable: Table{
+				Name: "t",
+				Columns: []Column{
+					{Name: "id", Type: "INT8", Nullable: false},
+					{Name: "name", Type: "STRING", Nullable: true},
+				},
+				PrimaryKey: []string{"id"},
+				Indexes:    []Index{},
+			},
+		},
+		{
+			name: "empty raw SQL",
+			sources: []SchemaSource{
+				{SQL: "", Label: "empty"},
+			},
+		},
+		{
+			name: "raw SQL parse error",
+			sources: []SchemaSource{
+				{SQL: "CREAT TABLE bad (id INT8)", Label: "inline"},
+			},
+			expectedErr: "parse schema inline",
+		},
+		{
+			name: "path and SQL mutually exclusive",
+			sources: []SchemaSource{
+				{Path: "/some/file.sql", SQL: "CREATE TABLE t (id INT8)", Label: "both"},
+			},
+			expectedErr: "both Path and SQL set",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cat, err := Load(tc.sources)
+
+			if tc.expectedErr != "" {
+				require.ErrorContains(t, err, tc.expectedErr)
+				return
+			}
+			require.NoError(t, err)
+
+			if tc.tableName == "" {
+				require.Empty(t, cat.TableNames())
+				return
+			}
+
+			tbl, ok := cat.Table(tc.tableName)
+			require.True(t, ok, "table %q not found in catalog", tc.tableName)
+			require.Equal(t, tc.expectedTable, tbl)
+		})
+	}
+}
+
+func TestLoadMixedSources(t *testing.T) {
+	filePath := writeSQL(t, `CREATE TABLE a (id INT8 PRIMARY KEY)`)
+
+	cat, err := Load([]SchemaSource{
+		{Path: filePath},
+		{SQL: `CREATE TABLE b (id INT8 PRIMARY KEY)`, Label: "stdin"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"a", "b"}, cat.TableNames())
+
+	_, ok := cat.Table("a")
+	require.True(t, ok)
+	_, ok = cat.Table("b")
+	require.True(t, ok)
+}
+
+func TestLoadLabelInWarnings(t *testing.T) {
+	cat, err := Load([]SchemaSource{
+		{SQL: "SELECT 1; CREATE TABLE t (id INT8 PRIMARY KEY)", Label: "stdin"},
+	})
+	require.NoError(t, err)
+	require.Len(t, cat.Warnings(), 1)
+	require.Contains(t, cat.Warnings()[0], "stdin")
+	require.Contains(t, cat.Warnings()[0], "skipped 1 non-CREATE TABLE")
+}
+
+func TestLoadDefaultLabelForUnlabeledSQL(t *testing.T) {
+	cat, err := Load([]SchemaSource{
+		{SQL: ""},
+	})
+	require.NoError(t, err)
+	require.Len(t, cat.Warnings(), 1)
+	require.Contains(t, cat.Warnings()[0], "<inline SQL>")
 }
 
 func strPtr(s string) *string {

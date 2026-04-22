@@ -14,37 +14,56 @@ import (
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 )
 
-// maxSchemaFileSize is the largest schema file LoadFiles will read.
-// Schema DDL files are typically small; a 100 MB limit prevents
-// accidental OOM from passing a full database dump.
-const maxSchemaFileSize = 100 << 20
+// MaxSchemaFileSize is the largest schema source Load will accept,
+// whether from a file or raw SQL. Schema DDL is typically small; a
+// 100 MB limit prevents accidental OOM from passing a full database
+// dump.
+const MaxSchemaFileSize = 100 << 20
 
-// LoadFiles parses the SQL content of each file and builds a Catalog
-// from the CREATE TABLE statements found. Non-CREATE TABLE statements
-// are skipped with a warning. If multiple files define the same table
-// name, the last definition wins and a warning is recorded.
-func LoadFiles(paths []string) (*Catalog, error) {
+// SchemaSource represents one source of schema DDL. Either Path or SQL
+// must be set (not both). Label is used in warnings and error messages;
+// when empty it defaults to Path (for file sources) or "<inline SQL>"
+// (for raw SQL sources).
+type SchemaSource struct {
+	Path  string // file to read
+	SQL   string // raw SQL content (used when Path is empty)
+	Label string // human-readable name for diagnostics
+}
+
+func (s SchemaSource) label() string {
+	if s.Label != "" {
+		return s.Label
+	}
+	if s.Path != "" {
+		return s.Path
+	}
+	return "<inline SQL>"
+}
+
+// Load parses schema SQL from the given sources and builds a Catalog
+// from the CREATE TABLE statements found. Sources may be file paths or
+// raw SQL strings. Non-CREATE TABLE statements are skipped with a
+// warning. If multiple sources define the same table name, the last
+// definition wins and a warning is recorded.
+func Load(sources []SchemaSource) (*Catalog, error) {
 	cat := &Catalog{byName: make(map[string]int)}
 
-	for _, path := range paths {
-		// Stat before ReadFile so we reject oversized files without
-		// allocating their contents into memory.
-		info, err := os.Stat(path)
+	for _, src := range sources {
+		label := src.label()
+
+		sql, err := readSource(src)
 		if err != nil {
-			return nil, fmt.Errorf("stat schema file %s: %w", path, err)
+			return nil, err
 		}
-		if info.Size() > maxSchemaFileSize {
-			return nil, fmt.Errorf("schema file %s is too large (%d bytes, max %d)",
-				path, info.Size(), maxSchemaFileSize)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read schema file %s: %w", path, err)
+		if sql == "" {
+			cat.warnings = append(cat.warnings,
+				fmt.Sprintf("%s: source contained no SQL statements", label))
+			continue
 		}
 
-		stmts, err := parser.Parse(string(data))
+		stmts, err := parser.Parse(sql)
 		if err != nil {
-			return nil, fmt.Errorf("parse schema file %s: %w", path, err)
+			return nil, fmt.Errorf("parse schema %s: %w", label, err)
 		}
 
 		var skippedTags []string
@@ -57,14 +76,14 @@ func LoadFiles(paths []string) (*Catalog, error) {
 			tableName := ct.Table.Table()
 			if tableName == "" {
 				cat.warnings = append(cat.warnings,
-					fmt.Sprintf("%s: skipped CREATE TABLE with empty table name", path))
+					fmt.Sprintf("%s: skipped CREATE TABLE with empty table name", label))
 				continue
 			}
 			tbl := extractTable(ct)
 			key := strings.ToLower(tbl.Name)
 			if idx, exists := cat.byName[key]; exists {
 				cat.warnings = append(cat.warnings,
-					fmt.Sprintf("%s: table %q defined more than once; using last definition", path, tbl.Name))
+					fmt.Sprintf("%s: table %q defined more than once; using last definition", label, tbl.Name))
 				cat.tables[idx] = tbl
 			} else {
 				cat.byName[key] = len(cat.tables)
@@ -75,11 +94,50 @@ func LoadFiles(paths []string) (*Catalog, error) {
 		if len(skippedTags) > 0 {
 			cat.warnings = append(cat.warnings,
 				fmt.Sprintf("%s: skipped %d non-CREATE TABLE statement(s): %s",
-					path, len(skippedTags), strings.Join(skippedTags, ", ")))
+					label, len(skippedTags), strings.Join(skippedTags, ", ")))
 		}
 	}
 
 	return cat, nil
+}
+
+// LoadFiles parses the SQL content of each file and builds a Catalog.
+// It is a convenience wrapper around Load for callers that only have
+// file paths.
+func LoadFiles(paths []string) (*Catalog, error) {
+	sources := make([]SchemaSource, len(paths))
+	for i, p := range paths {
+		sources[i] = SchemaSource{Path: p}
+	}
+	return Load(sources)
+}
+
+// readSource returns the SQL content for a single SchemaSource. For
+// file-based sources it validates the file size before reading.
+func readSource(src SchemaSource) (string, error) {
+	if src.Path != "" && src.SQL != "" {
+		return "", fmt.Errorf("schema source %s has both Path and SQL set; only one is allowed",
+			src.label())
+	}
+	if src.Path == "" {
+		return src.SQL, nil
+	}
+
+	label := src.label()
+
+	info, err := os.Stat(src.Path)
+	if err != nil {
+		return "", fmt.Errorf("stat schema file %s: %w", label, err)
+	}
+	if info.Size() > MaxSchemaFileSize {
+		return "", fmt.Errorf("schema file %s is too large (%d bytes, max %d)",
+			label, info.Size(), MaxSchemaFileSize)
+	}
+	data, err := os.ReadFile(src.Path)
+	if err != nil {
+		return "", fmt.Errorf("read schema file %s: %w", label, err)
+	}
+	return string(data), nil
 }
 
 // extractTable converts a parsed CREATE TABLE AST into the catalog's

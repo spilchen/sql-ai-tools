@@ -261,6 +261,102 @@ func TestDescribeCmdWarningsInJSONOutput(t *testing.T) {
 	require.Contains(t, env.Errors[0].Message, "skipped 1 non-CREATE TABLE")
 }
 
+func TestDescribeCmdStdinBasic(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetIn(bytes.NewBufferString(`CREATE TABLE t (id INT8 PRIMARY KEY, name TEXT)`))
+	root.SetArgs([]string{"describe", "t", "--schema", "-", "--output", "json"})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Empty(t, env.Errors)
+
+	var tbl catalog.Table
+	require.NoError(t, json.Unmarshal(env.Data, &tbl))
+	require.Equal(t, "t", tbl.Name)
+	require.Len(t, tbl.Columns, 2)
+	require.Equal(t, []string{"id"}, tbl.PrimaryKey)
+}
+
+func TestDescribeCmdStdinTextOutput(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetIn(bytes.NewBufferString(`CREATE TABLE users (id INT8 PRIMARY KEY, email TEXT NOT NULL)`))
+	root.SetArgs([]string{"describe", "users", "--schema", "-"})
+
+	require.NoError(t, root.Execute())
+
+	got := stdout.String()
+	require.Contains(t, got, "Table: users")
+	require.Contains(t, got, "id")
+	require.Contains(t, got, "email")
+	require.Contains(t, got, "Primary Key: id")
+}
+
+func TestDescribeCmdStdinMixedWithFile(t *testing.T) {
+	schema := writeSchemaFile(t, `CREATE TABLE a (id INT8 PRIMARY KEY)`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetIn(bytes.NewBufferString(`CREATE TABLE b (id INT8 PRIMARY KEY)`))
+	root.SetArgs([]string{"describe", "b", "--schema", schema, "--schema", "-", "--output", "json"})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Empty(t, env.Errors)
+
+	var tbl catalog.Table
+	require.NoError(t, json.Unmarshal(env.Data, &tbl))
+	require.Equal(t, "b", tbl.Name)
+}
+
+func TestDescribeCmdStdinDuplicateRejected(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetIn(bytes.NewBufferString(`CREATE TABLE t (id INT8 PRIMARY KEY)`))
+	root.SetArgs([]string{"describe", "t", "--schema", "-", "--schema", "-", "--output", "json"})
+
+	err := root.Execute()
+	require.Error(t, err)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.NotEmpty(t, env.Errors)
+	require.Contains(t, env.Errors[0].Message, "stdin")
+	require.Contains(t, env.Errors[0].Message, "once")
+}
+
+func TestDescribeCmdStdinEmpty(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetIn(bytes.NewBufferString(""))
+	root.SetArgs([]string{"describe", "t", "--schema", "-", "--output", "json"})
+
+	err := root.Execute()
+	require.Error(t, err)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 2)
+	require.Equal(t, output.SeverityWarning, env.Errors[0].Severity)
+	require.Contains(t, env.Errors[0].Message, "no SQL statements")
+	require.Contains(t, env.Errors[1].Message, "not found")
+}
+
 func TestDescribeCmdParseError(t *testing.T) {
 	schema := writeSchemaFile(t, `CREAT TABLE bad (id INT8)`)
 
@@ -276,5 +372,5 @@ func TestDescribeCmdParseError(t *testing.T) {
 	var env output.Envelope
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
 	require.NotEmpty(t, env.Errors)
-	require.Contains(t, env.Errors[0].Message, "parse schema file")
+	require.Contains(t, env.Errors[0].Message, "parse schema")
 }
