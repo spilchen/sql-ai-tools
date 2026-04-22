@@ -95,6 +95,7 @@ round-tripping through a live cluster.`,
 	root.AddCommand(newFormatCmd(state))
 	root.AddCommand(newValidateCmd(state))
 	root.AddCommand(newDescribeCmd(state))
+	root.AddCommand(newListTablesCmd(state))
 	root.AddCommand(newRiskCmd(state))
 	root.AddCommand(newMCPCmd())
 	return root
