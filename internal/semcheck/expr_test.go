@@ -10,7 +10,13 @@ import (
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/stretchr/testify/require"
+
+	"github.com/spilchen/sql-ai-tools/internal/builtinstubs"
 )
+
+func init() {
+	builtinstubs.Init("")
+}
 
 func TestCheckExprTypes(t *testing.T) {
 	tests := []struct {
@@ -41,9 +47,21 @@ func TestCheckExprTypes(t *testing.T) {
 			expectedCount: 0,
 		},
 		{
-			name:          "function call skipped",
+			name:          "builtin function resolved",
 			sql:           "SELECT length('hello')",
 			expectedCount: 0,
+		},
+		{
+			name:          "builtin function wrong arg type",
+			sql:           "SELECT upper(123)",
+			expectedCount: 1,
+			expectedMsg:   "unknown signature",
+		},
+		{
+			name:          "unknown function detected",
+			sql:           "SELECT now_()",
+			expectedCount: 1,
+			expectedMsg:   "unknown function",
 		},
 		{
 			name:          "subquery skipped",

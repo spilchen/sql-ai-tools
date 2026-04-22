@@ -15,10 +15,12 @@ import (
 	"os"
 
 	"github.com/spilchen/sql-ai-tools/cmd"
+	"github.com/spilchen/sql-ai-tools/internal/builtinstubs"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
 func main() {
+	builtinstubs.Init("")
 	if err := cmd.Execute(); err != nil {
 		// cmd.Execute() suppresses cobra's own error printing
 		// (SilenceErrors on rootCmd) so that this is the single
