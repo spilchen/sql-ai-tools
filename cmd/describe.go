@@ -67,16 +67,10 @@ Use --schema - to read DDL from stdin, allowing direct piping:
 
 			cat, err := catalog.Load(sources)
 			if err != nil {
-				return r.RenderError(baseEnv, err)
+				return renderSchemaLoadError(r, baseEnv, err)
 			}
 
-			for _, w := range cat.Warnings() {
-				baseEnv.Errors = append(baseEnv.Errors, output.Error{
-					Code:     "schema_warning",
-					Severity: output.SeverityWarning,
-					Message:  w,
-				})
-			}
+			appendSchemaWarnings(&baseEnv, cat)
 
 			tableName := args[0]
 			tbl, ok := cat.Table(tableName)
