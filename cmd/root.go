@@ -14,6 +14,7 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/catalog"
+	"github.com/spilchen/sql-ai-tools/internal/config"
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
@@ -45,6 +47,12 @@ type rootState struct {
 	// a connection check for empty and return a structured error.
 	// Populated by PersistentPreRunE.
 	dsn string
+
+	// cfg is the parsed crdb-sql.yaml, or nil when no config file was
+	// found in CWD (or pointed at by --config). Subcommands treat nil
+	// as "no project config; use flags" — config consumption is
+	// opt-in per subcommand. Populated by PersistentPreRunE.
+	cfg *config.File
 }
 
 // newRootCmd builds a fresh root command with all subcommands attached.
@@ -86,6 +94,16 @@ round-tripping through a live cluster.`,
 			} else {
 				state.dsn = os.Getenv("CRDB_DSN")
 			}
+
+			cfgPath, err := cmd.Flags().GetString(configFlag)
+			if err != nil {
+				return err
+			}
+			cfg, err := loadConfig(cfgPath)
+			if err != nil {
+				return err
+			}
+			state.cfg = cfg
 			return nil
 		},
 	}
@@ -93,6 +111,8 @@ round-tripping through a live cluster.`,
 		`output format: "text" or "json"`)
 	root.PersistentFlags().String(dsnFlag, "",
 		"CockroachDB connection string (overrides CRDB_DSN env var)")
+	root.PersistentFlags().String(configFlag, "",
+		"path to crdb-sql.yaml (default: auto-discover in CWD)")
 	root.AddCommand(newVersionCmd(state))
 	root.AddCommand(newPingCmd(state))
 	root.AddCommand(newParseCmd(state))
@@ -112,7 +132,24 @@ round-tripping through a live cluster.`,
 const (
 	outputFlag = "output"
 	dsnFlag    = "dsn"
+	configFlag = "config"
 )
+
+// loadConfig resolves the project YAML config. When path is non-empty,
+// the file at that path must exist and parse cleanly (explicit user
+// intent — fail loudly). When path is empty, Discover looks in CWD;
+// absence is silently tolerated so commands work outside configured
+// projects.
+func loadConfig(path string) (*config.File, error) {
+	if path != "" {
+		return config.Load(path)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("get working directory: %w", err)
+	}
+	return config.Discover(cwd)
+}
 
 // Execute runs the root command against process arguments and returns
 // whatever cobra surfaces. It does not print the error or call

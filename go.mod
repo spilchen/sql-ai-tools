@@ -5,6 +5,7 @@ go 1.26
 toolchain go1.26.2
 
 require (
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/cockroachdb/cockroachdb-parser v0.0.0-00010101000000-000000000000
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/lib/pq v1.10.6
@@ -12,6 +13,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/mod v0.27.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -76,7 +78,6 @@ require (
 	google.golang.org/genproto v0.0.0-20230410155749-daa745c078e1 // indirect
 	google.golang.org/grpc v1.72.1 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace github.com/cockroachdb/cockroachdb-parser => github.com/spilchen/cockroachdb-parser v0.26.2

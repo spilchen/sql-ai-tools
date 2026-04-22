@@ -261,6 +261,339 @@ func TestValidateCmdColumnRefNoTypeError(t *testing.T) {
 	require.Equal(t, validTextNoSchema, stdout.String())
 }
 
+// writeFile is a small test helper that creates a file under dir
+// (creating parents as needed) and returns the full path.
+func writeFile(t *testing.T, dir, rel, contents string) string {
+	t.Helper()
+	full := filepath.Join(dir, rel)
+	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+	require.NoError(t, os.WriteFile(full, []byte(contents), 0o644))
+	return full
+}
+
+// setupValidateConfigProject lays down a tiny project with one
+// schema, one valid query, one query that fails to parse, and a
+// crdb-sql.yaml that ties them together. Returns the directory and
+// the absolute paths of the two query files for assertion-side use.
+func setupValidateConfigProject(t *testing.T) (dir, goodQuery, badQuery string) {
+	t.Helper()
+	dir = t.TempDir()
+	writeFile(t, dir, "schema/users.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY, name STRING);\n")
+	goodQuery = writeFile(t, dir, "queries/q1.sql", "SELECT * FROM users;\n")
+	badQuery = writeFile(t, dir, "queries/sub/q2_bad.sql", "SELECT FROM\n")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["schema/*.sql"]
+    queries: ["queries/**/*.sql"]
+`)
+	return dir, goodQuery, badQuery
+}
+
+// TestValidateCmdConfigJSON verifies the YAML-driven path: with a
+// config and no -e/file arg, validate iterates every matched query
+// file, attaches the file path to each error's Context, and exits
+// non-zero overall when any file is invalid.
+func TestValidateCmdConfigJSON(t *testing.T) {
+	dir, goodQuery, badQuery := setupValidateConfigProject(t)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered, "any failed file must surface as ErrRendered")
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, output.TierSchemaFile, env.Tier)
+	require.Len(t, env.Errors, 1, "exactly the bad query should produce an error")
+
+	gotErr := env.Errors[0]
+	require.Equal(t, "42601", gotErr.Code)
+	require.Equal(t, badQuery, gotErr.Context["file"])
+
+	var payload struct {
+		Files []struct {
+			File       string `json:"file"`
+			Valid      bool   `json:"valid"`
+			ErrorCount int    `json:"error_count"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.Len(t, payload.Files, 2)
+
+	byFile := map[string]bool{}
+	for _, f := range payload.Files {
+		byFile[f.File] = f.Valid
+	}
+	require.True(t, byFile[goodQuery], "good query should be valid")
+	require.False(t, byFile[badQuery], "bad query should be invalid")
+}
+
+// TestValidateCmdConfigText verifies that text-mode output for the
+// config path lists each file with a status line.
+func TestValidateCmdConfigText(t *testing.T) {
+	dir, goodQuery, badQuery := setupValidateConfigProject(t)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	got := stdout.String()
+	require.Contains(t, got, goodQuery+": valid")
+	require.Contains(t, got, badQuery+":")
+	require.Contains(t, got, "syntax error")
+	require.Contains(t, got, "42601")
+}
+
+// TestValidateCmdConfigAllValid verifies that a config whose query
+// files all parse cleanly exits zero (no ErrRendered) and reports no
+// errors.
+func TestValidateCmdConfigAllValid(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "schema/users.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY);\n")
+	good1 := writeFile(t, dir, "queries/q1.sql", "SELECT * FROM users;\n")
+	good2 := writeFile(t, dir, "queries/q2.sql", "SELECT 1;\n")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["schema/*.sql"]
+    queries: ["queries/*.sql"]
+`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Empty(t, env.Errors)
+
+	var payload struct {
+		Files []struct {
+			File  string `json:"file"`
+			Valid bool   `json:"valid"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.Len(t, payload.Files, 2)
+	for _, f := range payload.Files {
+		require.True(t, f.Valid, "file %s should be valid", f.File)
+	}
+	require.Contains(t, []string{payload.Files[0].File, payload.Files[1].File}, good1)
+	require.Contains(t, []string{payload.Files[0].File, payload.Files[1].File}, good2)
+}
+
+// TestValidateCmdCLIOverridesConfig verifies that an explicit -e
+// short-circuits the config path even when a config is loaded — the
+// per-user precedence rule.
+func TestValidateCmdCLIOverridesConfig(t *testing.T) {
+	dir, _, _ := setupValidateConfigProject(t)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+		"-e", "SELECT 1",
+	})
+
+	require.NoError(t, root.Execute())
+	require.Equal(t, validTextNoSchema, stdout.String(),
+		"explicit -e must short-circuit the config path and run the no-schema text path")
+}
+
+// TestValidateCmdConfigCLISchemaWins verifies that an explicit --schema
+// also short-circuits the config path: the user is asking for a one-off
+// validation against a specific schema, not the project default.
+func TestValidateCmdConfigCLISchemaWins(t *testing.T) {
+	dir, _, _ := setupValidateConfigProject(t)
+	otherSchema := writeUsersSchema(t)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+		"--schema", otherSchema,
+		"-e", "SELECT * FROM users",
+	})
+
+	require.NoError(t, root.Execute())
+	require.Equal(t, "Valid.\n", stdout.String(),
+		"explicit --schema must use the single-input flow with name resolution")
+}
+
+// TestValidateCmdConfigUnknownTable verifies that the YAML config path
+// runs name resolution against the loaded schema and surfaces unknown-
+// table errors per file (proving the catalog is actually consulted, not
+// just loaded).
+func TestValidateCmdConfigUnknownTable(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "schema/users.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY);\n")
+	bad := writeFile(t, dir, "queries/q.sql", "SELECT * FROM nonexistent;\n")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["schema/*.sql"]
+    queries: ["queries/*.sql"]
+`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 1)
+	require.Equal(t, "42P01", env.Errors[0].Code)
+	require.Equal(t, bad, env.Errors[0].Context["file"])
+}
+
+// TestValidateCmdConfigMissingFileFails verifies that pointing
+// --config at a non-existent path is a hard error rather than a
+// silent fall-through (Discover tolerates absence; explicit Load does
+// not).
+func TestValidateCmdConfigMissingFileFails(t *testing.T) {
+	root := newRootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--config", filepath.Join(t.TempDir(), "does-not-exist.yaml"),
+	})
+
+	err := root.Execute()
+	require.Error(t, err)
+}
+
+// TestValidateCmdConfigMultiPair verifies that two pairs each get their
+// own catalog: a query that references a table from one pair must not
+// resolve against the other pair's schema. This guards against a
+// regression where the catalog construction is hoisted out of the
+// per-pair loop.
+func TestValidateCmdConfigMultiPair(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "prod/schema.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY);\n")
+	writeFile(t, dir, "test/schema.sql",
+		"CREATE TABLE fixtures (id INT PRIMARY KEY);\n")
+	prodGood := writeFile(t, dir, "prod/queries/q.sql", "SELECT * FROM users;\n")
+	testGood := writeFile(t, dir, "test/queries/q.sql", "SELECT * FROM fixtures;\n")
+	prodBad := writeFile(t, dir, "prod/queries/cross.sql", "SELECT * FROM fixtures;\n")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["prod/schema.sql"]
+    queries: ["prod/queries/*.sql"]
+  - schema: ["test/schema.sql"]
+    queries: ["test/queries/*.sql"]
+`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered, "prod/cross.sql references the test pair's table; pair isolation must surface this")
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 1)
+	require.Equal(t, "42P01", env.Errors[0].Code)
+	require.Equal(t, prodBad, env.Errors[0].Context["file"])
+
+	var payload struct {
+		Files []struct {
+			File  string `json:"file"`
+			Valid bool   `json:"valid"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.Len(t, payload.Files, 3)
+
+	byFile := map[string]bool{}
+	for _, f := range payload.Files {
+		byFile[f.File] = f.Valid
+	}
+	require.True(t, byFile[prodGood], "prod query against prod schema must resolve")
+	require.True(t, byFile[testGood], "test query against test schema must resolve")
+	require.False(t, byFile[prodBad], "prod query against test-only table must fail")
+}
+
+// TestValidateCmdConfigBadSchemaFails verifies that a DDL parse
+// failure in a config-listed schema file aborts validation entirely
+// (the catalog is a config-level prerequisite, not a per-file
+// concern).
+func TestValidateCmdConfigBadSchemaFails(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "schema/broken.sql", "CREATE TABLE bad (")
+	writeFile(t, dir, "queries/q.sql", "SELECT 1;")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["schema/*.sql"]
+    queries: ["queries/*.sql"]
+`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.NotEmpty(t, env.Errors)
+}
+
 // TestValidateCmdMultiStatementError verifies that an error in a later
 // statement reports the correct position relative to the full input.
 func TestValidateCmdMultiStatementError(t *testing.T) {
