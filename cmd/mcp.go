@@ -20,7 +20,11 @@ import (
 // blocks until the client disconnects (stdin closes); a clean
 // disconnect returns nil, anything else surfaces as the cobra error.
 // The registered tools are defined in internal/mcp.NewServer.
-func newMCPCmd() *cobra.Command {
+//
+// state.targetVersion (if set via --target-version) is forwarded to
+// the server as a default applied to every tool call; per-call
+// target_version arguments override it.
+func newMCPCmd(state *rootState) *cobra.Command {
 	return &cobra.Command{
 		Use:   "mcp",
 		Short: "Run the crdb-sql MCP server on stdio",
@@ -37,7 +41,7 @@ via "claude mcp add"); the process exits when the client closes stdin.`,
 			if err != nil {
 				return err
 			}
-			s := internalmcp.NewServer(Version, parserVer)
+			s := internalmcp.NewServer(Version, parserVer, state.targetVersion)
 			// Wrap the transport error so a failure in the stdio loop
 			// surfaces through cobra's "Error:" line as obviously
 			// transport-layer rather than as an opaque message from

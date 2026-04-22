@@ -24,20 +24,27 @@ func FormatSQLTool() mcp.Tool {
 		FormatSQLToolName,
 		mcp.WithDescription("Pretty-print SQL statements in canonical CockroachDB format. Returns an envelope with the formatted SQL string."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to format (may contain multiple semicolon-separated statements)")),
+		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
 }
 
 // FormatSQLHandler returns the handler for the format_sql tool. It
 // delegates to sqlformat.Format and wraps the result in the standard
-// output.Envelope used by all Tier 1 tools.
-func FormatSQLHandler(parserVersion string) server.ToolHandlerFunc {
+// output.Envelope used by all Tier 1 tools. defaultTargetVersion is
+// the server-level default; per-call target_version arguments override
+// it.
+func FormatSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sql, toolErr := extractSQL(req)
 		if toolErr != nil {
 			return toolErr, nil
 		}
+		target, toolErr := resolveTargetVersion(req, defaultTargetVersion)
+		if toolErr != nil {
+			return toolErr, nil
+		}
 
-		env := baseEnvelope(parserVersion)
+		env := baseEnvelope(parserVersion, target)
 
 		formatted, err := sqlformat.Format(sql)
 		if err != nil {

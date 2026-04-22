@@ -39,6 +39,18 @@ const (
 	ExplainSQLToolName       = "explain_sql"
 )
 
+// TargetVersionParamName is the optional MCP tool parameter name that
+// lets a client override the server's default target CockroachDB
+// version on a per-call basis. Tools that accept it follow the same
+// validation rules as the CLI's --target-version flag (see
+// output.ValidateTargetVersion).
+const TargetVersionParamName = "target_version"
+
+// TargetVersionParamDescription is the shared MCP-schema description
+// for the target_version parameter so every tool documents the
+// argument identically.
+const TargetVersionParamDescription = "Optional target CockroachDB version (MAJOR.MINOR or MAJOR.MINOR.PATCH, with optional leading 'v'). Overrides the server-level default for this call."
+
 // extractRequiredString validates and returns a required string
 // parameter from an MCP tool request. Leading and trailing whitespace
 // is trimmed so all handlers behave consistently. On success, the
@@ -69,25 +81,95 @@ func extractSQL(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
 }
 
 // baseEnvelope returns a pre-populated Envelope for Tier 1 (zero-config,
-// disconnected) tools.
-func baseEnvelope(parserVersion string) output.Envelope {
-	return output.Envelope{
+// disconnected) tools. When targetVersion is non-empty it is stamped
+// onto the envelope and, if it differs from parserVersion at the
+// MAJOR.MINOR level, an output.CodeTargetVersionMismatch warning is
+// appended to Errors. Pass "" for targetVersion when the caller wants
+// no target-version stamping (matches the CLI behaviour when
+// --target-version is omitted).
+//
+// The append site here mirrors the CLI append site in
+// cmd/newEnvelope; both must use output.VersionMismatchWarning so the
+// two surfaces stay in sync.
+func baseEnvelope(parserVersion, targetVersion string) output.Envelope {
+	env := output.Envelope{
 		Tier:             output.TierZeroConfig,
 		ParserVersion:    parserVersion,
 		ConnectionStatus: output.ConnectionDisconnected,
 	}
+	stampTargetVersion(&env, parserVersion, targetVersion)
+	return env
 }
 
 // connectedEnvelope returns a pre-populated Envelope for Tier 3
 // (connected) tools. ConnectionStatus starts disconnected and is flipped
 // to connected by the handler after a successful round-trip to the
 // cluster, so a partial failure surfaces with the correct state.
-func connectedEnvelope(parserVersion string) output.Envelope {
-	return output.Envelope{
+//
+// targetVersion follows the same contract as baseEnvelope: empty
+// means "no target-version stamping," non-empty stamps the field and
+// (when MAJOR.MINOR diverges from parserVersion) appends a mismatch
+// warning. This keeps Tier 3 tools consistent with the CLI and Tier 1
+// surfaces.
+func connectedEnvelope(parserVersion, targetVersion string) output.Envelope {
+	env := output.Envelope{
 		Tier:             output.TierConnected,
 		ParserVersion:    parserVersion,
 		ConnectionStatus: output.ConnectionDisconnected,
 	}
+	stampTargetVersion(&env, parserVersion, targetVersion)
+	return env
+}
+
+// stampTargetVersion is the shared post-construction step for
+// baseEnvelope and connectedEnvelope. Centralising it ensures the
+// two surfaces never drift on whether the warning is appended or
+// what code it carries.
+func stampTargetVersion(env *output.Envelope, parserVersion, targetVersion string) {
+	if targetVersion == "" {
+		return
+	}
+	env.TargetVersion = targetVersion
+	if warning, ok := output.VersionMismatchWarning(parserVersion, targetVersion); ok {
+		env.Errors = append(env.Errors, warning)
+	}
+}
+
+// resolveTargetVersion picks the target version to stamp onto the
+// envelope for a single tool call. The per-call target_version
+// argument wins over defaultTargetVersion when it is present, a
+// string, and non-empty after trimming. A non-string value is a
+// hard error (returned as a tool error) because there is no
+// reasonable interpretation; an empty string is treated as "use the
+// default" so clients can send the field unconditionally without
+// disabling the server-level default.
+//
+// On success the returned *mcp.CallToolResult is nil. On a malformed
+// per-call argument it is a pre-built tool error so the caller can
+// return immediately rather than producing a misleading envelope.
+func resolveTargetVersion(req mcp.CallToolRequest, defaultTargetVersion string) (string, *mcp.CallToolResult) {
+	raw, exists := req.GetArguments()[TargetVersionParamName]
+	if !exists {
+		return defaultTargetVersion, nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", mcp.NewToolResultError(fmt.Sprintf(
+			"%s parameter must be a string, got %T", TargetVersionParamName, raw))
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		// Treat an empty per-call value as "use the default" rather
+		// than as a validation error; clients that send {"target_version": ""}
+		// likely mean "no override".
+		return defaultTargetVersion, nil
+	}
+	canonical, err := output.ValidateTargetVersion(s)
+	if err != nil {
+		return "", mcp.NewToolResultError(fmt.Sprintf(
+			"%s parameter: %v", TargetVersionParamName, err))
+	}
+	return canonical, nil
 }
 
 // envelopeResult marshals env as JSON and wraps it in a successful MCP

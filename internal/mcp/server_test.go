@@ -74,7 +74,7 @@ func TestPingHandler(t *testing.T) {
 // AddTool — or renames a tool — would silently break MCP clients; this
 // test surfaces it without speaking the protocol.
 func TestNewServerRegistersTools(t *testing.T) {
-	s := NewServer("v1.2.3", "v0.26.2")
+	s := NewServer("v1.2.3", "v0.26.2", "" /* defaultTargetVersion */)
 	require.NotNil(t, s)
 	registered := s.ListTools()
 

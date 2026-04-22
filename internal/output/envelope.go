@@ -74,6 +74,10 @@ const (
 //     value.
 //   - ParserVersion and ConnectionStatus are always emitted so agents
 //     can rely on their presence.
+//   - TargetVersion uses omitempty so the field is absent when the
+//     user did not pass --target-version (or the equivalent MCP
+//     parameter). This preserves byte-identical output for the
+//     unflagged path.
 //   - Errors uses omitempty so a clean run produces no errors key
 //     rather than a noisy "errors": null.
 //   - Data is json.RawMessage so each subcommand controls its own
@@ -82,10 +86,23 @@ const (
 type Envelope struct {
 	Tier             Tier             `json:"tier,omitempty"`
 	ParserVersion    string           `json:"parser_version"`
+	TargetVersion    string           `json:"target_version,omitempty"`
 	ConnectionStatus ConnectionStatus `json:"connection_status"`
 	Errors           []Error          `json:"errors,omitempty"`
 	Data             json.RawMessage  `json:"data,omitempty"`
 }
+
+// Stable Error.Code values. Agents key off these strings, so renames
+// are breaking changes; new codes are added by appending here. Codes
+// are namespaced by the producing concept (e.g. "target_version_*"
+// for envelope-level version-handling diagnostics).
+const (
+	// CodeTargetVersionMismatch is emitted by
+	// output.VersionMismatchWarning when the user-declared target
+	// version differs from the bundled parser version at the
+	// MAJOR.MINOR level.
+	CodeTargetVersionMismatch = "target_version_mismatch"
+)
 
 // Severity is the severity level of a structured Error. Values use the
 // PostgreSQL frontend/backend protocol severity strings (uppercase) so

@@ -53,6 +53,17 @@ type rootState struct {
 	// as "no project config; use flags" — config consumption is
 	// opt-in per subcommand. Populated by PersistentPreRunE.
 	cfg *config.File
+
+	// targetVersion is the canonical CockroachDB version the user
+	// declared via --target-version. The empty string is the
+	// sentinel for "flag not supplied"; newEnvelope (and the MCP
+	// server, which forwards it as the per-call default) reads this
+	// to decide whether to stamp the field and emit a mismatch
+	// warning. "Canonical" means the leading "v" (if any) has been
+	// stripped and components have been validated as unsigned
+	// integers; ValidateTargetVersion is the sole producer.
+	// Populated by PersistentPreRunE after format validation.
+	targetVersion string
 }
 
 // newRootCmd builds a fresh root command with all subcommands attached.
@@ -104,6 +115,18 @@ round-tripping through a live cluster.`,
 				return err
 			}
 			state.cfg = cfg
+
+			rawTarget, err := cmd.Flags().GetString(targetVersionFlag)
+			if err != nil {
+				return err
+			}
+			if rawTarget != "" {
+				canonical, err := output.ValidateTargetVersion(rawTarget)
+				if err != nil {
+					return fmt.Errorf("--%s: %w", targetVersionFlag, err)
+				}
+				state.targetVersion = canonical
+			}
 			return nil
 		},
 	}
@@ -113,6 +136,8 @@ round-tripping through a live cluster.`,
 		"CockroachDB connection string (overrides CRDB_DSN env var)")
 	root.PersistentFlags().String(configFlag, "",
 		"path to crdb-sql.yaml (default: auto-discover in CWD)")
+	root.PersistentFlags().String(targetVersionFlag, "",
+		"Target CockroachDB version (e.g. 25.4.0); reported in the response envelope")
 	root.AddCommand(newVersionCmd(state))
 	root.AddCommand(newPingCmd(state))
 	root.AddCommand(newParseCmd(state))
@@ -122,7 +147,7 @@ round-tripping through a live cluster.`,
 	root.AddCommand(newListTablesCmd(state))
 	root.AddCommand(newRiskCmd(state))
 	root.AddCommand(newExplainCmd(state))
-	root.AddCommand(newMCPCmd())
+	root.AddCommand(newMCPCmd(state))
 	return root
 }
 
@@ -130,9 +155,10 @@ round-tripping through a live cluster.`,
 // between the root command's flag registration and PersistentPreRunE
 // lookup so the two stay in sync.
 const (
-	outputFlag = "output"
-	dsnFlag    = "dsn"
-	configFlag = "config"
+	outputFlag        = "output"
+	dsnFlag           = "dsn"
+	configFlag        = "config"
+	targetVersionFlag = "target-version"
 )
 
 // loadConfig resolves the project YAML config. When path is non-empty,
@@ -183,6 +209,12 @@ func newEnvelope(
 		return r, env, err
 	}
 	env.ParserVersion = parserVer
+	if state.targetVersion != "" {
+		env.TargetVersion = state.targetVersion
+		if warning, ok := output.VersionMismatchWarning(parserVer, state.targetVersion); ok {
+			env.Errors = append(env.Errors, warning)
+		}
+	}
 	return r, env, nil
 }
 
