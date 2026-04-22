@@ -6,12 +6,15 @@
 // Package semcheck provides Tier 1 (zero-config) semantic checks that
 // operate on parsed ASTs without a schema catalog or cluster
 // connection. Currently the only check is expression type checking,
-// which detects binary-operator type mismatches in literal expressions
-// (e.g. 1 + 'hello') using MakeSemaContext(nil).
+// which detects type mismatches in literal expressions (e.g. 1 +
+// 'hello') and builtin function calls (e.g. upper(123)) using
+// MakeSemaContext(nil). Builtin function metadata is registered at
+// startup via internal/builtinstubs, enabling function-name validation
+// and overload resolution without a live database.
 //
-// Expressions that reference columns, functions, subqueries, or
-// placeholders are silently skipped because resolving those names
-// requires a catalog (Tier 2) or connection (Tier 3).
+// Expressions that reference columns, subqueries, or placeholders are
+// silently skipped because resolving those names requires a catalog
+// (Tier 2) or connection (Tier 3).
 package semcheck
 
 import (
@@ -28,9 +31,10 @@ import (
 
 // CheckExprTypes walks every expression in stmts and type-checks
 // variable-free sub-trees using MakeSemaContext(nil). Expressions
-// containing column references, function calls, subqueries, or
-// placeholders are skipped. Returns one output.Error per type-check
-// failure; the slice is nil when all checked expressions are valid.
+// containing column references, subqueries, or placeholders are
+// skipped. Builtin function calls are resolved against the registered
+// stubs. Returns one output.Error per type-check failure; the slice is
+// nil when all checked expressions are valid.
 func CheckExprTypes(stmts statements.Statements, fullSQL string) []output.Error {
 	semaCtx := tree.MakeSemaContext(nil)
 	var errs []output.Error
@@ -61,13 +65,14 @@ func CheckExprTypes(stmts statements.Statements, fullSQL string) []output.Error 
 }
 
 // isVariable returns true if expr is a node type that requires a
-// resolver we don't have in Tier 1 (no catalog, no builtins
-// registry).
+// resolver we don't have in Tier 1 (no catalog). FuncExpr is NOT
+// listed here because builtin function stubs are registered at init
+// time via internal/builtinstubs, so the type checker can resolve
+// builtin function names and check argument types.
 func isVariable(expr tree.Expr) bool {
 	switch expr.(type) {
 	case *tree.UnresolvedName,
 		*tree.ColumnItem,
-		*tree.FuncExpr,
 		*tree.Subquery,
 		*tree.Placeholder,
 		*tree.IndexedVar,

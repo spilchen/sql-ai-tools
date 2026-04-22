@@ -24,6 +24,7 @@ import (
 	// coverage that exercises the real resolution branches.
 	_ "github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 
+	"github.com/spilchen/sql-ai-tools/internal/builtinstubs"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
@@ -62,14 +63,19 @@ replace directive) selected at build time.`,
 				return r.RenderError(env, err)
 			}
 			data, err := json.Marshal(struct {
-				BinaryVersion string `json:"binary_version"`
-			}{BinaryVersion: Version})
+				BinaryVersion   string `json:"binary_version"`
+				BuiltinsVersion string `json:"builtins_version,omitempty"`
+			}{
+				BinaryVersion:   Version,
+				BuiltinsVersion: builtinstubs.ActiveVersion(),
+			})
 			if err != nil {
 				return r.RenderError(env, err)
 			}
 			env.Data = data
 			return r.Render(env, func(w io.Writer) error {
-				_, werr := fmt.Fprintf(w, "crdb-sql: %s\ncockroachdb-parser: %s\n", Version, env.ParserVersion)
+				_, werr := fmt.Fprintf(w, "crdb-sql: %s\ncockroachdb-parser: %s\nbuiltins-stubs: %s\n",
+					Version, env.ParserVersion, builtinstubs.ActiveVersion())
 				return werr
 			})
 		},

@@ -10,7 +10,13 @@ GOLANGCI_LINT           := $(BIN_DIR)/golangci-lint
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build test fmt fmt-check vet lint clean tools tidy-check
+# Builtin stub generation. Only needed when cockroachdb-parser is bumped.
+COCKROACH_SRC           ?= /mnt/scratch/git/cockroach-3
+STUBS_VERSION           ?= v26.2
+BUILTINS_JSON           := internal/builtinstubs/testdata/crdb_builtins_$(STUBS_VERSION).json
+BUILTINS_GEN            := internal/builtinstubs/stubs_$(subst .,_,$(STUBS_VERSION))_gen.go
+
+.PHONY: help build test fmt fmt-check vet lint clean tools tidy-check generate-builtins
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*?##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -72,6 +78,13 @@ $(GOLANGCI_LINT):
 
 lint: fmt-check vet tidy-check $(GOLANGCI_LINT) ## Run gofmt check, go vet, tidy check, and pinned golangci-lint (CI gate).
 	$(GOLANGCI_LINT) run $(GO_PKGS)
+
+generate-builtins: $(BUILTINS_JSON) ## Generate Go stubs from JSON catalog.
+	go run ./cmd/gen-builtins \
+		-input=$(BUILTINS_JSON) \
+		-output=$(BUILTINS_GEN) \
+		-version=$(STUBS_VERSION)
+	gofmt -w $(BUILTINS_GEN)
 
 clean: ## Remove build artifacts and installed tools.
 	rm -rf $(BIN_DIR)

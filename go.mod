@@ -7,6 +7,7 @@ toolchain go1.26.2
 require (
 	github.com/cockroachdb/cockroachdb-parser v0.0.0-00010101000000-000000000000
 	github.com/jackc/pgx/v5 v5.9.2
+	github.com/lib/pq v1.10.6
 	github.com/mark3labs/mcp-go v0.48.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
@@ -44,7 +45,6 @@ require (
 	github.com/jaegertracing/jaeger v1.18.1 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
-	github.com/lib/pq v1.10.6 // indirect
 	github.com/openzipkin/zipkin-go v0.4.3 // indirect
 	github.com/petermattis/goid v0.0.0-20180202154549-b0b1615b78e5 // indirect
 	github.com/pierrre/geohash v1.0.0 // indirect
