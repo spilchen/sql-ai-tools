@@ -61,16 +61,10 @@ Then list the tables:
 
 			cat, err := catalog.LoadFiles(schemaFiles)
 			if err != nil {
-				return r.RenderError(baseEnv, err)
+				return renderSchemaLoadError(r, baseEnv, err)
 			}
 
-			for _, w := range cat.Warnings() {
-				baseEnv.Errors = append(baseEnv.Errors, output.Error{
-					Code:     "schema_warning",
-					Severity: output.SeverityWarning,
-					Message:  w,
-				})
-			}
+			appendSchemaWarnings(&baseEnv, cat)
 
 			tables := cat.TableNames()
 			if tables == nil {

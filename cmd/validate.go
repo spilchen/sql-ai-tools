@@ -14,10 +14,49 @@ import (
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/spf13/cobra"
 
+	"github.com/spilchen/sql-ai-tools/internal/catalog"
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/semcheck"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
+)
+
+// validateChecks records which validation phases ran on the success
+// path. Each field is "ok" (ran and passed) or "skipped" (prerequisite
+// missing). A failing phase aborts the command via an envelope error,
+// so "fail" never appears here.
+type validateChecks struct {
+	Syntax         string `json:"syntax"`
+	TypeCheck      string `json:"type_check"`
+	NameResolution string `json:"name_resolution"`
+}
+
+// validateResult is the JSON payload emitted by `crdb-sql validate` on
+// the success path. The expanded shape (vs. a bare {valid: true})
+// exposes which phases ran, so agents can tell whether name resolution
+// was skipped due to a missing --schema. Adding a phase means adding a
+// field here and updating the rendering code to set it.
+type validateResult struct {
+	Valid  bool           `json:"valid"`
+	Checks validateChecks `json:"checks"`
+}
+
+const (
+	checkOK      = "ok"
+	checkSkipped = "skipped"
+
+	// capabilityRequiredCode is the envelope error code emitted when a
+	// validation phase is skipped because its prerequisite (e.g.
+	// --schema) is not satisfied. The matching category is the same
+	// string so agents can branch on either field.
+	capabilityRequiredCode     = "capability_required"
+	capabilityRequiredCategory = "capability_required"
+
+	// capabilityNameResolution is the canonical identifier for the
+	// table-name-resolution phase. It is shared between the phase's
+	// skipped-warning Context and any human-readable message text so
+	// the two cannot drift.
+	capabilityNameResolution = "name_resolution"
 )
 
 // newValidateCmd builds the `crdb-sql validate` subcommand. It reads
@@ -27,21 +66,39 @@ import (
 // structured envelope entry with SQLSTATE code, severity, message,
 // and source position.
 //
-// This is a Tier 1 (zero-config) command: it works offline with no
-// schema files or cluster connection.
+// When one or more --schema files are supplied the command additionally
+// resolves table references against the loaded catalog and reports
+// unknown tables (Tier 2). Without --schema, name resolution is skipped
+// and the envelope carries a `capability_required` warning entry so
+// agents can detect the missing capability rather than silently trust
+// a partial result.
 func newValidateCmd(state *rootState) *cobra.Command {
-	var expr string
+	var (
+		expr        string
+		schemaFiles []string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "validate [file]",
-		Short: "Check SQL for syntax errors",
+		Short: "Check SQL for syntax, type, and (with --schema) name errors",
 		Long: `Parse SQL and report whether it is syntactically valid. On failure,
 the error includes the SQLSTATE code, severity, message, and source
 position (line/column/byte offset). Input is read from the -e flag
-(inline SQL), a positional file argument, or stdin.`,
+(inline SQL), a positional file argument, or stdin.
+
+When --schema FILE is supplied (repeatable), table references in
+SELECT/INSERT/UPDATE/DELETE statements are checked against the loaded
+catalog and unknown tables are reported as 42P01 errors with an
+"available_tables" context list. Without --schema, name resolution is
+skipped and a capability_required warning is added to the envelope so
+agents can tell that the check did not run.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r, baseEnv, err := newEnvelope(state, output.TierZeroConfig, cmd)
+			tier := output.TierZeroConfig
+			if len(schemaFiles) > 0 {
+				tier = output.TierSchemaFile
+			}
+			r, baseEnv, err := newEnvelope(state, tier, cmd)
 			if err != nil {
 				return r.RenderError(baseEnv, err)
 			}
@@ -64,24 +121,74 @@ position (line/column/byte offset). Input is read from the -e flag
 				return renderDiagErrors(r, baseEnv, typeErrs)
 			}
 
-			data, err := json.Marshal(struct {
-				Valid bool `json:"valid"`
-			}{Valid: true})
+			checks := validateChecks{
+				Syntax:    checkOK,
+				TypeCheck: checkOK,
+			}
+
+			if len(schemaFiles) == 0 {
+				checks.NameResolution = checkSkipped
+				baseEnv.Errors = append(baseEnv.Errors, capabilityRequiredError(
+					capabilityNameResolution,
+					"name resolution skipped: --schema not provided",
+					"pass --schema FILE to enable table name resolution",
+				))
+			} else {
+				cat, err := catalog.LoadFiles(schemaFiles)
+				if err != nil {
+					return renderSchemaLoadError(r, baseEnv, err)
+				}
+				appendSchemaWarnings(&baseEnv, cat)
+				if nameErrs := semcheck.CheckTableNames(stmts, sql, cat); len(nameErrs) > 0 {
+					return renderDiagErrors(r, baseEnv, nameErrs)
+				}
+				checks.NameResolution = checkOK
+			}
+
+			data, err := json.Marshal(validateResult{Valid: true, Checks: checks})
 			if err != nil {
 				return r.RenderError(baseEnv, err)
 			}
 			baseEnv.Data = data
 
 			return r.Render(baseEnv, func(w io.Writer) error {
-				_, werr := fmt.Fprintln(w, "Valid.")
-				return werr
+				if _, werr := fmt.Fprintln(w, "Valid."); werr != nil {
+					return werr
+				}
+				if checks.NameResolution == checkSkipped {
+					_, werr := fmt.Fprintln(w, "note: name resolution skipped (pass --schema to enable)")
+					return werr
+				}
+				return nil
 			})
 		},
 	}
 
 	cmd.Flags().StringVarP(&expr, "expression", "e", "", "inline SQL to validate")
+	cmd.Flags().StringArrayVar(&schemaFiles, "schema", nil,
+		"schema SQL file(s) to enable table name resolution (repeatable)")
 
 	return cmd
+}
+
+// capabilityRequiredError builds the warning entry that signals a
+// validation phase was skipped because its prerequisite is missing.
+// capability is the short identifier of the skipped phase (e.g.
+// "name_resolution"); message is the user-facing summary; hint tells
+// the user how to enable the phase. The result is appended to the
+// envelope's Errors list rather than aborting the command — exit code
+// stays 0 because the phases that did run all passed.
+func capabilityRequiredError(capability, message, hint string) output.Error {
+	return output.Error{
+		Code:     capabilityRequiredCode,
+		Severity: output.SeverityWarning,
+		Message:  message,
+		Category: capabilityRequiredCategory,
+		Context: map[string]any{
+			"capability": capability,
+			"hint":       hint,
+		},
+	}
 }
 
 // renderParseError enriches a parser error with SQLSTATE code and
@@ -92,10 +199,12 @@ func renderParseError(r output.Renderer, env output.Envelope, parseErr error, sq
 	return renderDiagErrors(r, env, []output.Error{diag.FromParseError(parseErr, sql)})
 }
 
-// renderDiagErrors renders one or more diagnostic errors (parse or
-// type-check) through the standard envelope path.
+// renderDiagErrors renders one or more diagnostic errors (parse, type-
+// check, or name resolution) through the standard envelope path. Any
+// errors already attached to env (e.g. schema-load warnings) are
+// preserved; the new errors are appended.
 func renderDiagErrors(r output.Renderer, env output.Envelope, errs []output.Error) error {
-	env.Errors = errs
+	env.Errors = append(env.Errors, errs...)
 	env.Data = nil
 
 	if err := r.Render(env, func(w io.Writer) error {

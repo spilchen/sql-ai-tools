@@ -14,10 +14,14 @@ package cmd
 
 import (
 	"context"
+	"io"
 	"os"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/pgwire/pgerror"
 	"github.com/spf13/cobra"
 
+	"github.com/spilchen/sql-ai-tools/internal/catalog"
+	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
@@ -143,4 +147,54 @@ func newEnvelope(
 	}
 	env.ParserVersion = parserVer
 	return r, env, nil
+}
+
+// appendSchemaWarnings copies any non-fatal issues recorded by the
+// catalog loader (skipped statements, duplicate definitions) into env
+// as warning-severity envelope entries. Subcommands that consume a
+// catalog call this once after Load/LoadFiles so agents see the
+// loader's diagnostics in the same Errors stream as everything else.
+func appendSchemaWarnings(env *output.Envelope, cat *catalog.Catalog) {
+	for _, w := range cat.Warnings() {
+		env.Errors = append(env.Errors, output.Error{
+			Code:     "schema_warning",
+			Severity: output.SeverityWarning,
+			Message:  w,
+		})
+	}
+}
+
+// renderSchemaLoadError surfaces a catalog.Load/LoadFiles failure as
+// a structured envelope error rather than a generic "internal_error".
+// When the underlying cause carries a SQLSTATE (typically a 42601
+// parse error from a malformed schema file), that code is propagated
+// so agents can branch on it; otherwise the error is tagged
+// "schema_load_error" for I/O and validation failures.
+//
+// Returns output.ErrRendered so the caller signals failure to main.go
+// the same way renderDiagErrors does.
+func renderSchemaLoadError(r output.Renderer, env output.Envelope, err error) error {
+	// pgerror.GetPGCode returns "XXUUU" (Uncategorized) when the
+	// error chain has no SQLSTATE attached — typical for I/O errors
+	// from os.Stat / os.ReadFile. Treat that as "no real code" so we
+	// fall through to the dedicated schema_load_error tag.
+	code := pgerror.GetPGCode(err).String()
+	if code == "" || code == "XXUUU" {
+		code = "schema_load_error"
+	}
+	category := diag.CategoryForCode(code)
+	env.Errors = append(env.Errors, output.Error{
+		Code:     code,
+		Severity: output.SeverityError,
+		Message:  err.Error(),
+		Category: category,
+	})
+	env.Data = nil
+	if rerr := r.Render(env, func(w io.Writer) error {
+		_, werr := io.WriteString(w, err.Error()+"\n")
+		return werr
+	}); rerr != nil {
+		return rerr
+	}
+	return output.ErrRendered
 }
