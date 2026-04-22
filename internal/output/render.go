@@ -116,14 +116,32 @@ func (r Renderer) Render(env Envelope, textFn func(io.Writer) error) error {
 // the consumer abandoned the pipe, so no output channel remains and
 // the best we can do is exit non-zero.
 func (r Renderer) RenderError(env Envelope, failure error) error {
-	if r.Format != FormatJSON {
-		return failure
-	}
-	env.Errors = append(env.Errors, Error{
+	return r.RenderErrorEntry(env, failure, Error{
 		Code:     "internal_error",
 		Severity: SeverityError,
 		Message:  failure.Error(),
 	})
+}
+
+// RenderErrorEntry is the structured-error variant of RenderError for
+// callers that have already constructed an Error themselves. The
+// supplied entry is appended verbatim to env.Errors instead of the
+// generic internal_error shape RenderError synthesizes; this lets
+// callers preserve enriched fields (e.g. SQLSTATE Code, Category,
+// Position) that the generic synthesis would not populate.
+//
+// failure is still required so the text-mode return path stays
+// consistent: text mode bypasses the envelope and returns failure
+// unchanged. entry.Message and failure.Error() are not required to
+// match — JSON consumers see entry, text consumers see failure. All
+// other contract points (ErrRendered sentinel, Data clearing, append
+// semantics on pre-existing errors, errors.Join on render failure)
+// match RenderError.
+func (r Renderer) RenderErrorEntry(env Envelope, failure error, entry Error) error {
+	if r.Format != FormatJSON {
+		return failure
+	}
+	env.Errors = append(env.Errors, entry)
 	env.Data = nil
 	if err := r.Render(env, nil); err != nil {
 		return errors.Join(failure, fmt.Errorf("render error envelope: %w", err))

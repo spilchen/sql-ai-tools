@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/conn"
+	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
@@ -45,7 +46,7 @@ CRDB_DSN environment variable (flag takes precedence).`,
 
 			info, err := mgr.Ping(cmd.Context())
 			if err != nil {
-				return r.RenderError(baseEnv, err)
+				return r.RenderErrorEntry(baseEnv, err, diag.FromClusterError(err, ""))
 			}
 
 			baseEnv.ConnectionStatus = output.ConnectionConnected

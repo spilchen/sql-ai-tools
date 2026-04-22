@@ -14,6 +14,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/spilchen/sql-ai-tools/internal/conn"
+	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
@@ -65,11 +66,7 @@ func ExplainSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 
 		result, err := mgr.Explain(ctx, sql)
 		if err != nil {
-			env.Errors = []output.Error{{
-				Code:     "internal_error",
-				Severity: output.SeverityError,
-				Message:  err.Error(),
-			}}
+			env.Errors = []output.Error{diag.FromClusterError(err, sql)}
 			return envelopeResult(env)
 		}
 

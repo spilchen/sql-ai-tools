@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/conn"
+	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
 )
@@ -62,7 +63,7 @@ connection string is read from --dsn or CRDB_DSN (flag wins).`,
 
 			result, err := mgr.Explain(cmd.Context(), sql)
 			if err != nil {
-				return r.RenderError(baseEnv, err)
+				return r.RenderErrorEntry(baseEnv, err, diag.FromClusterError(err, sql))
 			}
 
 			baseEnv.ConnectionStatus = output.ConnectionConnected

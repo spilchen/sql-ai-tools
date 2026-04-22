@@ -129,6 +129,30 @@ func TestExtractPosition(t *testing.T) {
 	}
 }
 
+func TestCharIndexToByteOffset(t *testing.T) {
+	tests := []struct {
+		name           string
+		sql            string
+		charIdx        int
+		expectedOffset int
+	}{
+		{name: "negative clamps to zero", sql: "abc", charIdx: -5, expectedOffset: 0},
+		{name: "zero is start of string", sql: "abc", charIdx: 0, expectedOffset: 0},
+		{name: "ascii midstring is identity", sql: "SELECT 1", charIdx: 7, expectedOffset: 7},
+		{name: "multibyte rune adds bytes", sql: `"é"x`, charIdx: 3, expectedOffset: 4},
+		{name: "exact end of string", sql: "abc", charIdx: 3, expectedOffset: 3},
+		{name: "past end clamps to len", sql: "abc", charIdx: 99, expectedOffset: 3},
+		{name: "empty string clamps to zero", sql: "", charIdx: 5, expectedOffset: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CharIndexToByteOffset(tc.sql, tc.charIdx)
+			require.Equal(t, tc.expectedOffset, got)
+		})
+	}
+}
+
 func TestLineColumn(t *testing.T) {
 	tests := []struct {
 		name         string
