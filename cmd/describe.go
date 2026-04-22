@@ -18,6 +18,8 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
+const stdinSentinel = "-"
+
 // newDescribeCmd builds the `crdb-sql describe` subcommand. It loads
 // one or more schema files (--schema), parses them with the
 // CockroachDB parser, and describes the named table's columns, primary
@@ -41,7 +43,11 @@ obtain one from a running CockroachDB cluster with:
 
 Then describe any table:
 
-  crdb-sql describe users --schema schema.sql`,
+  crdb-sql describe users --schema schema.sql
+
+Use --schema - to read DDL from stdin, allowing direct piping:
+
+  cockroach sql -e 'SHOW CREATE ALL TABLES' | crdb-sql describe users --schema -`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierSchemaFile, cmd)
@@ -54,7 +60,12 @@ Then describe any table:
 					fmt.Errorf("at least one --schema file is required"))
 			}
 
-			cat, err := catalog.LoadFiles(schemaFiles)
+			sources, err := buildSchemaSources(schemaFiles, cmd.InOrStdin())
+			if err != nil {
+				return r.RenderError(baseEnv, err)
+			}
+
+			cat, err := catalog.Load(sources)
 			if err != nil {
 				return r.RenderError(baseEnv, err)
 			}
@@ -93,9 +104,42 @@ Then describe any table:
 	}
 
 	cmd.Flags().StringArrayVar(&schemaFiles, "schema", nil,
-		"schema SQL file(s) to load (repeatable)")
+		`schema SQL file(s) to load (repeatable); use "-" for stdin`)
 
 	return cmd
+}
+
+// buildSchemaSources converts the raw --schema flag values into
+// catalog.SchemaSource entries. The sentinel "-" means "read from
+// stdin"; it may appear at most once.
+func buildSchemaSources(flags []string, stdin io.Reader) ([]catalog.SchemaSource, error) {
+	var sources []catalog.SchemaSource
+	stdinUsed := false
+
+	for _, f := range flags {
+		if f != stdinSentinel {
+			sources = append(sources, catalog.SchemaSource{Path: f})
+			continue
+		}
+		if stdinUsed {
+			return nil, fmt.Errorf("--schema - (stdin) can only be specified once")
+		}
+		stdinUsed = true
+
+		data, err := io.ReadAll(io.LimitReader(stdin, catalog.MaxSchemaFileSize+1))
+		if err != nil {
+			return nil, fmt.Errorf("reading stdin: %w", err)
+		}
+		if int64(len(data)) > catalog.MaxSchemaFileSize {
+			return nil, fmt.Errorf("stdin input is too large (%d bytes, max %d)",
+				len(data), catalog.MaxSchemaFileSize)
+		}
+		sources = append(sources, catalog.SchemaSource{
+			SQL:   string(data),
+			Label: "stdin",
+		})
+	}
+	return sources, nil
 }
 
 func renderTableText(w io.Writer, tbl catalog.Table) error {
