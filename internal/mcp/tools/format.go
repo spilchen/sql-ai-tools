@@ -46,6 +46,11 @@ func FormatSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHan
 
 		env := baseEnvelope(parserVersion, target)
 
+		// Auto-clean cockroach sql REPL prompts the same way the CLI
+		// format subcommand does, so MCP clients pasting transcripts
+		// get the same forgiving behavior.
+		sql = sqlformat.StripShellPrompts(sql)
+
 		formatted, err := sqlformat.Format(sql)
 		if err != nil {
 			env.Errors = []output.Error{diag.FromParseError(err, sql)}
