@@ -3,11 +3,11 @@
 // Use of this software is governed by the CockroachDB Software License
 // included in the /LICENSE file.
 
-// Package tools provides MCP tool handler constructors for the Tier 1
-// SQL tools (parse_sql, validate_sql, format_sql). Each handler returns
-// the same output.Envelope JSON shape that the CLI emits under
-// --output=json, so MCP clients get structured errors, parser version,
-// and tier metadata consistent with the CLI surface.
+// Package tools provides MCP tool handler constructors for the SQL
+// tools: parse_sql, validate_sql, format_sql, and detect_risky_query.
+// Each handler returns the same output.Envelope JSON shape that the CLI
+// emits under --output=json, so MCP clients get structured errors,
+// parser version, and tier metadata consistent with the CLI surface.
 //
 // Tool-level errors (mcp.NewToolResultError) are reserved for
 // infrastructure problems — missing or invalid parameters. SQL errors
@@ -26,11 +26,12 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
-// Registered MCP tool names for the Tier 1 SQL tools.
+// Registered MCP tool names.
 const (
-	ParseSQLToolName    = "parse_sql"
-	ValidateSQLToolName = "validate_sql"
-	FormatSQLToolName   = "format_sql"
+	ParseSQLToolName         = "parse_sql"
+	ValidateSQLToolName      = "validate_sql"
+	FormatSQLToolName        = "format_sql"
+	DetectRiskyQueryToolName = "detect_risky_query"
 )
 
 // extractSQL validates and returns the required "sql" string parameter
