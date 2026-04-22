@@ -16,7 +16,7 @@ STUBS_VERSION           ?= v26.2
 BUILTINS_JSON           := internal/builtinstubs/testdata/crdb_builtins_$(STUBS_VERSION).json
 BUILTINS_GEN            := internal/builtinstubs/stubs_$(subst .,_,$(STUBS_VERSION))_gen.go
 
-.PHONY: help build test fmt fmt-check vet lint clean tools tidy-check generate-builtins
+.PHONY: help build test test-integration fmt fmt-check vet lint clean tools tidy-check generate-builtins
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*?##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -27,6 +27,14 @@ build: ## Compile the binary into bin/.
 
 test: ## Run the Go test suite.
 	go test $(GO_PKGS)
+
+# Integration tests are gated behind the `integration` build tag and
+# require a real cockroach binary. Set COCKROACH_BIN to override the
+# default $PATH lookup. With neither COCKROACH_BIN nor CRDB_TEST_DSN
+# set, the tests t.Skip cleanly so this target is safe to run on
+# machines that have not installed cockroach.
+test-integration: ## Run integration tests (requires cockroach binary; set COCKROACH_BIN to override).
+	go test -tags integration -count=1 -timeout 180s $(GO_PKGS)
 
 fmt: ## Auto-format sources with gofmt.
 	gofmt -w $(GOFMT_FILES)
