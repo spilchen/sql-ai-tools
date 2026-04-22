@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/spilchen/sql-ai-tools/internal/conn"
@@ -126,6 +127,90 @@ func TestIntegrationManagerCloseAfterPing(t *testing.T) {
 	require.NoError(t, mgr.Close(ctx))
 	require.NoError(t, mgr.Close(ctx),
 		"Close should be a no-op on a Manager whose connection was already released")
+}
+
+// TestIntegrationManagerExplainDDL covers the happy path for
+// ExplainDDL against a real cluster. Assertions are deliberately
+// tolerant of CRDB version drift: we check that a known statement
+// canonicalizes into the Statement field, that at least one operation
+// is parsed (even the cheapest schema change emits an "execute N system
+// table mutations transactions" line), and that RawText is non-empty.
+// We do not pin the operation count or text because the declarative
+// schema changer's plan composition can shift between minor versions.
+func TestIntegrationManagerExplainDDL(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+	mgr := conn.NewManager(cluster.DSN)
+	t.Cleanup(func() { _ = mgr.Close(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Create a fresh table so the ALTER ... ADD COLUMN target exists
+	// in the catalog when the schema changer plans it. We use a
+	// one-off pgx connection (mustExec) because Manager intentionally
+	// exposes only EXPLAIN-flavored read paths.
+	mustExec(t, ctx, cluster.DSN,
+		"CREATE TABLE IF NOT EXISTS explain_ddl_users (id INT PRIMARY KEY, name STRING)")
+
+	result, err := mgr.ExplainDDL(ctx,
+		"ALTER TABLE explain_ddl_users ADD COLUMN age INT")
+	require.NoError(t, err)
+	require.Contains(t, result.Statement, "ALTER TABLE",
+		"statement should canonicalize the ALTER")
+	require.Contains(t, result.Statement, "ADD COLUMN age",
+		"statement should preserve the ADD COLUMN clause")
+	require.NotEmpty(t, result.Operations,
+		"every schema change has at least one operation")
+	require.NotEmpty(t, result.RawText,
+		"raw text should be retained for fidelity")
+}
+
+// TestIntegrationManagerExplainDDLRecoversAfterError pins the
+// connection-recovery contract documented on ExplainDDL: an error
+// after a successful connect closes the cached connection and nils it
+// so the next call re-dials transparently. A regression that left the
+// dead connection in place would silently leak it and reuse it on the
+// next call.
+func TestIntegrationManagerExplainDDLRecoversAfterError(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+	mgr := conn.NewManager(cluster.DSN)
+	t.Cleanup(func() { _ = mgr.Close(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	mustExec(t, ctx, cluster.DSN,
+		"CREATE TABLE IF NOT EXISTS explain_ddl_recovery (id INT PRIMARY KEY)")
+
+	// First call against a non-existent table forces a cluster-side
+	// error after the lazy connect has succeeded — the recovery code
+	// path we want to exercise.
+	_, err := mgr.ExplainDDL(ctx,
+		"ALTER TABLE explain_ddl_does_not_exist ADD COLUMN x INT")
+	require.Error(t, err, "ALTER on missing table should surface a cluster error")
+
+	// Second call must succeed against a real table — proving the
+	// Manager re-dialed and is not stuck on the closed connection.
+	result, err := mgr.ExplainDDL(ctx,
+		"ALTER TABLE explain_ddl_recovery ADD COLUMN x INT")
+	require.NoError(t, err, "ExplainDDL after a prior failure must reconnect")
+	require.NotEmpty(t, result.Operations,
+		"recovered call should return a real plan, not zero value")
+}
+
+// mustExec opens a one-off pgx connection and runs sql, failing the
+// test on any error. Used to perform DDL setup outside the Manager:
+// Manager intentionally exposes no general Exec, so tests that need a
+// one-shot escape hatch for setup go through here rather than around
+// it. Kept private to this test file because no other test needs
+// arbitrary execution.
+func mustExec(t *testing.T, ctx context.Context, dsn, sql string) {
+	t.Helper()
+	c, err := pgx.Connect(ctx, dsn)
+	require.NoError(t, err, "open setup connection")
+	defer c.Close(ctx) //nolint:errcheck // best-effort cleanup
+	_, err = c.Exec(ctx, sql)
+	require.NoError(t, err, "exec setup SQL")
 }
 
 // TestIntegrationManagerPingFailures table-drives the

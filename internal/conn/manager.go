@@ -156,6 +156,73 @@ func (m *Manager) runExplain(ctx context.Context, sql string) (ExplainResult, er
 	return ExplainResult{Header: header, Plan: plan, RawRows: raw}, nil
 }
 
+// ExplainDDL runs `EXPLAIN (DDL, SHAPE) <sql>` against the cluster and
+// returns the parsed schema-change plan alongside the raw text the
+// cluster returned.
+//
+// EXPLAIN (DDL, SHAPE) does not execute the wrapped DDL — it only asks
+// the declarative schema changer to compile a plan — so no read-only
+// safety wrapper is applied here; the dedicated allowlist (issue #21)
+// will layer on top by intercepting the SQL before it reaches this
+// method, leaving runExplainDDL as the single chokepoint to wrap.
+//
+// On any query/scan/parse failure after a successful connect, the
+// underlying connection is closed and the Manager reverts to its
+// pre-connect state, mirroring Explain's recovery contract.
+func (m *Manager) ExplainDDL(ctx context.Context, sql string) (DDLExplainResult, error) {
+	if err := m.connect(ctx); err != nil {
+		return DDLExplainResult{}, err
+	}
+
+	result, err := m.runExplainDDL(ctx, sql)
+	if err != nil {
+		m.conn.Close(ctx) //nolint:errcheck // best-effort cleanup
+		m.conn = nil
+		return DDLExplainResult{}, err
+	}
+	return result, nil
+}
+
+// runExplainDDL is the inner half of ExplainDDL that owns the
+// query/scan/parse pipeline. SHAPE output is contractually a single row
+// whose `info` column is the entire multi-line plan; we iterate with
+// Query (rather than QueryRow) so we can fail loudly on a future CRDB
+// version that splits the output across rows, matching the parser's
+// "be strict so format changes surface here" discipline. Splitting this
+// out lets ExplainDDL centralize the connection-recovery sequence so
+// the failure modes (Query, Scan, rows.Err, multi-row, parse) cannot
+// drift apart.
+func (m *Manager) runExplainDDL(ctx context.Context, sql string) (DDLExplainResult, error) {
+	rows, err := m.conn.Query(ctx, "EXPLAIN (DDL, SHAPE) "+sql)
+	if err != nil {
+		return DDLExplainResult{}, fmt.Errorf("run EXPLAIN (DDL, SHAPE): %w", err)
+	}
+	defer rows.Close()
+
+	var raw []string
+	for rows.Next() {
+		var info string
+		if err := rows.Scan(&info); err != nil {
+			return DDLExplainResult{}, fmt.Errorf("scan EXPLAIN (DDL, SHAPE) row: %w", err)
+		}
+		raw = append(raw, info)
+	}
+	if err := rows.Err(); err != nil {
+		return DDLExplainResult{}, fmt.Errorf("read EXPLAIN (DDL, SHAPE) rows: %w", err)
+	}
+	if len(raw) != 1 {
+		return DDLExplainResult{}, fmt.Errorf(
+			"EXPLAIN (DDL, SHAPE) returned %d rows, expected exactly 1 (CRDB output format may have changed)", len(raw))
+	}
+
+	text := raw[0]
+	statement, operations, err := parseExplainDDLShape(text)
+	if err != nil {
+		return DDLExplainResult{}, fmt.Errorf("parse EXPLAIN (DDL, SHAPE) output: %w", err)
+	}
+	return DDLExplainResult{Statement: statement, Operations: operations, RawText: text}, nil
+}
+
 // Close closes the underlying connection if one was established.
 // It is safe to call on a Manager that never connected.
 func (m *Manager) Close(ctx context.Context) error {

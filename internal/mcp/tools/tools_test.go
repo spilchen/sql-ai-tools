@@ -122,6 +122,88 @@ func TestExplainSQLHandlerConnectionFailureSurfacesEnvelopeError(t *testing.T) {
 	require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
 }
 
+// TestExplainSchemaChangeHandlerParameterValidation covers the
+// tool-level error path for explain_schema_change. Cluster round-trips
+// are not exercised here; an end-to-end smoke is documented in the
+// issue verification plan.
+func TestExplainSchemaChangeHandlerParameterValidation(t *testing.T) {
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "missing both params", args: map[string]any{}},
+		{name: "missing dsn", args: map[string]any{"sql": "ALTER TABLE t ADD COLUMN x INT"}},
+		{name: "missing sql", args: map[string]any{"dsn": "postgres://h:26257/db"}},
+		{name: "empty sql", args: map[string]any{"sql": "", "dsn": "postgres://h:26257/db"}},
+		{name: "empty dsn", args: map[string]any{"sql": "ALTER TABLE t ADD COLUMN x INT", "dsn": ""}},
+		{name: "wrong type sql", args: map[string]any{"sql": 1, "dsn": "postgres://h:26257/db"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = tc.args
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, res)
+			require.True(t, res.IsError, "expected tool-level error")
+		})
+	}
+}
+
+// TestExplainSchemaChangeHandlerRejectsMalformedTargetVersion confirms
+// per-call target_version validation runs before the cluster dial,
+// matching the explain_sql behavior.
+func TestExplainSchemaChangeHandlerRejectsMalformedTargetVersion(t *testing.T) {
+	handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":            "ALTER TABLE t ADD COLUMN x INT",
+		"dsn":            "postgres://nope:1/db?connect_timeout=1",
+		"target_version": "garbage",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, res.IsError, "malformed target_version must surface as a tool error")
+}
+
+// TestExplainSchemaChangeToolAdvertisesTargetVersionParam pins that
+// the MCP schema for explain_schema_change lists target_version among
+// its parameters so clients can discover the override surface from
+// tool metadata.
+func TestExplainSchemaChangeToolAdvertisesTargetVersionParam(t *testing.T) {
+	tool := ExplainSchemaChangeTool()
+	props := tool.InputSchema.Properties
+	require.Contains(t, props, TargetVersionParamName,
+		"explain_schema_change schema must advertise the target_version property")
+}
+
+// TestExplainSchemaChangeHandlerConnectionFailureSurfacesEnvelopeError
+// verifies that when the cluster is unreachable, the handler returns a
+// successful MCP tool result whose envelope carries the error — not a
+// tool-level error. Same discipline as explain_sql.
+func TestExplainSchemaChangeHandlerConnectionFailureSurfacesEnvelopeError(t *testing.T) {
+	handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql": "ALTER TABLE t ADD COLUMN x INT",
+		// Unreachable host — connection will fail before any query.
+		"dsn": "postgres://nope:1/db?connect_timeout=1",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+	require.Equal(t, output.TierConnected, env.Tier)
+	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus,
+		"failed connect must leave status disconnected")
+	require.Len(t, env.Errors, 1)
+	require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
+}
+
 func TestExtractSQL(t *testing.T) {
 	tests := []struct {
 		name        string

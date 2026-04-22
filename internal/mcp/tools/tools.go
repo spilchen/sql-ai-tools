@@ -32,13 +32,14 @@ import (
 
 // Registered MCP tool names.
 const (
-	ParseSQLToolName         = "parse_sql"
-	ValidateSQLToolName      = "validate_sql"
-	FormatSQLToolName        = "format_sql"
-	DetectRiskyQueryToolName = "detect_risky_query"
-	ExplainSQLToolName       = "explain_sql"
-	ListTablesToolName       = "list_tables"
-	DescribeTableToolName    = "describe_table"
+	ParseSQLToolName            = "parse_sql"
+	ValidateSQLToolName         = "validate_sql"
+	FormatSQLToolName           = "format_sql"
+	DetectRiskyQueryToolName    = "detect_risky_query"
+	ExplainSQLToolName          = "explain_sql"
+	ExplainSchemaChangeToolName = "explain_schema_change"
+	ListTablesToolName          = "list_tables"
+	DescribeTableToolName       = "describe_table"
 )
 
 // TargetVersionParamName is the optional MCP tool parameter name that

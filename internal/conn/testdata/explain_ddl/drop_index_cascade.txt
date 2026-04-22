@@ -1,0 +1,3 @@
+Schema change plan for DROP INDEX defaultdb.public.users@idx_users_name CASCADE;
+ └── execute 4 system table mutations transactions
+

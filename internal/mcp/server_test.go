@@ -85,6 +85,7 @@ func TestNewServerRegistersTools(t *testing.T) {
 		tools.FormatSQLToolName,
 		tools.DetectRiskyQueryToolName,
 		tools.ExplainSQLToolName,
+		tools.ExplainSchemaChangeToolName,
 		tools.ListTablesToolName,
 		tools.DescribeTableToolName,
 	} {

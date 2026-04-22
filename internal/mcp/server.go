@@ -74,6 +74,7 @@ func NewServer(crdbSQLVersion, parserVersion, defaultTargetVersion string) *serv
 	s.AddTool(tools.FormatSQLTool(), tools.FormatSQLHandler(parserVersion, defaultTargetVersion))
 	s.AddTool(tools.DetectRiskyQueryTool(), tools.DetectRiskyQueryHandler(parserVersion, defaultTargetVersion))
 	s.AddTool(tools.ExplainSQLTool(), tools.ExplainSQLHandler(parserVersion, defaultTargetVersion))
+	s.AddTool(tools.ExplainSchemaChangeTool(), tools.ExplainSchemaChangeHandler(parserVersion, defaultTargetVersion))
 	s.AddTool(tools.ListTablesTool(), tools.ListTablesHandler(parserVersion))
 	s.AddTool(tools.DescribeTableTool(), tools.DescribeTableHandler(parserVersion))
 	return s
