@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/risk"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
 )
 
@@ -69,6 +70,7 @@ func TestParseSQLHandler(t *testing.T) {
 		args              map[string]any
 		expectedToolErr   bool
 		expectedEnvErrs   bool
+		expectedCode      string
 		expectedStmtCount int
 		expectedType      string
 		expectedTag       string
@@ -86,9 +88,10 @@ func TestParseSQLHandler(t *testing.T) {
 			expectedStmtCount: 2,
 		},
 		{
-			name:            "parse error returns envelope errors",
+			name:            "parse error returns structured SQLSTATE error",
 			args:            map[string]any{"sql": "SELECTT 1"},
 			expectedEnvErrs: true,
+			expectedCode:    "42601",
 		},
 		{
 			name:            "missing sql param",
@@ -125,6 +128,9 @@ func TestParseSQLHandler(t *testing.T) {
 			if tc.expectedEnvErrs {
 				require.NotEmpty(t, env.Errors)
 				require.Nil(t, env.Data)
+				if tc.expectedCode != "" {
+					require.Equal(t, tc.expectedCode, env.Errors[0].Code)
+				}
 				return
 			}
 
@@ -237,6 +243,7 @@ func TestFormatSQLHandler(t *testing.T) {
 		args              map[string]any
 		expectedToolErr   bool
 		expectedEnvErrs   bool
+		expectedCode      string
 		expectedFormatted string
 	}{
 		{
@@ -250,9 +257,10 @@ func TestFormatSQLHandler(t *testing.T) {
 			expectedFormatted: "SELECT 1;\nSELECT 2",
 		},
 		{
-			name:            "parse error",
+			name:            "parse error returns structured SQLSTATE error",
 			args:            map[string]any{"sql": "SELECTT 1"},
 			expectedEnvErrs: true,
+			expectedCode:    "42601",
 		},
 		{
 			name:            "missing sql param",
@@ -289,6 +297,9 @@ func TestFormatSQLHandler(t *testing.T) {
 			if tc.expectedEnvErrs {
 				require.NotEmpty(t, env.Errors)
 				require.Nil(t, env.Data)
+				if tc.expectedCode != "" {
+					require.Equal(t, tc.expectedCode, env.Errors[0].Code)
+				}
 				return
 			}
 
@@ -300,6 +311,95 @@ func TestFormatSQLHandler(t *testing.T) {
 			}
 			require.NoError(t, json.Unmarshal(env.Data, &data))
 			require.Equal(t, tc.expectedFormatted, data.FormattedSQL)
+		})
+	}
+}
+
+func TestDetectRiskyQueryHandler(t *testing.T) {
+	tests := []struct {
+		name                 string
+		args                 map[string]any
+		expectedToolErr      bool
+		expectedEnvErrs      bool
+		expectedCode         string
+		expectedFindingCount int
+		expectedReasonCode   string
+	}{
+		{
+			name:                 "risky DELETE",
+			args:                 map[string]any{"sql": "DELETE FROM users"},
+			expectedFindingCount: 1,
+			expectedReasonCode:   "DELETE_NO_WHERE",
+		},
+		{
+			name:                 "safe SELECT",
+			args:                 map[string]any{"sql": "SELECT id FROM t WHERE id = 1"},
+			expectedFindingCount: 0,
+		},
+		{
+			name:                 "multiple findings",
+			args:                 map[string]any{"sql": "DELETE FROM t; SELECT * FROM t"},
+			expectedFindingCount: 2,
+		},
+		{
+			name:            "parse error returns structured SQLSTATE error",
+			args:            map[string]any{"sql": "SELECTT 1"},
+			expectedEnvErrs: true,
+			expectedCode:    "42601",
+		},
+		{
+			name:            "empty sql",
+			args:            map[string]any{"sql": ""},
+			expectedToolErr: true,
+		},
+		{
+			name:            "missing sql param",
+			args:            map[string]any{},
+			expectedToolErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := DetectRiskyQueryHandler(testParserVersion)
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = tc.args
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, res)
+
+			if tc.expectedToolErr {
+				require.True(t, res.IsError, "expected tool-level error")
+				return
+			}
+
+			env := requireEnvelope(t, res)
+			require.Equal(t, testParserVersion, env.ParserVersion)
+			require.Equal(t, output.TierZeroConfig, env.Tier)
+			require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
+
+			if tc.expectedEnvErrs {
+				require.NotEmpty(t, env.Errors)
+				require.Nil(t, env.Data)
+				if tc.expectedCode != "" {
+					require.Equal(t, tc.expectedCode, env.Errors[0].Code)
+				}
+				return
+			}
+
+			require.Empty(t, env.Errors)
+			require.NotNil(t, env.Data)
+
+			var findings []risk.Finding
+			require.NoError(t, json.Unmarshal(env.Data, &findings))
+			require.Len(t, findings, tc.expectedFindingCount)
+
+			if tc.expectedReasonCode != "" {
+				require.Equal(t, tc.expectedReasonCode, findings[0].ReasonCode)
+				require.Equal(t, risk.SeverityCritical, findings[0].Severity)
+				require.NotEmpty(t, findings[0].FixHint)
+			}
 		})
 	}
 }

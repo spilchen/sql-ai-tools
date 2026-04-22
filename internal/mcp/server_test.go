@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/spilchen/sql-ai-tools/internal/mcp/tools"
-	"github.com/spilchen/sql-ai-tools/internal/risk"
 )
 
 // TestPingHandler exercises the ping tool handler directly, bypassing
@@ -79,89 +78,11 @@ func TestNewServerRegistersTools(t *testing.T) {
 	require.NotNil(t, s)
 	registered := s.ListTools()
 
-	for _, name := range []string{PingToolName, tools.ParseSQLToolName, tools.ValidateSQLToolName, tools.FormatSQLToolName, DetectRiskyQueryToolName} {
+	for _, name := range []string{PingToolName, tools.ParseSQLToolName, tools.ValidateSQLToolName, tools.FormatSQLToolName, tools.DetectRiskyQueryToolName} {
 		require.Contains(t, registered, name)
 		require.NotNil(t, registered[name].Handler,
 			"%s must be registered with a non-nil handler", name)
 		require.NotEmpty(t, registered[name].Tool.Description,
 			"%s description is part of the user-facing contract", name)
-	}
-}
-
-// TestDetectRiskyQueryHandler exercises the detect_risky_query tool
-// handler directly, bypassing the MCP transport.
-func TestDetectRiskyQueryHandler(t *testing.T) {
-	tests := []struct {
-		name                 string
-		args                 map[string]any
-		expectedErr          bool
-		expectedFindingCount int
-		expectedReasonCode   string
-	}{
-		{
-			name:                 "risky DELETE",
-			args:                 map[string]any{"sql": "DELETE FROM users"},
-			expectedFindingCount: 1,
-			expectedReasonCode:   "DELETE_NO_WHERE",
-		},
-		{
-			name:                 "safe SELECT",
-			args:                 map[string]any{"sql": "SELECT id FROM t WHERE id = 1"},
-			expectedFindingCount: 0,
-		},
-		{
-			name:                 "multiple findings",
-			args:                 map[string]any{"sql": "DELETE FROM t; SELECT * FROM t"},
-			expectedFindingCount: 2,
-		},
-		{
-			name:        "parse error",
-			args:        map[string]any{"sql": "SELECTT 1"},
-			expectedErr: true,
-		},
-		{
-			name:        "empty sql",
-			args:        map[string]any{"sql": ""},
-			expectedErr: true,
-		},
-		{
-			name:        "missing sql param",
-			args:        map[string]any{},
-			expectedErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			handler := detectRiskyQueryHandler("v0.26.2")
-			req := mcpgo.CallToolRequest{}
-			req.Params.Arguments = tc.args
-
-			res, err := handler(context.Background(), req)
-			require.NoError(t, err)
-			require.NotNil(t, res)
-
-			if tc.expectedErr {
-				require.True(t, res.IsError, "expected tool-level error")
-				return
-			}
-
-			require.False(t, res.IsError)
-			require.Len(t, res.Content, 1)
-
-			text, ok := res.Content[0].(mcpgo.TextContent)
-			require.True(t, ok)
-
-			var result detectRiskyQueryResult
-			require.NoError(t, json.Unmarshal([]byte(text.Text), &result))
-			require.Equal(t, "v0.26.2", result.ParserVersion)
-			require.Len(t, result.Findings, tc.expectedFindingCount)
-
-			if tc.expectedReasonCode != "" {
-				require.Equal(t, tc.expectedReasonCode, result.Findings[0].ReasonCode)
-				require.Equal(t, risk.SeverityCritical, result.Findings[0].Severity)
-				require.NotEmpty(t, result.Findings[0].FixHint)
-			}
-		})
 	}
 }

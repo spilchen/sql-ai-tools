@@ -13,6 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/sqlformat"
 )
@@ -40,11 +41,7 @@ func FormatSQLHandler(parserVersion string) server.ToolHandlerFunc {
 
 		formatted, err := sqlformat.Format(sql)
 		if err != nil {
-			env.Errors = []output.Error{{
-				Code:     "internal_error",
-				Severity: output.SeverityError,
-				Message:  err.Error(),
-			}}
+			env.Errors = []output.Error{diag.FromParseError(err, sql)}
 			return envelopeResult(env)
 		}
 
