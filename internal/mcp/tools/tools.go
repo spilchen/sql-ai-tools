@@ -4,7 +4,11 @@
 // included in the /LICENSE file.
 
 // Package tools provides MCP tool handler constructors for the SQL
-// tools: parse_sql, validate_sql, format_sql, and detect_risky_query.
+// tools. The Tier 1 (zero-config) tools are parse_sql, validate_sql,
+// format_sql, and detect_risky_query; explain_sql is the only Tier 3
+// (connected) tool, requiring a per-call DSN since the MCP server holds
+// no per-session connection state.
+//
 // Each handler returns the same output.Envelope JSON shape that the CLI
 // emits under --output=json, so MCP clients get structured errors,
 // parser version, and tier metadata consistent with the CLI surface.
@@ -32,27 +36,36 @@ const (
 	ValidateSQLToolName      = "validate_sql"
 	FormatSQLToolName        = "format_sql"
 	DetectRiskyQueryToolName = "detect_risky_query"
+	ExplainSQLToolName       = "explain_sql"
 )
 
-// extractSQL validates and returns the required "sql" string parameter
-// from an MCP tool request. Leading and trailing whitespace is trimmed
-// so all handlers behave consistently. On success, the returned
-// *mcp.CallToolResult is nil. On failure (missing, wrong type, empty),
-// it is a pre-built tool error that the caller should return immediately.
-func extractSQL(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
-	raw, exists := req.GetArguments()["sql"]
+// extractRequiredString validates and returns a required string
+// parameter from an MCP tool request. Leading and trailing whitespace
+// is trimmed so all handlers behave consistently. On success, the
+// returned *mcp.CallToolResult is nil. On failure (missing, wrong type,
+// empty after trimming), it is a pre-built tool error that the caller
+// should return immediately.
+func extractRequiredString(req mcp.CallToolRequest, name string) (string, *mcp.CallToolResult) {
+	raw, exists := req.GetArguments()[name]
 	if !exists {
-		return "", mcp.NewToolResultError("sql parameter is required")
+		return "", mcp.NewToolResultError(fmt.Sprintf("%s parameter is required", name))
 	}
-	sql, ok := raw.(string)
+	s, ok := raw.(string)
 	if !ok {
-		return "", mcp.NewToolResultError(fmt.Sprintf("sql parameter must be a string, got %T", raw))
+		return "", mcp.NewToolResultError(fmt.Sprintf("%s parameter must be a string, got %T", name, raw))
 	}
-	sql = strings.TrimSpace(sql)
-	if sql == "" {
-		return "", mcp.NewToolResultError("sql parameter must not be empty")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", mcp.NewToolResultError(fmt.Sprintf("%s parameter must not be empty", name))
 	}
-	return sql, nil
+	return s, nil
+}
+
+// extractSQL is a thin convenience wrapper around extractRequiredString
+// for the common "sql" parameter, kept so the four SQL-only handlers
+// (parse, validate, format, risk) stay terse.
+func extractSQL(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
+	return extractRequiredString(req, "sql")
 }
 
 // baseEnvelope returns a pre-populated Envelope for Tier 1 (zero-config,
@@ -60,6 +73,18 @@ func extractSQL(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
 func baseEnvelope(parserVersion string) output.Envelope {
 	return output.Envelope{
 		Tier:             output.TierZeroConfig,
+		ParserVersion:    parserVersion,
+		ConnectionStatus: output.ConnectionDisconnected,
+	}
+}
+
+// connectedEnvelope returns a pre-populated Envelope for Tier 3
+// (connected) tools. ConnectionStatus starts disconnected and is flipped
+// to connected by the handler after a successful round-trip to the
+// cluster, so a partial failure surfaces with the correct state.
+func connectedEnvelope(parserVersion string) output.Envelope {
+	return output.Envelope{
+		Tier:             output.TierConnected,
 		ParserVersion:    parserVersion,
 		ConnectionStatus: output.ConnectionDisconnected,
 	}

@@ -5,12 +5,13 @@
 
 // Package mcp builds the crdb-sql Model Context Protocol server.
 //
-// The server registers a health-check tool (ping), three Tier 1 SQL
-// tools (parse_sql, validate_sql, format_sql) via the tools subpackage,
-// and a risk-detection tool (detect_risky_query). Keeping construction
-// pure (no transport, no I/O) lets the cmd layer pick a transport —
-// currently just stdio — and lets tests exercise individual tool
-// handlers directly.
+// The server registers a health-check tool (ping), four Tier 1 SQL
+// tools (parse_sql, validate_sql, format_sql, detect_risky_query) via
+// the tools subpackage, and the Tier 3 explain_sql tool that runs
+// EXPLAIN against a live cluster. Keeping construction pure (no
+// transport, no I/O) lets the cmd layer pick a transport — currently
+// just stdio — and lets tests exercise individual tool handlers
+// directly.
 //
 // Versions are passed in by the caller rather than read from
 // debug.ReadBuildInfo here, so this package stays free of
@@ -60,6 +61,7 @@ func NewServer(binaryVersion, parserVersion string) *server.MCPServer {
 	s.AddTool(tools.ValidateSQLTool(), tools.ValidateSQLHandler(parserVersion))
 	s.AddTool(tools.FormatSQLTool(), tools.FormatSQLHandler(parserVersion))
 	s.AddTool(tools.DetectRiskyQueryTool(), tools.DetectRiskyQueryHandler(parserVersion))
+	s.AddTool(tools.ExplainSQLTool(), tools.ExplainSQLHandler(parserVersion))
 	return s
 }
 
