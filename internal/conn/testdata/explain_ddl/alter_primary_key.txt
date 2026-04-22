@@ -1,0 +1,3 @@
+Schema change plan for ALTER TABLE defaultdb.public.users ALTER PRIMARY KEY USING COLUMNS (id);
+ └── execute 1 system table mutations transaction
+

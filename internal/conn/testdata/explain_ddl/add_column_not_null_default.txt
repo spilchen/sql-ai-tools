@@ -1,0 +1,12 @@
+Schema change plan for ALTER TABLE defaultdb.public.users ADD COLUMN status STRING NOT NULL DEFAULT ‹'active'›;
+ ├── execute 2 system table mutations transactions
+ ├── backfill using primary index users_pkey- in relation users
+ │    └── into users_pkey+ (id; name, status+)
+ ├── execute 2 system table mutations transactions
+ ├── merge temporary indexes into backfilled indexes in relation users
+ │    └── from users@[5] into users_pkey+
+ ├── execute 1 system table mutations transaction
+ ├── validate UNIQUE constraint backed by index users_pkey+ in relation users
+ ├── validate NOT NULL constraint on column status+ in index users_pkey+ in relation users
+ └── execute 4 system table mutations transactions
+

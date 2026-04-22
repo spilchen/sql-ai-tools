@@ -1,0 +1,3 @@
+Schema change plan for ALTER TABLE defaultdb.public.users ADD COLUMN age INT8;
+ └── execute 4 system table mutations transactions
+

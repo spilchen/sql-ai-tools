@@ -1,0 +1,11 @@
+Schema change plan for CREATE INDEX ON defaultdb.public.users (id, name);
+ ├── execute 2 system table mutations transactions
+ ├── backfill using primary index users_pkey in relation users
+ │    └── into users_id_name_idx+ (id, name)
+ ├── execute 2 system table mutations transactions
+ ├── merge temporary indexes into backfilled indexes in relation users
+ │    └── from users@[5] into users_id_name_idx+
+ ├── execute 1 system table mutations transaction
+ ├── validate UNIQUE constraint backed by index users_id_name_idx+ in relation users
+ └── execute 2 system table mutations transactions
+
