@@ -56,6 +56,21 @@ func TestEnvelopeMarshal(t *testing.T) {
 }`,
 		},
 		{
+			name: "target_version emitted when set",
+			envelope: Envelope{
+				Tier:             TierZeroConfig,
+				ParserVersion:    "v0.26.2",
+				TargetVersion:    "25.4.0",
+				ConnectionStatus: ConnectionDisconnected,
+			},
+			expectedJSON: `{
+  "tier": "zero_config",
+  "parser_version": "v0.26.2",
+  "target_version": "25.4.0",
+  "connection_status": "disconnected"
+}`,
+		},
+		{
 			name: "errors-only envelope",
 			envelope: Envelope{
 				ParserVersion:    "v0.26.2",

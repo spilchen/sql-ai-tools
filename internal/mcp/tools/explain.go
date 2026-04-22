@@ -27,6 +27,7 @@ func ExplainSQLTool() mcp.Tool {
 		mcp.WithDescription(`Run EXPLAIN against a CockroachDB cluster and return the plan as structured JSON. The wrapped statement is not executed (this is plain EXPLAIN, not EXPLAIN ANALYZE). Returns the operator tree, header (distribution/vectorized), and the raw tabular rows.`),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL DML statement to explain")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI)")),
+		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
 }
 
@@ -37,7 +38,12 @@ func ExplainSQLTool() mcp.Tool {
 // wrapped statement, perm denied) populate env.Errors; tool-level errors
 // (missing parameters) are returned as mcp.NewToolResultError per the
 // discipline documented in tools.go.
-func ExplainSQLHandler(parserVersion string) server.ToolHandlerFunc {
+//
+// defaultTargetVersion is the server-level default; per-call
+// target_version arguments override it. The resolved value is
+// stamped onto the envelope (and may add a mismatch warning) per
+// the contract documented on connectedEnvelope.
+func ExplainSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sql, toolErr := extractRequiredString(req, "sql")
 		if toolErr != nil {
@@ -47,8 +53,12 @@ func ExplainSQLHandler(parserVersion string) server.ToolHandlerFunc {
 		if toolErr != nil {
 			return toolErr, nil
 		}
+		target, toolErr := resolveTargetVersion(req, defaultTargetVersion)
+		if toolErr != nil {
+			return toolErr, nil
+		}
 
-		env := connectedEnvelope(parserVersion)
+		env := connectedEnvelope(parserVersion, target)
 
 		mgr := conn.NewManager(dsn)
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup

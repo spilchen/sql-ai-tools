@@ -34,20 +34,29 @@ import (
 // All other tool name constants live in the tools subpackage.
 const PingToolName = "ping"
 
-// NewServer constructs an MCP server for crdb-sql. binaryVersion is the
-// crdb-sql binary version string (typically cmd.Version), and
-// parserVersion is the resolved cockroachdb-parser module version
-// (typically the result of cmd.parserVersion). Both are reported
-// verbatim — binaryVersion in the server handshake, and parserVersion
-// in every tool response — so callers should resolve them before
-// invoking NewServer.
+// NewServer constructs an MCP server for crdb-sql. The three string
+// arguments name distinct concepts that flow through every tool
+// response, and callers must resolve them before invoking NewServer:
+//
+//   - crdbSQLVersion is the crdb-sql binary version (typically
+//     cmd.Version). Reported in the MCP server handshake so clients
+//     can identify which build they are talking to.
+//   - parserVersion is the resolved cockroachdb-parser module version
+//     (typically the result of cmd.parserVersion). Stamped into every
+//     tool's envelope so clients always know which SQL dialect this
+//     binary actually understands.
+//   - defaultTargetVersion is the user-declared CockroachDB target
+//     version (typically state.targetVersion from the --target-version
+//     flag), or "" when the user did not supply one. Used as a default
+//     for every tool call; per-call target_version arguments override
+//     it.
 //
 // The returned server has no transport bound; callers wire it to stdio
 // (or, in the future, sse/http) themselves.
-func NewServer(binaryVersion, parserVersion string) *server.MCPServer {
+func NewServer(crdbSQLVersion, parserVersion, defaultTargetVersion string) *server.MCPServer {
 	s := server.NewMCPServer(
 		"crdb-sql",
-		binaryVersion,
+		crdbSQLVersion,
 		server.WithToolCapabilities(false /* listChanged */),
 	)
 	s.AddTool(
@@ -57,11 +66,11 @@ func NewServer(binaryVersion, parserVersion string) *server.MCPServer {
 		),
 		pingHandler(parserVersion),
 	)
-	s.AddTool(tools.ParseSQLTool(), tools.ParseSQLHandler(parserVersion))
-	s.AddTool(tools.ValidateSQLTool(), tools.ValidateSQLHandler(parserVersion))
-	s.AddTool(tools.FormatSQLTool(), tools.FormatSQLHandler(parserVersion))
-	s.AddTool(tools.DetectRiskyQueryTool(), tools.DetectRiskyQueryHandler(parserVersion))
-	s.AddTool(tools.ExplainSQLTool(), tools.ExplainSQLHandler(parserVersion))
+	s.AddTool(tools.ParseSQLTool(), tools.ParseSQLHandler(parserVersion, defaultTargetVersion))
+	s.AddTool(tools.ValidateSQLTool(), tools.ValidateSQLHandler(parserVersion, defaultTargetVersion))
+	s.AddTool(tools.FormatSQLTool(), tools.FormatSQLHandler(parserVersion, defaultTargetVersion))
+	s.AddTool(tools.DetectRiskyQueryTool(), tools.DetectRiskyQueryHandler(parserVersion, defaultTargetVersion))
+	s.AddTool(tools.ExplainSQLTool(), tools.ExplainSQLHandler(parserVersion, defaultTargetVersion))
 	return s
 }
 

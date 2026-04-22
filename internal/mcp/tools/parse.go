@@ -24,20 +24,28 @@ func ParseSQLTool() mcp.Tool {
 		ParseSQLToolName,
 		mcp.WithDescription("Parse and classify SQL statements. Returns an envelope with statement type (DDL/DML/DCL/TCL), tag, and original SQL for each statement in the input."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to parse (may contain multiple semicolon-separated statements)")),
+		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
 }
 
 // ParseSQLHandler returns the handler for the parse_sql tool. It
 // delegates to sqlparse.Classify and wraps the result in the standard
-// output.Envelope used by all Tier 1 tools.
-func ParseSQLHandler(parserVersion string) server.ToolHandlerFunc {
+// output.Envelope used by all Tier 1 tools. defaultTargetVersion is
+// the server-level default (typically the value of --target-version on
+// the `crdb-sql mcp` invocation); per-call target_version arguments
+// override it.
+func ParseSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sql, toolErr := extractSQL(req)
 		if toolErr != nil {
 			return toolErr, nil
 		}
+		target, toolErr := resolveTargetVersion(req, defaultTargetVersion)
+		if toolErr != nil {
+			return toolErr, nil
+		}
 
-		env := baseEnvelope(parserVersion)
+		env := baseEnvelope(parserVersion, target)
 
 		stmts, err := sqlparse.Classify(sql)
 		if err != nil {
