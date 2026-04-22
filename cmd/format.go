@@ -37,17 +37,10 @@ CockroachDB parser's built-in formatter. Input is read from the -e flag
 (inline SQL), a positional file argument, or stdin.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			r := output.Renderer{Format: state.outputFormat, Out: cmd.OutOrStdout()}
-			baseEnv := output.Envelope{
-				Tier:             output.TierZeroConfig,
-				ConnectionStatus: output.ConnectionDisconnected,
-			}
-
-			parserVer, err := parserVersion(Version)
+			r, baseEnv, err := newEnvelope(state, output.TierZeroConfig, cmd)
 			if err != nil {
 				return r.RenderError(baseEnv, err)
 			}
-			baseEnv.ParserVersion = parserVer
 
 			sql, err := sqlinput.ReadSQL(expr, args, cmd.InOrStdin())
 			if err != nil {

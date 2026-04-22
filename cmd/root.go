@@ -115,3 +115,30 @@ const (
 func Execute() error {
 	return newRootCmd().ExecuteContext(context.Background())
 }
+
+// newEnvelope builds the Renderer and base Envelope that each CLI
+// subcommand needs. On success the returned Envelope has its Tier,
+// ParserVersion, and ConnectionStatus populated; the caller owns Data
+// and may append to Errors via RenderError. On error ParserVersion
+// may be empty, but the Renderer and Envelope are still usable — the
+// caller should typically do:
+//
+//	r, env, err := newEnvelope(state, output.TierZeroConfig, cmd)
+//	if err != nil {
+//	    return r.RenderError(env, err)
+//	}
+func newEnvelope(
+	state *rootState, tier output.Tier, cmd *cobra.Command,
+) (output.Renderer, output.Envelope, error) {
+	r := output.Renderer{Format: state.outputFormat, Out: cmd.OutOrStdout()}
+	env := output.Envelope{
+		Tier:             tier,
+		ConnectionStatus: output.ConnectionDisconnected,
+	}
+	parserVer, err := parserVersion(Version)
+	if err != nil {
+		return r, env, err
+	}
+	env.ParserVersion = parserVer
+	return r, env, nil
+}

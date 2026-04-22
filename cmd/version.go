@@ -57,30 +57,19 @@ embedded Go build info, so it reflects whatever go.mod (including any
 replace directive) selected at build time.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			r := output.Renderer{Format: state.outputFormat, Out: cmd.OutOrStdout()}
-			// baseEnv is the partial context used on both the
-			// success path and the JSON-mode error path. The error
-			// path needs ConnectionStatus populated so agents see a
-			// well-formed envelope even when ParserVersion / Data
-			// resolution fails.
-			baseEnv := output.Envelope{
-				ConnectionStatus: output.ConnectionDisconnected,
-			}
-			parser, err := parserVersion(Version)
+			r, env, err := newEnvelope(state, output.TierUnset, cmd)
 			if err != nil {
-				return r.RenderError(baseEnv, err)
+				return r.RenderError(env, err)
 			}
 			data, err := json.Marshal(struct {
 				BinaryVersion string `json:"binary_version"`
 			}{BinaryVersion: Version})
 			if err != nil {
-				return r.RenderError(baseEnv, err)
+				return r.RenderError(env, err)
 			}
-			env := baseEnv
-			env.ParserVersion = parser
 			env.Data = data
 			return r.Render(env, func(w io.Writer) error {
-				_, werr := fmt.Fprintf(w, "crdb-sql: %s\ncockroachdb-parser: %s\n", Version, parser)
+				_, werr := fmt.Fprintf(w, "crdb-sql: %s\ncockroachdb-parser: %s\n", Version, env.ParserVersion)
 				return werr
 			})
 		},
