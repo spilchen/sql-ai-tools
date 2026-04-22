@@ -354,9 +354,10 @@ func renderConfigText(w io.Writer, results []fileResult, errs []output.Error) er
 					fr.File, pos.Line, pos.Column, e.Message, e.Code); err != nil {
 					return err
 				}
-				continue
+			} else if _, err := fmt.Fprintf(w, "%s: %s [%s]\n", fr.File, e.Message, e.Code); err != nil {
+				return err
 			}
-			if _, err := fmt.Fprintf(w, "%s: %s [%s]\n", fr.File, e.Message, e.Code); err != nil {
+			if err := writeSuggestions(w, e.Suggestions); err != nil {
 				return err
 			}
 		}
@@ -392,10 +393,29 @@ func renderDiagErrors(r output.Renderer, env output.Envelope, errs []output.Erro
 					return werr
 				}
 			}
+			if werr := writeSuggestions(w, diagErr.Suggestions); werr != nil {
+				return werr
+			}
 		}
 		return nil
 	}); err != nil {
 		return err
 	}
 	return output.ErrRendered
+}
+
+// writeSuggestions prints structured "did you mean?" suggestions
+// underneath an error in text mode. Each suggestion gets one indented
+// line with the replacement and a percentage confidence — terse
+// enough to stay readable when many errors stack up, structured
+// enough that grep/awk can pick the lines out by the leading "  did
+// you mean: " prefix.
+func writeSuggestions(w io.Writer, suggs []output.Suggestion) error {
+	for _, s := range suggs {
+		if _, err := fmt.Fprintf(w, "  did you mean: %s (%d%% confidence)\n",
+			s.Replacement, int(s.Confidence*100+0.5)); err != nil {
+			return err
+		}
+	}
+	return nil
 }

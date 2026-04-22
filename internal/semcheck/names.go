@@ -174,15 +174,18 @@ func (v *tableNameVisitor) checkTable(tn *tree.TableName) {
 	}
 	v.seen[key] = struct{}{}
 
+	pos := v.positionFor(name)
+	tables := v.availableTables()
 	*v.errs = append(*v.errs, output.Error{
 		Code:     unknownTableCode,
 		Severity: output.SeverityError,
 		Message:  fmt.Sprintf("relation %q does not exist", name),
-		Position: v.positionFor(name),
+		Position: pos,
 		Category: diag.CategoryUnknownTable,
 		Context: map[string]any{
-			"available_tables": v.availableTables(),
+			"available_tables": tables,
 		},
+		Suggestions: diag.Suggest(name, tables, pos),
 	})
 }
 
@@ -769,13 +772,14 @@ func (c *columnChecker) addTableExpr(sc *scope, te tree.TableExpr) {
 			for _, name := range cond.Cols {
 				colName := string(name)
 				if !columnExistsInScope(sc, colName) {
-					c.report(columnRef{name: colName}, output.Error{
+					cols := availableColumns(sc)
+					c.report(columnRef{name: colName}, cols, output.Error{
 						Code:     unknownColumnCode,
 						Severity: output.SeverityError,
 						Message:  fmt.Sprintf("column %q does not exist", colName),
 						Category: diag.CategoryUnknownColumn,
 						Context: map[string]any{
-							"available_columns": availableColumns(sc),
+							"available_columns": cols,
 						},
 					})
 				}
@@ -908,14 +912,17 @@ func (c *columnChecker) resolveRef(ref columnRef, sc *scope) {
 func (c *columnChecker) resolveQualified(ref columnRef, sc *scope) {
 	src, found := lookupSource(sc, ref.qualifier)
 	if !found {
-		c.report(ref, output.Error{
+		// The typo is the qualifier, not the column. Suggestions and
+		// the source-position lookup target the qualifier token.
+		aliases := availableAliases(sc)
+		c.reportFor(ref.qualifier, ref.qualifier, aliases, output.Error{
 			Code:     unknownColumnCode,
 			Severity: output.SeverityError,
 			Message:  fmt.Sprintf("missing FROM-clause entry for table %q", ref.qualifier),
 			Category: diag.CategoryUnknownColumn,
 			Context: map[string]any{
 				"missing_table":    ref.qualifier,
-				"available_tables": availableAliases(sc),
+				"available_tables": aliases,
 			},
 		})
 		return
@@ -926,7 +933,7 @@ func (c *columnChecker) resolveQualified(ref columnRef, sc *scope) {
 	if containsFold(src.columns, ref.name) {
 		return
 	}
-	c.report(ref, output.Error{
+	c.report(ref, src.columns, output.Error{
 		Code:     unknownColumnCode,
 		Severity: output.SeverityError,
 		Message:  fmt.Sprintf("column %q does not exist", ref.name),
@@ -953,7 +960,9 @@ func (c *columnChecker) resolveUnqualified(ref columnRef, sc *scope) {
 	case len(matches) == 1:
 		return
 	case len(matches) >= 2:
-		c.report(ref, output.Error{
+		// Spelling isn't the problem here — the ref matched two real
+		// sources. Suggestions would be misleading, so pass nil.
+		c.report(ref, nil, output.Error{
 			Code:     ambiguousColumnCode,
 			Severity: output.SeverityError,
 			Message:  fmt.Sprintf("column reference %q is ambiguous", ref.name),
@@ -969,32 +978,53 @@ func (c *columnChecker) resolveUnqualified(ref columnRef, sc *scope) {
 			// belong to it. Skip rather than false-positive.
 			return
 		}
-		c.report(ref, output.Error{
+		cols := availableColumns(sc)
+		c.report(ref, cols, output.Error{
 			Code:     unknownColumnCode,
 			Severity: output.SeverityError,
 			Message:  fmt.Sprintf("column %q does not exist", ref.name),
 			Category: diag.CategoryUnknownColumn,
 			Context: map[string]any{
-				"available_columns": availableColumns(sc),
+				"available_columns": cols,
 			},
 		})
 	}
 }
 
-// report deduplicates by lowercased "qualifier.name" and attaches the
-// position computed against the statement currently being checked.
-// The reported position is therefore the first non-duplicate
-// occurrence of the (qualifier, column) pair in input order — i.e. in
-// the first statement where the pair appears, not necessarily the
-// textually-first occurrence in the input. Position uses the same
-// word-boundary-aware substring search as the table walker.
-func (c *columnChecker) report(ref columnRef, e output.Error) {
-	key := strings.ToLower(ref.qualifier + "." + ref.name)
+// report is a thin wrapper around reportFor for the common case
+// where the misspelled token is the column name and dedup is by
+// "qualifier.name". Pass nil candidates to skip the suggestion
+// lookup (e.g. ambiguous-ref errors, where spelling is not the
+// issue).
+func (c *columnChecker) report(ref columnRef, candidates []string, e output.Error) {
+	c.reportFor(ref.qualifier+"."+ref.name, ref.name, candidates, e)
+}
+
+// reportFor records one error in the accumulator, deduplicating by a
+// lowercased dedupKey and attaching the position of misspelled in the
+// current statement plus any "did you mean?" suggestions derived from
+// candidates.
+//
+// The dedup key is opaque to reportFor: report passes "qualifier.name"
+// for column-not-found errors so two textually-distinct occurrences
+// of the same typo collapse to one envelope entry; resolveQualified
+// passes the bare qualifier when the qualifier itself is the typo so
+// "missing FROM-clause entry for table z" appears once even when
+// referenced multiple times.
+//
+// The reported position is the first non-duplicate occurrence in
+// input order — i.e. in the first statement where the dedup key
+// appears, not necessarily the textually-first occurrence across
+// statements. Position uses the same word-boundary-aware substring
+// search as the table walker.
+func (c *columnChecker) reportFor(dedupKey, misspelled string, candidates []string, e output.Error) {
+	key := strings.ToLower(dedupKey)
 	if _, dup := c.seen[key]; dup {
 		return
 	}
 	c.seen[key] = struct{}{}
-	e.Position = c.positionFor(ref.name)
+	e.Position = c.positionFor(misspelled)
+	e.Suggestions = diag.Suggest(misspelled, candidates, e.Position)
 	*c.errs = append(*c.errs, e)
 }
 

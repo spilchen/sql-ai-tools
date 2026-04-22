@@ -201,6 +201,52 @@ func TestIntegrationValidateSQL(t *testing.T) {
 		res := callTool(t, c, tools.ValidateSQLToolName, map[string]any{})
 		require.True(t, res.IsError, "missing required param must surface as tool error, got: %s", textOf(res))
 	})
+
+	// The next two cases cover the wiring added in #15: column errors
+	// reach the MCP envelope (closing a pre-existing gap where only
+	// CheckTableNames ran in this handler) and carry structured
+	// "did you mean?" suggestions.
+	t.Run("column typo surfaces suggestion", func(t *testing.T) {
+		res := callTool(t, c, tools.ValidateSQLToolName, map[string]any{
+			"sql":     "SELECT nme FROM users",
+			"schemas": []any{map[string]any{"sql": usersSchema}},
+		})
+		env := decodeEnvelope(t, res)
+		require.Len(t, env.Errors, 1)
+		require.Equal(t, "42703", env.Errors[0].Code)
+		require.NotEmpty(t, env.Errors[0].Suggestions)
+		require.Equal(t, "name", env.Errors[0].Suggestions[0].Replacement)
+	})
+
+	t.Run("table typo surfaces suggestion", func(t *testing.T) {
+		res := callTool(t, c, tools.ValidateSQLToolName, map[string]any{
+			"sql":     "SELECT * FROM usrs",
+			"schemas": []any{map[string]any{"sql": usersSchema}},
+		})
+		env := decodeEnvelope(t, res)
+		require.Len(t, env.Errors, 1)
+		require.Equal(t, "42P01", env.Errors[0].Code)
+		require.NotEmpty(t, env.Errors[0].Suggestions)
+		require.Equal(t, "users", env.Errors[0].Suggestions[0].Replacement)
+	})
+
+	// Regression guard: lock in that CheckColumnNames runs in the MCP
+	// handler at all, independent of whether a suggestion is produced.
+	// A future refactor that removes the CheckColumnNames call would
+	// make the suggestion-bearing tests above ambiguous (the column
+	// error might still leak through some other path), so a wholly
+	// unrelated column name — for which Suggest will return no
+	// candidates — locks the wiring on its own.
+	t.Run("unrelated column name still produces 42703", func(t *testing.T) {
+		res := callTool(t, c, tools.ValidateSQLToolName, map[string]any{
+			"sql":     "SELECT completely_unrelated_xyzzy FROM users",
+			"schemas": []any{map[string]any{"sql": usersSchema}},
+		})
+		env := decodeEnvelope(t, res)
+		require.Len(t, env.Errors, 1)
+		require.Equal(t, "42703", env.Errors[0].Code)
+		require.Empty(t, env.Errors[0].Suggestions, "no candidate is close enough to suggest")
+	})
 }
 
 // TestIntegrationFormatSQL covers pretty-printing on the happy path
