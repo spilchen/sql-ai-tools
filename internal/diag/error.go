@@ -17,9 +17,11 @@
 package diag
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/pgwire/pgerror"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
@@ -83,5 +85,58 @@ func FromParseError(err error, fullSQL string) output.Error {
 		Message:  err.Error(),
 		Position: ExtractPosition(detail, fullSQL),
 		Category: CategoryForCode(code),
+	}
+}
+
+// FromClusterError converts a cluster-side error into a structured
+// output.Error.
+//
+// When err's chain contains a *pgconn.PgError (a pgwire protocol
+// error from the server), Code, Severity, Message, Category, and
+// Position (when fullSQL is supplied and the server reported a
+// position) are populated from it. Any error whose chain does not
+// contain a *pgconn.PgError falls back to the generic internal_error
+// shape so callers always get a single envelope schema.
+//
+// fullSQL is the originating statement; pass "" when no statement is
+// associated with the call. The pgwire Position field is a 1-based
+// character index into the original query, so it is only meaningful
+// when fullSQL is provided.
+func FromClusterError(err error, fullSQL string) output.Error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return output.Error{
+			Code:     "internal_error",
+			Severity: output.SeverityError,
+			Message:  err.Error(),
+		}
+	}
+
+	// Prefer the unlocalized severity so the wire string is stable
+	// across server locales; fall back to the localized field, then
+	// to the protocol default.
+	sev := pgErr.SeverityUnlocalized
+	if sev == "" {
+		sev = pgErr.Severity
+	}
+	if sev == "" {
+		sev = string(output.SeverityError)
+	}
+
+	var pos *output.Position
+	if fullSQL != "" && pgErr.Position > 0 {
+		// pgwire Position is a 1-based character index; the rest of
+		// this package works in byte offsets, so translate runes to
+		// bytes here. ASCII-only SQL is a no-op cost path.
+		byteOffset := CharIndexToByteOffset(fullSQL, int(pgErr.Position)-1)
+		pos = PositionFromByteOffset(fullSQL, byteOffset)
+	}
+
+	return output.Error{
+		Code:     pgErr.Code,
+		Severity: output.Severity(sev),
+		Message:  pgErr.Message,
+		Position: pos,
+		Category: CategoryForCode(pgErr.Code),
 	}
 }

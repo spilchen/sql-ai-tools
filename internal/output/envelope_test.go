@@ -320,6 +320,79 @@ func TestRenderError(t *testing.T) {
 	})
 }
 
+// TestRenderErrorEntry pins the structured-error variant: the supplied
+// Error is appended verbatim (preserving Code/Category/Position that
+// callers like diag.FromClusterError populate), text mode still passes
+// failure through, and the same EPIPE / Data-clearing / append /
+// errors.Join semantics as RenderError apply.
+func TestRenderErrorEntry(t *testing.T) {
+	origFailure := errors.New("query cluster info: relation does not exist")
+	enriched := Error{
+		Code:     "42P01",
+		Severity: SeverityError,
+		Message:  "relation does not exist",
+		Category: "unknown_table",
+		Position: &Position{Line: 1, Column: 15, ByteOffset: 14},
+	}
+
+	t.Run("json mode emits supplied entry verbatim", func(t *testing.T) {
+		var buf bytes.Buffer
+		r := Renderer{Format: FormatJSON, Out: &buf}
+		env := Envelope{
+			ParserVersion:    "v0.26.2",
+			ConnectionStatus: ConnectionDisconnected,
+			Data:             json.RawMessage(`{"binary_version":"dev"}`),
+		}
+		err := r.RenderErrorEntry(env, origFailure, enriched)
+		require.ErrorIs(t, err, ErrRendered)
+
+		var got Envelope
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+		require.Len(t, got.Errors, 1)
+		require.Equal(t, "42P01", got.Errors[0].Code)
+		require.Equal(t, "unknown_table", got.Errors[0].Category)
+		require.Equal(t, "relation does not exist", got.Errors[0].Message)
+		require.NotNil(t, got.Errors[0].Position)
+		require.Equal(t, *enriched.Position, *got.Errors[0].Position)
+		require.Empty(t, got.Data, "Data must be cleared on error path")
+	})
+
+	t.Run("text mode returns original failure unchanged", func(t *testing.T) {
+		var buf bytes.Buffer
+		r := Renderer{Format: FormatText, Out: &buf}
+		err := r.RenderErrorEntry(Envelope{}, origFailure, enriched)
+		require.ErrorIs(t, err, origFailure)
+		require.Empty(t, buf.String(), "text mode must not write anything")
+	})
+
+	t.Run("write failure preserves original via errors.Join", func(t *testing.T) {
+		writeErr := errors.New("disk full")
+		r := Renderer{Format: FormatJSON, Out: fakeWriter{err: writeErr}}
+		err := r.RenderErrorEntry(Envelope{}, origFailure, enriched)
+		require.ErrorIs(t, err, origFailure)
+		require.ErrorContains(t, err, "render error envelope")
+		require.False(t, errors.Is(err, ErrRendered))
+	})
+
+	t.Run("pre-existing errors preserved via append", func(t *testing.T) {
+		var buf bytes.Buffer
+		r := Renderer{Format: FormatJSON, Out: &buf}
+		existing := Error{Code: "42703", Severity: SeverityWarning, Message: "column not found"}
+		env := Envelope{
+			ConnectionStatus: ConnectionDisconnected,
+			Errors:           []Error{existing},
+		}
+		err := r.RenderErrorEntry(env, origFailure, enriched)
+		require.ErrorIs(t, err, ErrRendered)
+
+		var got Envelope
+		require.NoError(t, json.Unmarshal(buf.Bytes(), &got))
+		require.Len(t, got.Errors, 2)
+		require.Equal(t, "42703", got.Errors[0].Code)
+		require.Equal(t, "42P01", got.Errors[1].Code)
+	})
+}
+
 // TestSeverityValues pins the wire string for every Severity constant.
 // Agents key off these literals (they match the PostgreSQL fe/be
 // protocol severity names); a typo here would silently change the

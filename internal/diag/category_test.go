@@ -28,10 +28,14 @@ func TestCategoryForCode(t *testing.T) {
 		{name: "ambiguous parameter", code: "42P08", expectedCategory: "ambiguous_reference"},
 		{name: "ambiguous alias", code: "42P09", expectedCategory: "ambiguous_reference"},
 		{name: "invalid column reference", code: "42P10", expectedCategory: "unknown_column"},
+		{name: "insufficient privilege", code: "42501", expectedCategory: "permission_denied"},
+		{name: "query canceled", code: "57014", expectedCategory: "query_canceled"},
 
 		// Class-level fallback.
-		{name: "unmapped class-42 falls back to syntax_error", code: "42501", expectedCategory: "syntax_error"},
+		{name: "unmapped class-42 falls back to syntax_error", code: "42999", expectedCategory: "syntax_error"},
 		{name: "data exception class", code: "22012", expectedCategory: "type_mismatch"},
+		{name: "connection class fallback", code: "08000", expectedCategory: "connection_error"},
+		{name: "connection failure subcode", code: "08006", expectedCategory: "connection_error"},
 
 		// Unknown codes return empty.
 		{name: "unknown class returns empty", code: "99999", expectedCategory: ""},

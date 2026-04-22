@@ -105,6 +105,25 @@ func PositionFromByteOffset(fullSQL string, byteOffset int) *output.Position {
 	}
 }
 
+// CharIndexToByteOffset converts a 0-based UTF-8 character (rune) index
+// within sql into a 0-based byte offset. Used to translate the pgwire
+// protocol's character-based Position field into the byte offset the
+// rest of this package operates on. Negative indices clamp to 0;
+// indices past the rune count clamp to len(sql).
+func CharIndexToByteOffset(sql string, charIdx int) int {
+	if charIdx <= 0 {
+		return 0
+	}
+	var count int
+	for i := range sql {
+		if count == charIdx {
+			return i
+		}
+		count++
+	}
+	return len(sql)
+}
+
 // lineColumn converts a 0-based byte offset within sql into a 1-based
 // line and column. The column counts bytes from the last newline (or
 // start of string), not runes, matching the CockroachDB parser's
