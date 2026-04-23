@@ -116,10 +116,10 @@ const (
 	FeatureAlterVirtualClusterReplicationSrc = "alter_virtual_cluster_replication_source"
 
 	// v25.3 features.
-	FeatureShowCreateAllTriggers  = "show_create_all_triggers"
-	FeatureShowCreateAllRoutines  = "show_create_all_routines"
-	FeatureAlterTableLoggedToggle = "alter_table_logged_unlogged"
-	FeatureGrantRevokeRoutines    = "grant_revoke_routines"
+	FeatureShowCreateAllTriggers    = "show_create_all_triggers"
+	FeatureShowCreateAllRoutines    = "show_create_all_routines"
+	FeatureAlterTableLoggedUnlogged = "alter_table_logged_unlogged"
+	FeatureGrantRevokeRoutines      = "grant_revoke_routines"
 
 	// v25.4 features.
 	FeatureInspectCommand          = "inspect_command"
@@ -300,7 +300,7 @@ func DefaultRegistry() *Registry {
 			Introduced: "25.3",
 		},
 		Feature{
-			Tag:        FeatureAlterTableLoggedToggle,
+			Tag:        FeatureAlterTableLoggedUnlogged,
 			Name:       "ALTER TABLE ... SET LOGGED/UNLOGGED",
 			Introduced: "25.3",
 		},
