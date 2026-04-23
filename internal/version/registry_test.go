@@ -130,6 +130,22 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "alter external conn at", tag: FeatureAlterExternalConnection, target: "25.4", expectedStatus: StatusSupported},
 		{name: "alter external conn after", tag: FeatureAlterExternalConnection, target: "26.1", expectedStatus: StatusSupported},
 
+		{name: "show jobs resolved ts before", tag: FeatureShowJobsResolvedTimestamp, target: "25.4", expectedStatus: StatusNotYetIntroduced},
+		{name: "show jobs resolved ts at", tag: FeatureShowJobsResolvedTimestamp, target: "26.1", expectedStatus: StatusSupported},
+		{name: "show jobs resolved ts after", tag: FeatureShowJobsResolvedTimestamp, target: "26.2", expectedStatus: StatusSupported},
+
+		{name: "backup strict locality before", tag: FeatureBackupStrictStorageLocality, target: "25.4", expectedStatus: StatusNotYetIntroduced},
+		{name: "backup strict locality at", tag: FeatureBackupStrictStorageLocality, target: "26.1", expectedStatus: StatusSupported},
+		{name: "backup strict locality after", tag: FeatureBackupStrictStorageLocality, target: "26.2", expectedStatus: StatusSupported},
+
+		{name: "execute schedule before", tag: FeatureExecuteSchedule, target: "25.4", expectedStatus: StatusNotYetIntroduced},
+		{name: "execute schedule at", tag: FeatureExecuteSchedule, target: "26.1", expectedStatus: StatusSupported},
+		{name: "execute schedule after", tag: FeatureExecuteSchedule, target: "26.2", expectedStatus: StatusSupported},
+
+		{name: "composite array fields before", tag: FeatureCompositeTypeArrayFields, target: "25.4", expectedStatus: StatusNotYetIntroduced},
+		{name: "composite array fields at", tag: FeatureCompositeTypeArrayFields, target: "26.1", expectedStatus: StatusSupported},
+		{name: "composite array fields after", tag: FeatureCompositeTypeArrayFields, target: "26.2", expectedStatus: StatusSupported},
+
 		{name: "cross-major: target predates oldest seed", tag: FeaturePLpgSQLFunctionBody, target: "19.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "cross-major: target newer than newest seed", tag: FeaturePLpgSQLFunctionBody, target: "26.2", expectedStatus: StatusSupported},
 	}
@@ -226,6 +242,10 @@ func TestExportedConstantsAreRegistered(t *testing.T) {
 		FeatureLTreeType,
 		FeatureChangefeedDatabaseLevel,
 		FeatureAlterExternalConnection,
+		FeatureShowJobsResolvedTimestamp,
+		FeatureBackupStrictStorageLocality,
+		FeatureExecuteSchedule,
+		FeatureCompositeTypeArrayFields,
 	} {
 		_, ok := reg.Lookup(tag)
 		require.Truef(t, ok, "constant %q is not registered in DefaultRegistry", tag)

@@ -127,6 +127,12 @@ const (
 	FeatureLTreeType               = "ltree_type"
 	FeatureChangefeedDatabaseLevel = "changefeed_database_level"
 	FeatureAlterExternalConnection = "alter_external_connection"
+
+	// v26.1 features.
+	FeatureShowJobsResolvedTimestamp   = "show_jobs_resolved_timestamp"
+	FeatureBackupStrictStorageLocality = "backup_strict_storage_locality"
+	FeatureExecuteSchedule             = "execute_schedule"
+	FeatureCompositeTypeArrayFields    = "composite_type_array_fields"
 )
 
 // Registry holds an immutable set of Feature entries, indexed by
@@ -322,6 +328,28 @@ func DefaultRegistry() *Registry {
 			Tag:        FeatureAlterExternalConnection,
 			Name:       "ALTER EXTERNAL CONNECTION",
 			Introduced: "25.4",
+		},
+
+		// v26.1 features.
+		Feature{
+			Tag:        FeatureShowJobsResolvedTimestamp,
+			Name:       "SHOW JOBS ... WITH RESOLVED TIMESTAMP",
+			Introduced: "26.1",
+		},
+		Feature{
+			Tag:        FeatureBackupStrictStorageLocality,
+			Name:       "BACKUP ... WITH STRICT STORAGE LOCALITY",
+			Introduced: "26.1",
+		},
+		Feature{
+			Tag:        FeatureExecuteSchedule,
+			Name:       "EXECUTE SCHEDULE",
+			Introduced: "26.1",
+		},
+		Feature{
+			Tag:        FeatureCompositeTypeArrayFields,
+			Name:       "array types in composite type definitions",
+			Introduced: "26.1",
 		},
 	)
 }
