@@ -37,6 +37,40 @@ func TestSummarizeCmdText(t *testing.T) {
 	require.Contains(t, got, "DELETE")
 	require.Contains(t, got, "orders")
 	require.Contains(t, got, "status = 'x'")
+	// New rows added for issue #100 must appear in text output.
+	require.Contains(t, got, "referenced_columns:")
+	require.Contains(t, got, "status")
+	require.Contains(t, got, "select_star:")
+	require.Contains(t, got, "false")
+}
+
+// TestSummarizeCmdSelectStarJSON verifies that select_star is
+// serialized as a true boolean (not omitted, not "true" string) and
+// that referenced_columns is emitted as an empty JSON array rather
+// than null when a bare * leaves no other refs.
+func TestSummarizeCmdSelectStarJSON(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"summarize", "-e", "SELECT * FROM t", "--output", "json"})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	// Wire-format anchors (the renderer pretty-prints, so match the
+	// indented form): select_star must serialize as a true bool,
+	// not be omitted; referenced_columns must be an empty array,
+	// not null.
+	require.Contains(t, string(env.Data), `"select_star": true`)
+	require.Contains(t, string(env.Data), `"referenced_columns": []`)
+
+	var summaries []summarize.Summary
+	require.NoError(t, json.Unmarshal(env.Data, &summaries))
+	require.Len(t, summaries, 1)
+	require.True(t, summaries[0].SelectStar)
+	require.Empty(t, summaries[0].ReferencedColumns)
 }
 
 // TestSummarizeCmdJSONIssueDemo verifies that the issue's demo
@@ -68,6 +102,8 @@ func TestSummarizeCmdJSONIssueDemo(t *testing.T) {
 	require.Equal(t, []string{"status = 'x'"}, s.Predicates)
 	require.Empty(t, s.Joins)
 	require.Empty(t, s.AffectedColumns)
+	require.Equal(t, []string{"status"}, s.ReferencedColumns)
+	require.False(t, s.SelectStar)
 	require.Equal(t, risk.SeverityInfo, s.RiskLevel)
 }
 

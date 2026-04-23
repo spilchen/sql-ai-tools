@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -35,9 +36,11 @@ func newSummarizeCmd(state *rootState) *cobra.Command {
 		Short: "Structured summary of SQL statements",
 		Long: `Produce a structured per-statement summary of SQL: operation
 (SELECT/INSERT/UPDATE/DELETE/UPSERT/OTHER), tables touched, top-level
-WHERE predicates, joins, columns mutated by DML, and a risk level
-delegated to the same rules as 'crdb-sql risk'. Input is read from the
--e flag, a positional file argument, or stdin.`,
+WHERE predicates, joins, columns mutated by DML (affected_columns),
+the full read-and-write column footprint (referenced_columns), a
+select_star flag set when the projection uses '*' or 't.*', and a
+risk level delegated to the same rules as 'crdb-sql risk'. Input is
+read from the -e flag, a positional file argument, or stdin.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierZeroConfig, cmd)
@@ -102,6 +105,8 @@ func renderSummaryText(w io.Writer, s summarize.Summary) error {
 		{"joins", joinSummaryStrings(s.Joins)},
 		{"predicates", joinOrNone(s.Predicates)},
 		{"affected_columns", joinOrNone(s.AffectedColumns)},
+		{"referenced_columns", joinOrNone(s.ReferencedColumns)},
+		{"select_star", strconv.FormatBool(s.SelectStar)},
 		{"risk", string(s.RiskLevel)},
 	}
 	for _, row := range rows {
