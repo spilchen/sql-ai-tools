@@ -54,6 +54,34 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "ldr skip schema check at", tag: FeatureLDRSkipSchemaCheck, target: "24.3", expectedStatus: StatusSupported},
 		{name: "ldr skip schema check after", tag: FeatureLDRSkipSchemaCheck, target: "25.1", expectedStatus: StatusSupported},
 
+		{name: "vector index before", tag: FeatureVectorIndex, target: "24.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "vector index at", tag: FeatureVectorIndex, target: "25.1", expectedStatus: StatusSupported},
+		{name: "vector index after", tag: FeatureVectorIndex, target: "25.2", expectedStatus: StatusSupported},
+
+		{name: "rls before", tag: FeatureRowLevelSecurity, target: "24.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "rls at", tag: FeatureRowLevelSecurity, target: "25.1", expectedStatus: StatusSupported},
+		{name: "rls after", tag: FeatureRowLevelSecurity, target: "25.2", expectedStatus: StatusSupported},
+
+		{name: "check external conn before", tag: FeatureCheckExternalConnection, target: "24.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "check external conn at", tag: FeatureCheckExternalConnection, target: "25.1", expectedStatus: StatusSupported},
+		{name: "check external conn after", tag: FeatureCheckExternalConnection, target: "25.2", expectedStatus: StatusSupported},
+
+		{name: "ldr bidirectional before", tag: FeatureLDRBidirectional, target: "24.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "ldr bidirectional at", tag: FeatureLDRBidirectional, target: "25.1", expectedStatus: StatusSupported},
+		{name: "ldr bidirectional after", tag: FeatureLDRBidirectional, target: "25.2", expectedStatus: StatusSupported},
+
+		{name: "do block before", tag: FeatureDoBlock, target: "24.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "do block at", tag: FeatureDoBlock, target: "25.1", expectedStatus: StatusSupported},
+		{name: "do block after", tag: FeatureDoBlock, target: "25.2", expectedStatus: StatusSupported},
+
+		{name: "returns table before", tag: FeatureReturnsTable, target: "24.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "returns table at", tag: FeatureReturnsTable, target: "25.1", expectedStatus: StatusSupported},
+		{name: "returns table after", tag: FeatureReturnsTable, target: "25.2", expectedStatus: StatusSupported},
+
+		{name: "xa txn before", tag: FeatureXATransactions, target: "24.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "xa txn at", tag: FeatureXATransactions, target: "25.1", expectedStatus: StatusSupported},
+		{name: "xa txn after", tag: FeatureXATransactions, target: "25.2", expectedStatus: StatusSupported},
+
 		{name: "cross-major: target predates oldest seed", tag: FeaturePLpgSQLFunctionBody, target: "19.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "cross-major: target newer than newest seed", tag: FeaturePLpgSQLFunctionBody, target: "26.2", expectedStatus: StatusSupported},
 	}
@@ -131,6 +159,13 @@ func TestExportedConstantsAreRegistered(t *testing.T) {
 		FeatureTriggers,
 		FeatureShowLogicalReplicationJobs,
 		FeatureLDRSkipSchemaCheck,
+		FeatureVectorIndex,
+		FeatureRowLevelSecurity,
+		FeatureCheckExternalConnection,
+		FeatureLDRBidirectional,
+		FeatureDoBlock,
+		FeatureReturnsTable,
+		FeatureXATransactions,
 	} {
 		_, ok := reg.Lookup(tag)
 		require.Truef(t, ok, "constant %q is not registered in DefaultRegistry", tag)
