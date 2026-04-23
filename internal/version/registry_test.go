@@ -146,6 +146,21 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "composite array fields at", tag: FeatureCompositeTypeArrayFields, target: "26.1", expectedStatus: StatusSupported},
 		{name: "composite array fields after", tag: FeatureCompositeTypeArrayFields, target: "26.2", expectedStatus: StatusSupported},
 
+		{name: "commit and chain before", tag: FeatureCommitAndChain, target: "26.1", expectedStatus: StatusNotYetIntroduced},
+		{name: "commit and chain at", tag: FeatureCommitAndChain, target: "26.2", expectedStatus: StatusSupported},
+
+		{name: "enable disable trigger before", tag: FeatureAlterTableEnableDisableTrigger, target: "26.1", expectedStatus: StatusNotYetIntroduced},
+		{name: "enable disable trigger at", tag: FeatureAlterTableEnableDisableTrigger, target: "26.2", expectedStatus: StatusSupported},
+
+		{name: "alter index storage params before", tag: FeatureAlterIndexStorageParams, target: "26.1", expectedStatus: StatusNotYetIntroduced},
+		{name: "alter index storage params at", tag: FeatureAlterIndexStorageParams, target: "26.2", expectedStatus: StatusSupported},
+
+		{name: "show statement hints before", tag: FeatureShowStatementHints, target: "26.1", expectedStatus: StatusNotYetIntroduced},
+		{name: "show statement hints at", tag: FeatureShowStatementHints, target: "26.2", expectedStatus: StatusSupported},
+
+		{name: "push statistics before", tag: FeatureAlterTablePushStatistics, target: "26.1", expectedStatus: StatusNotYetIntroduced},
+		{name: "push statistics at", tag: FeatureAlterTablePushStatistics, target: "26.2", expectedStatus: StatusSupported},
+
 		{name: "cross-major: target predates oldest seed", tag: FeaturePLpgSQLFunctionBody, target: "19.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "cross-major: target newer than newest seed", tag: FeaturePLpgSQLFunctionBody, target: "26.2", expectedStatus: StatusSupported},
 	}
@@ -246,6 +261,11 @@ func TestExportedConstantsAreRegistered(t *testing.T) {
 		FeatureBackupStrictStorageLocality,
 		FeatureExecuteSchedule,
 		FeatureCompositeTypeArrayFields,
+		FeatureCommitAndChain,
+		FeatureAlterTableEnableDisableTrigger,
+		FeatureAlterIndexStorageParams,
+		FeatureShowStatementHints,
+		FeatureAlterTablePushStatistics,
 	} {
 		_, ok := reg.Lookup(tag)
 		require.Truef(t, ok, "constant %q is not registered in DefaultRegistry", tag)

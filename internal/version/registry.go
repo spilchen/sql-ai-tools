@@ -133,6 +133,13 @@ const (
 	FeatureBackupStrictStorageLocality = "backup_strict_storage_locality"
 	FeatureExecuteSchedule             = "execute_schedule"
 	FeatureCompositeTypeArrayFields    = "composite_type_array_fields"
+
+	// v26.2 features.
+	FeatureCommitAndChain                 = "commit_and_chain"
+	FeatureAlterTableEnableDisableTrigger = "alter_table_enable_disable_trigger"
+	FeatureAlterIndexStorageParams        = "alter_index_storage_params"
+	FeatureShowStatementHints             = "show_statement_hints"
+	FeatureAlterTablePushStatistics       = "alter_table_push_statistics"
 )
 
 // Registry holds an immutable set of Feature entries, indexed by
@@ -350,6 +357,33 @@ func DefaultRegistry() *Registry {
 			Tag:        FeatureCompositeTypeArrayFields,
 			Name:       "array types in composite type definitions",
 			Introduced: "26.1",
+		},
+
+		// v26.2 features.
+		Feature{
+			Tag:        FeatureCommitAndChain,
+			Name:       "COMMIT/ROLLBACK ... AND [NO] CHAIN",
+			Introduced: "26.2",
+		},
+		Feature{
+			Tag:        FeatureAlterTableEnableDisableTrigger,
+			Name:       "ALTER TABLE ... ENABLE/DISABLE TRIGGER",
+			Introduced: "26.2",
+		},
+		Feature{
+			Tag:        FeatureAlterIndexStorageParams,
+			Name:       "ALTER INDEX ... SET/RESET storage parameters",
+			Introduced: "26.2",
+		},
+		Feature{
+			Tag:        FeatureShowStatementHints,
+			Name:       "SHOW STATEMENT HINTS",
+			Introduced: "26.2",
+		},
+		Feature{
+			Tag:        FeatureAlterTablePushStatistics,
+			Name:       "ALTER TABLE ... PUSH STATISTICS",
+			Introduced: "26.2",
 		},
 	)
 }
