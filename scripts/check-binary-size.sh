@@ -60,7 +60,12 @@ find_out=$(mktemp) || { echo "::error::failed to create temp file for find outpu
 trap 'rm -f "$find_errs" "$find_out"' EXIT INT TERM
 
 find_rc=0
-find -L dist -mindepth 2 -maxdepth 2 -type f -name crdb-sql >"$find_out" 2>"$find_errs" || find_rc=$?
+# Match both the unsuffixed latest binary (`crdb-sql`) and any
+# per-quarter sibling (`crdb-sql-v251`, `crdb-sql-v262`, ...). Each
+# backend ships independently and must individually fit under the cap;
+# the multi-version distribution accepts a larger archive in aggregate
+# but never a single bloated binary.
+find -L dist -mindepth 2 -maxdepth 2 -type f \( -name crdb-sql -o -name 'crdb-sql-v*' \) >"$find_out" 2>"$find_errs" || find_rc=$?
 if [ "$find_rc" -ne 0 ]; then
   echo "::error::find failed (exit $find_rc) while enumerating dist/:"
   cat "$find_errs"

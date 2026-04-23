@@ -1,0 +1,30 @@
+# Per-quarter cockroachdb-parser fork tags consumed by the
+# `make build-vXXX` matrix and the GoReleaser release pipeline.
+#
+# Each entry maps a CRDB Year.Quarter binary tag (the `vXXX` suffix
+# baked into crdb-sql-vXXX) to:
+#   - the parser fork's module path (we pin the spilchen fork via the
+#     replace directive in the corresponding build/go.vXXX.mod file),
+#   - the fork tag/version that file should reference,
+#   - the builtin-stubs version string that builtinstubs.Init expects
+#     (matches the registerVN_M function in
+#     internal/builtinstubs/stubs_vN_M_gen.go).
+#
+# Adding a new quarter requires three out-of-band steps before adding
+# its entry here:
+#   1. Tag a corresponding release in the parser fork.
+#   2. Run `make generate-builtins STUBS_VERSION=vN.M` against a CRDB
+#      checkout at the matching version to produce the stubs file.
+#   3. Create build/go.vNM.mod (copy go.mod, change the `replace`
+#      directive's version to the fork tag from step 1).
+#
+# The `latest` key marks which quarter `make build` (the lazy-install
+# target) compiles against. It is also the binary that gets the
+# unsuffixed `crdb-sql` name in the release archive.
+latest: v262
+
+quarters:
+  - tag: v262
+    fork: github.com/spilchen/cockroachdb-parser
+    version: v0.26.2
+    stubs: v26.2

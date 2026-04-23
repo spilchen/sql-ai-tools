@@ -16,14 +16,63 @@ STUBS_VERSION           ?= v26.2
 BUILTINS_JSON           := internal/builtinstubs/testdata/crdb_builtins_$(STUBS_VERSION).json
 BUILTINS_GEN            := internal/builtinstubs/stubs_$(subst .,_,$(STUBS_VERSION))_gen.go
 
-.PHONY: help build test test-integration fmt fmt-check vet lint clean tools tidy-check generate-builtins
+# Multi-quarter build matrix.
+#
+# LATEST_QUARTER is the CRDB Year.Quarter the default `make build`
+# target compiles against. It is stamped into the binary via the
+# versionroute.builtQuarterStamp ldflag so the routing logic in
+# main.go knows which sibling to delegate to when --target-version
+# requests a different quarter. Bump it (and add a build/go.vXXX.mod
+# / stubs file) when a newer parser fork is the new default.
+#
+# QUARTERS lists every supported per-quarter backend. `make build-all`
+# walks this list. Adding an entry here without a matching
+# build/go.vXXX.mod and internal/builtinstubs/stubs_vN_M_gen.go will
+# fail the per-quarter target — see build/parser-versions.yaml for
+# the new-quarter checklist.
+LATEST_QUARTER          := v262
+QUARTERS                := v262
+ROUTE_PKG               := github.com/spilchen/sql-ai-tools/internal/versionroute
+LDFLAGS_LATEST          := -X $(ROUTE_PKG).builtQuarterStamp=$(LATEST_QUARTER)
+
+.PHONY: help build build-all build-latest test test-integration fmt fmt-check vet lint clean tools tidy-check generate-builtins
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*?##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build: ## Compile the binary into bin/.
+build: ## Compile the latest-quarter binary into bin/crdb-sql.
 	@mkdir -p $(BIN_DIR)
-	go build -o $(BIN) .
+	go build -ldflags "$(LDFLAGS_LATEST)" -o $(BIN) .
+
+# Pattern target: build-vXXX produces bin/crdb-sql-vXXX from the
+# matching build/go.vXXX.mod (a copy of the top-level go.mod with its
+# `replace` directive pointing at the per-quarter parser fork tag).
+# Both the modfile and a corresponding stubs file in
+# internal/builtinstubs must exist; see build/parser-versions.yaml.
+#
+# Special case: when XXX matches LATEST_QUARTER, no -modfile is needed
+# (the top-level go.mod already pins the latest fork tag). The pattern
+# rule covers both cases by testing for the build/go.vXXX.mod file.
+build-v%:
+	@mkdir -p $(BIN_DIR)
+	@modfile=build/go.v$*.mod; \
+	if [ -f "$$modfile" ]; then \
+		echo "go build -modfile=$$modfile -o $(BIN_DIR)/$(BINARY)-v$* ."; \
+		go build -modfile="$$modfile" -ldflags "-X $(ROUTE_PKG).builtQuarterStamp=v$*" -o $(BIN_DIR)/$(BINARY)-v$* .; \
+	elif [ "v$*" = "$(LATEST_QUARTER)" ]; then \
+		echo "go build (latest, no modfile) -o $(BIN_DIR)/$(BINARY)-v$* ."; \
+		go build -ldflags "-X $(ROUTE_PKG).builtQuarterStamp=v$*" -o $(BIN_DIR)/$(BINARY)-v$* .; \
+	else \
+		echo "build-v$*: missing build/go.v$*.mod and v$* != LATEST_QUARTER ($(LATEST_QUARTER))"; \
+		echo "Add build/go.v$*.mod (see build/parser-versions.yaml) or fix the quarter tag."; \
+		exit 2; \
+	fi
+
+# build-latest is an alias for the unsuffixed `make build` so the
+# release matrix can refer to all quarters uniformly.
+build-latest: build ## Alias for `make build` — compile the latest-quarter binary.
+
+build-all: $(addprefix build-, $(QUARTERS)) build ## Compile every supported per-quarter backend plus the unsuffixed latest.
 
 test: ## Run the Go test suite.
 	go test $(GO_PKGS)

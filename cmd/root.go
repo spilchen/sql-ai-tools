@@ -140,6 +140,7 @@ round-tripping through a live cluster.`,
 	root.PersistentFlags().String(targetVersionFlag, "",
 		"Target CockroachDB version (e.g. 25.4.0); reported in the response envelope")
 	root.AddCommand(newVersionCmd(state))
+	root.AddCommand(newVersionsCmd(state))
 	root.AddCommand(newPingCmd(state))
 	root.AddCommand(newParseCmd(state))
 	root.AddCommand(newFormatCmd(state))
