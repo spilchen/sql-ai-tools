@@ -27,7 +27,28 @@ func main() {
 	// against, MaybeReexec replaces the process with the matching
 	// crdb-sql-vXXX sibling and never returns.
 	versionroute.MaybeReexec()
-	builtinstubs.Init("")
+	// Pick the stubs version that matches this binary's compiled
+	// parser. With multiple registered versions Init("") always
+	// picks DefaultVersion, which is wrong for sibling binaries
+	// built against an older parser.
+	//
+	// Built() consults the executable filename, then the ldflag
+	// stamp, then BuildInfo (see versionroute.Built). When all three
+	// fail (e.g. a hand-rolled `go build` with no stamp and no
+	// parser dep recorded in BuildInfo) it returns ok=false and we
+	// fall back to DefaultVersion. Consequence: the wrong builtin
+	// set is registered, so semantic checks may accept v26.2-only
+	// function calls on a v26.1 parser (or vice-versa) and the
+	// version envelope misreports builtins-stubs. Release binaries
+	// always carry the stamp, so this only fires on hand-built dev
+	// binaries; that's why we don't emit a stderr warning here (it
+	// would add noise to every invocation). Malformed-stamp cases
+	// already get a loud diagnostic from versionroute.StampDiagnostic.
+	stubsVersion := ""
+	if q, ok := versionroute.Built(); ok {
+		stubsVersion = "v" + q.String()
+	}
+	builtinstubs.Init(stubsVersion)
 	if err := cmd.Execute(); err != nil {
 		// cmd.Execute() suppresses cobra's own error printing
 		// (SilenceErrors on rootCmd) so that this is the single

@@ -28,3 +28,7 @@ quarters:
     fork: github.com/spilchen/cockroachdb-parser
     version: v0.26.2
     stubs: v26.2
+  - tag: v261
+    fork: github.com/spilchen/cockroachdb-parser
+    version: v0.26.1
+    stubs: v26.1

@@ -25,6 +25,7 @@ const DefaultVersion = "v26.2"
 // functions. Each entry is added by a generated stubs file.
 var versionRegistry = map[string]func(){
 	"v26.2": registerV26_2,
+	"v26.1": registerV26_1,
 }
 
 var activeVersion string
