@@ -112,7 +112,9 @@ func TestValidateCmdTextError(t *testing.T) {
 }
 
 // TestValidateCmdJSONError verifies that invalid SQL in JSON mode
-// produces an envelope with structured errors and nil data.
+// produces an envelope with structured errors plus a Result payload
+// recording which phases ran (parse failed, type/name skipped because
+// there is no AST to feed them).
 func TestValidateCmdJSONError(t *testing.T) {
 	root := newRootCmd()
 	var stdout bytes.Buffer
@@ -127,7 +129,6 @@ func TestValidateCmdJSONError(t *testing.T) {
 	var env output.Envelope
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
 	require.Len(t, env.Errors, 1)
-	require.Nil(t, env.Data)
 
 	diagErr := env.Errors[0]
 	require.Equal(t, "42601", diagErr.Code)
@@ -138,6 +139,20 @@ func TestValidateCmdJSONError(t *testing.T) {
 	require.Equal(t, 1, diagErr.Position.Line)
 	require.Equal(t, 12, diagErr.Position.Column)
 	require.Equal(t, 11, diagErr.Position.ByteOffset)
+
+	var payload struct {
+		Valid  bool `json:"valid"`
+		Checks struct {
+			Syntax         string `json:"syntax"`
+			TypeCheck      string `json:"type_check"`
+			NameResolution string `json:"name_resolution"`
+		} `json:"checks"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.False(t, payload.Valid)
+	require.Equal(t, "failed", payload.Checks.Syntax)
+	require.Equal(t, "skipped", payload.Checks.TypeCheck)
+	require.Equal(t, "skipped", payload.Checks.NameResolution)
 }
 
 // TestValidateCmdSuggestionsJSON verifies that name-resolution errors
@@ -284,7 +299,11 @@ func TestValidateCmdTypeErrorText(t *testing.T) {
 }
 
 // TestValidateCmdTypeErrorJSON verifies that a type mismatch in JSON
-// mode produces an envelope with a structured error and nil data.
+// mode produces an envelope with a structured error plus the Result
+// payload recording which phases ran. Without --schema, the run also
+// includes a capability_required warning since name resolution was
+// skipped — kept consistent with the success path so consumers see
+// the same warning regardless of whether other phases passed.
 func TestValidateCmdTypeErrorJSON(t *testing.T) {
 	root := newRootCmd()
 	var stdout bytes.Buffer
@@ -297,15 +316,102 @@ func TestValidateCmdTypeErrorJSON(t *testing.T) {
 
 	var env output.Envelope
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
-	require.Len(t, env.Errors, 1)
-	require.Nil(t, env.Data)
+	require.Len(t, env.Errors, 2)
 
-	diagErr := env.Errors[0]
-	require.NotEmpty(t, diagErr.Code)
-	require.Equal(t, output.SeverityError, diagErr.Severity)
-	require.Contains(t, diagErr.Message, "unsupported binary operator")
-	require.NotNil(t, diagErr.Position)
-	require.Equal(t, 1, diagErr.Position.Line)
+	require.Equal(t, "capability_required", env.Errors[0].Code)
+	require.Equal(t, output.SeverityWarning, env.Errors[0].Severity)
+
+	typeErr := env.Errors[1]
+	require.NotEmpty(t, typeErr.Code)
+	require.Equal(t, output.SeverityError, typeErr.Severity)
+	require.Contains(t, typeErr.Message, "unsupported binary operator")
+	require.NotNil(t, typeErr.Position)
+	require.Equal(t, 1, typeErr.Position.Line)
+
+	var payload struct {
+		Valid  bool `json:"valid"`
+		Checks struct {
+			Syntax         string `json:"syntax"`
+			TypeCheck      string `json:"type_check"`
+			NameResolution string `json:"name_resolution"`
+		} `json:"checks"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.False(t, payload.Valid)
+	require.Equal(t, "ok", payload.Checks.Syntax)
+	require.Equal(t, "failed", payload.Checks.TypeCheck)
+	require.Equal(t, "skipped", payload.Checks.NameResolution)
+}
+
+// TestValidateCmdMultiStatementErrorAccumulation is the end-to-end
+// demo from issue #16: a two-statement input with two distinct typos
+// must surface both diagnostics in a single envelope rather than
+// stopping at the first one.
+func TestValidateCmdMultiStatementErrorAccumulation(t *testing.T) {
+	dir := t.TempDir()
+	schema := writeFile(t, dir, "schema.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY, name TEXT);\n")
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate", "--output", "json", "--schema", schema,
+		"-e", "SELECT * FROM usrs; SELECT nme FROM users",
+	})
+
+	require.ErrorIs(t, root.Execute(), output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 2)
+
+	require.Equal(t, "42P01", env.Errors[0].Code)
+	require.Equal(t, "unknown_table", env.Errors[0].Category)
+	require.Contains(t, env.Errors[0].Message, "usrs")
+
+	require.Equal(t, "42703", env.Errors[1].Code)
+	require.Equal(t, "unknown_column", env.Errors[1].Category)
+	require.Contains(t, env.Errors[1].Message, "nme")
+}
+
+// TestValidateCmdCrossPhaseErrorAccumulation verifies that an error
+// in an earlier phase (type check) does not suppress diagnostics from
+// a later phase (name resolution). Before issue #16 the early-return
+// pipeline hid the second error.
+func TestValidateCmdCrossPhaseErrorAccumulation(t *testing.T) {
+	dir := t.TempDir()
+	schema := writeFile(t, dir, "schema.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY);\n")
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate", "--output", "json", "--schema", schema,
+		"-e", "SELECT 1 + 'x'; SELECT * FROM usrs",
+	})
+
+	require.ErrorIs(t, root.Execute(), output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 2)
+	require.Contains(t, env.Errors[0].Message, "unsupported binary operator")
+	require.Equal(t, "42P01", env.Errors[1].Code)
+
+	var payload struct {
+		Valid  bool `json:"valid"`
+		Checks struct {
+			TypeCheck      string `json:"type_check"`
+			NameResolution string `json:"name_resolution"`
+		} `json:"checks"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.Equal(t, "failed", payload.Checks.TypeCheck)
+	require.Equal(t, "failed", payload.Checks.NameResolution)
 }
 
 // TestValidateCmdColumnRefNoTypeError verifies that SQL with column
@@ -466,6 +572,57 @@ sql:
 	}
 	require.Contains(t, []string{payload.Files[0].File, payload.Files[1].File}, good1)
 	require.Contains(t, []string{payload.Files[0].File, payload.Files[1].File}, good2)
+}
+
+// TestValidateCmdConfigCrossPhaseAccumulation verifies that the
+// config-driven multi-file path also accumulates diagnostics across
+// phases — a type error in one query file does not suppress a
+// name-resolution error in a different file. Pins the runner wiring
+// in validateQueryFile so a future refactor cannot reintroduce the
+// pre-#16 early-return behavior on the multi-file path.
+func TestValidateCmdConfigCrossPhaseAccumulation(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "schema/users.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY);\n")
+	typeBad := writeFile(t, dir, "queries/q_type.sql", "SELECT 1 + 'x';\n")
+	nameBad := writeFile(t, dir, "queries/q_name.sql", "SELECT * FROM usrs;\n")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["schema/*.sql"]
+    queries: ["queries/*.sql"]
+`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	require.ErrorIs(t, root.Execute(), output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+
+	// Both files must contribute their per-phase diagnostic; tagFile
+	// stamps Context["file"] so we can attribute each error.
+	var typeErrCount, nameErrCount int
+	for _, e := range env.Errors {
+		path, _ := e.Context["file"].(string)
+		switch path {
+		case typeBad:
+			typeErrCount++
+			require.Contains(t, e.Message, "unsupported binary operator")
+		case nameBad:
+			nameErrCount++
+			require.Equal(t, "42P01", e.Code)
+		}
+	}
+	require.Equal(t, 1, typeErrCount, "type error in q_type.sql must surface")
+	require.Equal(t, 1, nameErrCount, "name error in q_name.sql must surface")
 }
 
 // TestValidateCmdCLIOverridesConfig verifies that an explicit -e
@@ -698,7 +855,6 @@ func TestValidateCmdSchemaUnknownTable(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
 	require.Equal(t, output.TierSchemaFile, env.Tier)
 	require.Len(t, env.Errors, 1)
-	require.Nil(t, env.Data)
 
 	diagErr := env.Errors[0]
 	require.Equal(t, "42P01", diagErr.Code)
@@ -707,6 +863,16 @@ func TestValidateCmdSchemaUnknownTable(t *testing.T) {
 	avail, ok := diagErr.Context["available_tables"].([]any)
 	require.True(t, ok, "available_tables must be a JSON array")
 	require.Equal(t, []any{"users"}, avail)
+
+	var payload struct {
+		Valid  bool `json:"valid"`
+		Checks struct {
+			NameResolution string `json:"name_resolution"`
+		} `json:"checks"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.False(t, payload.Valid)
+	require.Equal(t, "failed", payload.Checks.NameResolution)
 }
 
 // TestValidateCmdSchemaKnownTable verifies the success path with
@@ -762,7 +928,6 @@ func TestValidateCmdSchemaUnknownColumn(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
 	require.Equal(t, output.TierSchemaFile, env.Tier)
 	require.Len(t, env.Errors, 1)
-	require.Nil(t, env.Data)
 
 	diagErr := env.Errors[0]
 	require.Equal(t, "42703", diagErr.Code)
@@ -774,6 +939,16 @@ func TestValidateCmdSchemaUnknownColumn(t *testing.T) {
 	avail, ok := diagErr.Context["available_columns"].([]any)
 	require.True(t, ok, "available_columns must be a JSON array")
 	require.Equal(t, []any{"id", "name"}, avail)
+
+	var payload struct {
+		Valid  bool `json:"valid"`
+		Checks struct {
+			NameResolution string `json:"name_resolution"`
+		} `json:"checks"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.False(t, payload.Valid)
+	require.Equal(t, "failed", payload.Checks.NameResolution)
 }
 
 // TestValidateCmdSchemaUnknownTableText verifies that unknown-table

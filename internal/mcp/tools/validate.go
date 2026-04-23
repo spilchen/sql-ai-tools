@@ -78,42 +78,44 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 		stmts, parseErr := parser.Parse(sql)
 		if parseErr != nil {
 			env.Errors = append(env.Errors, diag.FromParseError(parseErr, sql))
-			return envelopeResult(env)
+			return failureEnvelope(env, validateresult.Checks{
+				Syntax:         validateresult.CheckFailed,
+				TypeCheck:      validateresult.CheckSkipped,
+				NameResolution: validateresult.CheckSkipped,
+			})
 		}
 
-		if typeErrs := semcheck.CheckExprTypes(stmts, sql); len(typeErrs) > 0 {
-			env.Errors = append(env.Errors, typeErrs...)
-			return envelopeResult(env)
-		}
-
+		// Version-aware feature warnings are advisory and emitted
+		// regardless of whether semantic checks pass — see the CLI
+		// path's matching comment for rationale.
 		env.Errors = append(env.Errors, version.Inspect(stmts, target, nil)...)
 
-		checks := validateresult.Checks{
-			Syntax:    validateresult.CheckOK,
-			TypeCheck: validateresult.CheckOK,
-		}
+		checks := validateresult.Checks{Syntax: validateresult.CheckOK}
 
+		var cat *catalog.Catalog
 		if len(sources) == 0 {
-			checks.NameResolution = validateresult.CheckSkipped
 			env.Errors = append(env.Errors, validateresult.CapabilityRequiredError(
 				validateresult.CapabilityNameResolution,
 				"name resolution skipped: schemas not provided",
 				"pass the schemas argument to enable table name resolution",
 			))
 		} else {
-			cat, err := catalog.Load(sources)
+			loaded, err := catalog.Load(sources)
 			if err != nil {
 				env.Errors = append(env.Errors, schemaLoadEnvelopeError(err))
 				return envelopeResult(env)
 			}
+			cat = loaded
 			schemawarn.Append(&env, cat)
-			nameErrs := semcheck.CheckTableNames(stmts, sql, cat)
-			nameErrs = append(nameErrs, semcheck.CheckColumnNames(stmts, sql, cat)...)
-			if len(nameErrs) > 0 {
-				env.Errors = append(env.Errors, nameErrs...)
-				return envelopeResult(env)
-			}
-			checks.NameResolution = validateresult.CheckOK
+		}
+
+		semRes, semErrs := semcheck.Run(stmts, sql, cat)
+		checks.TypeCheck = semRes.TypeCheck
+		checks.NameResolution = semRes.NameResolution
+
+		if len(semErrs) > 0 {
+			env.Errors = append(env.Errors, semErrs...)
+			return failureEnvelope(env, checks)
 		}
 
 		data, err := json.Marshal(validateresult.Result{Valid: true, Checks: checks})
@@ -123,4 +125,27 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 		env.Data = data
 		return envelopeResult(env)
 	}
+}
+
+// failureEnvelope marshals checks into env.Data as a Result{Valid:false}
+// payload before delegating to envelopeResult. Sharing this helper across
+// the parse-error and semantic-error branches keeps the failure-path
+// JSON shape identical so consumers can branch on Result.Checks without
+// special-casing the producing phase. Callers append every diagnostic
+// to env.Errors before invoking failureEnvelope, so that even an
+// (essentially impossible) marshal failure of the tiny Result struct
+// still emits the diagnostics through the standard envelope path
+// rather than collapsing them into an opaque tool-level error.
+func failureEnvelope(env output.Envelope, checks validateresult.Checks) (*mcp.CallToolResult, error) {
+	data, err := json.Marshal(validateresult.Result{Valid: false, Checks: checks})
+	if err != nil {
+		env.Errors = append(env.Errors, output.Error{
+			Code:     "internal_error",
+			Severity: output.SeverityError,
+			Message:  fmt.Sprintf("encode result: %v", err),
+		})
+		return envelopeResult(env)
+	}
+	env.Data = data
+	return envelopeResult(env)
 }

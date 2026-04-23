@@ -95,40 +95,51 @@ matched by the config and reports per-file results in one envelope.`,
 
 			stmts, parseErr := parser.Parse(sql)
 			if parseErr != nil {
-				return renderParseError(r, baseEnv, parseErr, sql)
+				// A parse failure prevents every later phase from
+				// running, so we report Syntax as the failed phase
+				// and the rest as Skipped. Consumers can branch on
+				// the Checks payload without inspecting error codes.
+				parseChecks := validateresult.Checks{
+					Syntax:         validateresult.CheckFailed,
+					TypeCheck:      validateresult.CheckSkipped,
+					NameResolution: validateresult.CheckSkipped,
+				}
+				return renderValidateFailure(r, baseEnv,
+					[]output.Error{diag.FromParseError(parseErr, sql)}, parseChecks)
 			}
 
-			if typeErrs := semcheck.CheckExprTypes(stmts, sql); len(typeErrs) > 0 {
-				return renderDiagErrors(r, baseEnv, typeErrs)
-			}
-
+			// Version-aware feature warnings are advisory: they
+			// describe target-version compatibility independently
+			// of whether semantic checks pass. Emit them
+			// unconditionally so a user fixing a type error still
+			// sees the upcoming-feature warnings in the same run.
 			baseEnv.Errors = append(baseEnv.Errors,
 				version.Inspect(stmts, state.targetVersion, nil)...)
 
-			checks := validateresult.Checks{
-				Syntax:    validateresult.CheckOK,
-				TypeCheck: validateresult.CheckOK,
-			}
+			checks := validateresult.Checks{Syntax: validateresult.CheckOK}
 
+			var cat *catalog.Catalog
 			if len(schemaFiles) == 0 {
-				checks.NameResolution = validateresult.CheckSkipped
 				baseEnv.Errors = append(baseEnv.Errors, validateresult.CapabilityRequiredError(
 					validateresult.CapabilityNameResolution,
 					"name resolution skipped: --schema not provided",
 					"pass --schema FILE to enable table name resolution",
 				))
 			} else {
-				cat, err := catalog.LoadFiles(schemaFiles)
+				var err error
+				cat, err = catalog.LoadFiles(schemaFiles)
 				if err != nil {
 					return renderSchemaLoadError(r, baseEnv, err)
 				}
 				appendSchemaWarnings(&baseEnv, cat)
-				nameErrs := semcheck.CheckTableNames(stmts, sql, cat)
-				nameErrs = append(nameErrs, semcheck.CheckColumnNames(stmts, sql, cat)...)
-				if len(nameErrs) > 0 {
-					return renderDiagErrors(r, baseEnv, nameErrs)
-				}
-				checks.NameResolution = validateresult.CheckOK
+			}
+
+			semRes, semErrs := semcheck.Run(stmts, sql, cat)
+			checks.TypeCheck = semRes.TypeCheck
+			checks.NameResolution = semRes.NameResolution
+
+			if len(semErrs) > 0 {
+				return renderValidateFailure(r, baseEnv, semErrs, checks)
 			}
 
 			data, err := json.Marshal(validateresult.Result{Valid: true, Checks: checks})
@@ -292,35 +303,25 @@ func validateQueryFile(
 		return []output.Error{tagFile(e, path)}, false
 	}
 
-	var (
-		fileErrs   []output.Error
-		hardErrors bool
-	)
-	addHard := func(e output.Error) {
-		fileErrs = append(fileErrs, tagFile(e, path))
-		hardErrors = true
-	}
-	addAdvisory := func(e output.Error) {
-		fileErrs = append(fileErrs, tagFile(e, path))
-	}
-	for _, e := range semcheck.CheckExprTypes(stmts, sql) {
-		addHard(e)
-	}
-	if cat != nil {
-		for _, e := range semcheck.CheckTableNames(stmts, sql, cat) {
-			addHard(e)
-		}
-		for _, e := range semcheck.CheckColumnNames(stmts, sql, cat) {
-			addHard(e)
-		}
-	}
-	for _, e := range version.Inspect(stmts, targetVersion, nil) {
-		addAdvisory(e)
-	}
-	if len(fileErrs) == 0 {
+	// semcheck.Run returns only hard ERROR-severity diagnostics
+	// (type-check, table-name, column-name); the runner already
+	// accumulates across phases without early returns. Version
+	// warnings are appended afterwards as advisories — they do not
+	// flip the per-file Valid flag, mirroring the single-input
+	// path's treatment of warnings.
+	_, semErrs := semcheck.Run(stmts, sql, cat)
+	versionWarns := version.Inspect(stmts, targetVersion, nil)
+	if len(semErrs) == 0 && len(versionWarns) == 0 {
 		return nil, true
 	}
-	return fileErrs, !hardErrors
+	fileErrs := make([]output.Error, 0, len(semErrs)+len(versionWarns))
+	for _, e := range semErrs {
+		fileErrs = append(fileErrs, tagFile(e, path))
+	}
+	for _, e := range versionWarns {
+		fileErrs = append(fileErrs, tagFile(e, path))
+	}
+	return fileErrs, len(semErrs) == 0
 }
 
 // countErrors returns the number of ERROR-severity entries in errs,
@@ -424,26 +425,63 @@ func renderDiagErrors(r output.Renderer, env output.Envelope, errs []output.Erro
 	env.Data = nil
 
 	if err := r.Render(env, func(w io.Writer) error {
-		for _, diagErr := range errs {
-			pos := diagErr.Position
-			if pos != nil {
-				if _, werr := fmt.Fprintf(w, "%d:%d: %s [%s]\n", pos.Line, pos.Column, diagErr.Message, diagErr.Code); werr != nil {
-					return werr
-				}
-			} else {
-				if _, werr := fmt.Fprintf(w, "%s [%s]\n", diagErr.Message, diagErr.Code); werr != nil {
-					return werr
-				}
-			}
-			if werr := writeSuggestions(w, diagErr.Suggestions); werr != nil {
-				return werr
-			}
-		}
-		return nil
+		return writeDiagErrors(w, errs)
 	}); err != nil {
 		return err
 	}
 	return output.ErrRendered
+}
+
+// renderValidateFailure renders a validate run that produced one or
+// more errors. checks records the per-phase outcome and is marshalled
+// into env.Data as a Result{Valid:false} payload so JSON consumers
+// always learn which phases ran (and which were skipped because an
+// upstream phase failed). errs is appended to env.Errors and printed
+// in text mode through the writeDiagErrors helper shared with
+// renderDiagErrors.
+func renderValidateFailure(
+	r output.Renderer, env output.Envelope, errs []output.Error, checks validateresult.Checks,
+) error {
+	// Append diagnostics to the envelope before marshaling so that
+	// even an (essentially impossible) Marshal failure of the tiny
+	// Result struct still surfaces every error the caller wanted to
+	// report. RenderError preserves env.Errors when promoting to the
+	// generic internal_error path.
+	env.Errors = append(env.Errors, errs...)
+
+	data, err := json.Marshal(validateresult.Result{Valid: false, Checks: checks})
+	if err != nil {
+		return r.RenderError(env, err)
+	}
+	env.Data = data
+
+	if err := r.Render(env, func(w io.Writer) error {
+		return writeDiagErrors(w, errs)
+	}); err != nil {
+		return err
+	}
+	return output.ErrRendered
+}
+
+// writeDiagErrors prints one line per diagnostic error in text mode,
+// followed by any "did you mean" suggestion lines. Shared by the two
+// validate failure-rendering paths so a future formatting tweak (e.g.
+// adding the SQLSTATE class name) only needs to change one place.
+func writeDiagErrors(w io.Writer, errs []output.Error) error {
+	for _, diagErr := range errs {
+		pos := diagErr.Position
+		if pos != nil {
+			if _, werr := fmt.Fprintf(w, "%d:%d: %s [%s]\n", pos.Line, pos.Column, diagErr.Message, diagErr.Code); werr != nil {
+				return werr
+			}
+		} else if _, werr := fmt.Fprintf(w, "%s [%s]\n", diagErr.Message, diagErr.Code); werr != nil {
+			return werr
+		}
+		if werr := writeSuggestions(w, diagErr.Suggestions); werr != nil {
+			return werr
+		}
+	}
+	return nil
 }
 
 // writeSuggestions prints structured "did you mean?" suggestions

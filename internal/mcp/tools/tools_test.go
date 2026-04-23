@@ -344,6 +344,69 @@ func TestValidateSQLHandlerStampsTargetVersionOnSchemaFilePath(t *testing.T) {
 		"target_version must be stamped even on the schema_file path")
 }
 
+// TestValidateSQLHandlerFailurePayloadShapes pins the Result.Checks
+// emitted on each failure path so MCP consumers can branch on the
+// per-phase status without inspecting error codes. The CLI surface
+// has equivalent coverage in TestValidateCmdJSONError /
+// TestValidateCmdTypeErrorJSON; this test guarantees the MCP envelope
+// does not drift from that contract.
+func TestValidateSQLHandlerFailurePayloadShapes(t *testing.T) {
+	const usersDDL = "CREATE TABLE users (id INT PRIMARY KEY)"
+
+	tests := []struct {
+		name                   string
+		args                   map[string]any
+		expectedSyntax         validateresult.CheckStatus
+		expectedTypeCheck      validateresult.CheckStatus
+		expectedNameResolution validateresult.CheckStatus
+	}{
+		{
+			name:                   "parse error skips downstream phases",
+			args:                   map[string]any{"sql": "SELECT FROM"},
+			expectedSyntax:         validateresult.CheckFailed,
+			expectedTypeCheck:      validateresult.CheckSkipped,
+			expectedNameResolution: validateresult.CheckSkipped,
+		},
+		{
+			name:                   "type error without schemas leaves name resolution skipped",
+			args:                   map[string]any{"sql": "SELECT 1 + 'x'"},
+			expectedSyntax:         validateresult.CheckOK,
+			expectedTypeCheck:      validateresult.CheckFailed,
+			expectedNameResolution: validateresult.CheckSkipped,
+		},
+		{
+			name: "unknown table marks name resolution failed",
+			args: map[string]any{
+				"sql":     "SELECT * FROM nope",
+				"schemas": []any{map[string]any{"sql": usersDDL}},
+			},
+			expectedSyntax:         validateresult.CheckOK,
+			expectedTypeCheck:      validateresult.CheckOK,
+			expectedNameResolution: validateresult.CheckFailed,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := ValidateSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = tc.args
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			env := requireEnvelope(t, res)
+			require.NotNil(t, env.Data, "failure path must emit a Result payload")
+
+			var result validateresult.Result
+			require.NoError(t, json.Unmarshal(env.Data, &result))
+			require.False(t, result.Valid)
+			require.Equal(t, tc.expectedSyntax, result.Checks.Syntax)
+			require.Equal(t, tc.expectedTypeCheck, result.Checks.TypeCheck)
+			require.Equal(t, tc.expectedNameResolution, result.Checks.NameResolution)
+		})
+	}
+}
+
 func TestValidateSQLHandler(t *testing.T) {
 	const usersDDL = "CREATE TABLE users (id INT PRIMARY KEY, email TEXT)"
 
@@ -358,6 +421,13 @@ func TestValidateSQLHandler(t *testing.T) {
 		expectedNameResolution validateresult.CheckStatus
 		expectCapabilityWarn   bool
 		expectSchemaWarning    bool
+		// expectNoFailureData is true for failure paths that pre-empt
+		// validation (e.g. a malformed --schema input): the SQL was
+		// never checked, so no Result payload is produced. Other
+		// failure paths (parse, type, name) emit
+		// {valid:false, checks:{...}} so consumers can branch on
+		// Result.Checks without inspecting error codes.
+		expectNoFailureData bool
 	}{
 		{
 			name:                   "valid SQL without schema reports name_resolution skipped",
@@ -422,9 +492,10 @@ func TestValidateSQLHandler(t *testing.T) {
 				"sql":     "SELECT 1",
 				"schemas": []any{map[string]any{"sql": "CREATE TABLEE bad (id INT)"}},
 			},
-			expectedEnvErrs: true,
-			expectedCode:    "42601",
-			expectedTier:    output.TierSchemaFile,
+			expectedEnvErrs:     true,
+			expectedCode:        "42601",
+			expectedTier:        output.TierSchemaFile,
+			expectNoFailureData: true,
 		},
 		{
 			name: "duplicate-table schema surfaces schema_warning alongside successful resolution",
@@ -493,10 +564,16 @@ func TestValidateSQLHandler(t *testing.T) {
 
 			if tc.expectedEnvErrs {
 				require.NotEmpty(t, env.Errors)
-				require.Nil(t, env.Data)
 				if tc.expectedCode != "" {
 					require.Equal(t, tc.expectedCode, env.Errors[0].Code)
 				}
+				if tc.expectNoFailureData {
+					require.Nil(t, env.Data)
+					return
+				}
+				var failResult validateresult.Result
+				require.NoError(t, json.Unmarshal(env.Data, &failResult))
+				require.False(t, failResult.Valid)
 				return
 			}
 
