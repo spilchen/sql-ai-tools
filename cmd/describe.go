@@ -6,7 +6,9 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -17,24 +19,28 @@ import (
 
 	"github.com/spilchen/sql-ai-tools/internal/catalog"
 	"github.com/spilchen/sql-ai-tools/internal/config"
+	"github.com/spilchen/sql-ai-tools/internal/conn"
+	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
 const stdinSentinel = "-"
 
-// newDescribeCmd builds the `crdb-sql describe` subcommand. It loads
-// one or more schema files (--schema), parses them with the
-// CockroachDB parser, and describes the named table's columns, primary
-// key, and indexes.
+// newDescribeCmd builds the `crdb-sql describe` subcommand. It
+// resolves a table description from one of three escape hatches, in
+// order: explicit --schema files, a crdb-sql.yaml config's schema
+// globs, or — when neither is available — a live cluster reached via
+// --dsn or CRDB_DSN.
 //
-// This is a Tier 2 (schema-file) command: it works offline but
-// requires at least one --schema file.
+// On the live path the table argument may be unqualified ("users") or
+// qualified ("public.users"); ambiguous unqualified names error with a
+// list of candidate schemas so the user can re-run with a qualifier.
 func newDescribeCmd(state *rootState) *cobra.Command {
 	var schemaFiles []string
 
 	cmd := &cobra.Command{
 		Use:   "describe TABLE",
-		Short: "Describe a table from schema files",
+		Short: "Describe a table from schema files or a live cluster",
 		Long: `Load CREATE TABLE definitions from one or more --schema files and
 print the named table's columns, primary key, and indexes.
 
@@ -55,7 +61,14 @@ If no --schema is supplied and a crdb-sql.yaml config is present in
 the working directory (or pointed at by --config), describe expands
 the config's schema globs across all sql pairs into one combined
 catalog and looks up the table there. Explicit --schema flags win
-outright (no merging with config-discovered files).`,
+outright (no merging with config-discovered files).
+
+If neither --schema nor a config is available but --dsn (or CRDB_DSN)
+points at a live cluster, describe runs SHOW CREATE TABLE against
+that cluster and reuses the same parser to extract columns, primary
+key, and indexes. The table argument may be qualified
+("schema.table") or left unqualified; unqualified names that exist in
+multiple schemas error with the candidate list so you can disambiguate.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierSchemaFile, cmd)
@@ -90,9 +103,18 @@ outright (no merging with config-discovered files).`,
 				return describeTableFromCatalog(r, baseEnv, cat, tableName)
 			}
 
+			// Live-cluster fallback: with no schema source available
+			// but a DSN configured, run SHOW CREATE TABLE and parse
+			// the returned DDL through the same loader the schema-file
+			// path uses, so the catalog.Table shape is identical
+			// regardless of how it was sourced.
+			if len(schemaFiles) == 0 && state.dsn != "" {
+				return runDescribeLive(cmd.Context(), r, state.dsn, tableName, baseEnv)
+			}
+
 			if len(schemaFiles) == 0 {
 				return r.RenderError(baseEnv,
-					fmt.Errorf("at least one --schema file is required (or a crdb-sql.yaml with matching schema globs)"))
+					fmt.Errorf("at least one --schema file is required (or a crdb-sql.yaml with matching schema globs, or --dsn / CRDB_DSN to query a live cluster)"))
 			}
 
 			sources, err := buildSchemaSources(schemaFiles, cmd.InOrStdin())
@@ -205,6 +227,72 @@ func expandConfigSchemaPaths(cfg *config.File) ([]string, error) {
 	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+// runDescribeLive executes the Tier 3 live-cluster path: open a
+// Manager, run SHOW CREATE TABLE, and render the parsed catalog.Table
+// through the same renderer the schema-file path uses. The envelope
+// is upgraded to TierConnected (overwriting the TierSchemaFile that
+// newEnvelope sets by default for this command) so consumers can
+// branch on which path produced the payload; ConnectionStatus flips
+// to ConnectionConnected only after a successful round-trip.
+//
+// Three error shapes need distinct handling:
+//
+//   - ErrTableNotFound: the same "table %q not found" text the
+//     schema-file path emits, so users see one message regardless of
+//     source.
+//   - *AmbiguousTableError: a custom hint that lists candidate
+//     schemas, so the user can re-run with a qualifier.
+//   - everything else: surfaced through diag.FromClusterError so
+//     pgwire SQLSTATE-bearing failures land with the right structured
+//     code in the envelope.
+func runDescribeLive(
+	ctx context.Context, r output.Renderer, dsn, tableName string, baseEnv output.Envelope,
+) error {
+	baseEnv.Tier = output.TierConnected
+
+	mgr := conn.NewManager(dsn)
+	defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
+
+	tbl, err := mgr.DescribeTableFromCluster(ctx, tableName)
+	if err != nil {
+		switch {
+		case errors.Is(err, conn.ErrTableNotFound):
+			return r.RenderError(baseEnv,
+				fmt.Errorf("table %q not found", tableName))
+		case errors.Is(err, conn.ErrAmbiguousTable):
+			var ambig *conn.AmbiguousTableError
+			if errors.As(err, &ambig) {
+				return r.RenderError(baseEnv, fmt.Errorf(
+					"table %q exists in multiple schemas (%s); qualify as schema.table",
+					ambig.TableName, strings.Join(ambig.Schemas, ", ")))
+			}
+			return r.RenderError(baseEnv, err)
+		default:
+			baseEnv.Errors = append(baseEnv.Errors, diag.FromClusterError(err, ""))
+			baseEnv.Data = nil
+			if rerr := r.Render(baseEnv, func(w io.Writer) error {
+				_, werr := io.WriteString(w, err.Error()+"\n")
+				return werr
+			}); rerr != nil {
+				return rerr
+			}
+			return output.ErrRendered
+		}
+	}
+
+	baseEnv.ConnectionStatus = output.ConnectionConnected
+
+	data, err := json.Marshal(tbl)
+	if err != nil {
+		return r.RenderError(baseEnv, err)
+	}
+	baseEnv.Data = data
+
+	return r.Render(baseEnv, func(w io.Writer) error {
+		return renderTableText(w, tbl)
+	})
 }
 
 func renderTableText(w io.Writer, tbl catalog.Table) error {

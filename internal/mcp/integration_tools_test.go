@@ -13,9 +13,12 @@ package mcp_test
 import (
 	"context"
 	"encoding/json"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 
@@ -348,10 +351,12 @@ func TestIntegrationSummarizeSQL(t *testing.T) {
 	require.Equal(t, []any{"orders"}, summaries[0]["tables"])
 }
 
-// TestIntegrationListTables covers list_tables on both the happy path
-// (schemas yield a non-empty tables array) and the missing-required-
-// parameter path (tool error). schemas is required for list_tables so
-// omitting it is an infrastructure error, not an envelope error.
+// TestIntegrationListTables covers list_tables across the
+// schemas-XOR-dsn contract: an inline schemas request yields the
+// historical Tier 2 envelope; a dsn-only request runs live
+// introspection and produces a Tier 3 envelope with TableRef objects;
+// supplying neither (or both) is a tool-level error so callers do
+// not have to reason about precedence.
 func TestIntegrationListTables(t *testing.T) {
 	c := newMCPClient(t)
 
@@ -370,10 +375,50 @@ func TestIntegrationListTables(t *testing.T) {
 		require.Contains(t, data.Tables, "users")
 	})
 
-	t.Run("missing schemas is tool error", func(t *testing.T) {
+	t.Run("neither schemas nor dsn is tool error", func(t *testing.T) {
 		res := callTool(t, c, tools.ListTablesToolName, map[string]any{})
-		require.True(t, res.IsError, "missing required schemas must surface as tool error, got: %s", textOf(res))
+		require.True(t, res.IsError, "must surface as tool error, got: %s", textOf(res))
+		require.Contains(t, textOf(res), "schemas")
+		require.Contains(t, textOf(res), "dsn")
 	})
+
+	t.Run("both schemas and dsn is tool error", func(t *testing.T) {
+		res := callTool(t, c, tools.ListTablesToolName, map[string]any{
+			"schemas": []any{map[string]any{"sql": usersSchema}},
+			"dsn":     "postgres://example/db",
+		})
+		require.True(t, res.IsError, "must surface as tool error, got: %s", textOf(res))
+		require.Contains(t, textOf(res), "mutually exclusive")
+	})
+}
+
+// TestIntegrationListTablesLive covers the Tier 3 live path: dsn-only
+// request, real cluster, payload uses the {schema, name} TableRef
+// shape rather than bare strings. Gated on cockroachtest.Shared so it
+// skips cleanly when no cockroach binary is available.
+func TestIntegrationListTablesLive(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+
+	dbName := uniqueMCPDBName(t, "mcp_lt_live")
+	dropDB := setupMCPDB(t, cluster.DSN, dbName,
+		"CREATE TABLE public.users (id INT8 PRIMARY KEY)",
+	)
+	t.Cleanup(dropDB)
+
+	c := newMCPClient(t)
+	res := callTool(t, c, tools.ListTablesToolName, map[string]any{
+		"dsn": dsnWithDB(t, cluster.DSN, dbName),
+	})
+	env := decodeEnvelope(t, res)
+	require.Equal(t, output.TierConnected, env.Tier)
+	require.Equal(t, output.ConnectionConnected, env.ConnectionStatus)
+	require.Empty(t, env.Errors)
+
+	var data struct {
+		Tables []map[string]string `json:"tables"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &data))
+	require.Equal(t, []map[string]string{{"schema": "public", "name": "users"}}, data.Tables)
 }
 
 // TestIntegrationDescribeTable covers the catalog hit/miss split.
@@ -422,6 +467,86 @@ func TestIntegrationDescribeTable(t *testing.T) {
 		avail, ok := env.Errors[0].Context["available_tables"].([]any)
 		require.True(t, ok, "available_tables must be a JSON array")
 		require.Contains(t, avail, "users")
+	})
+
+	t.Run("neither schemas nor dsn is tool error", func(t *testing.T) {
+		res := callTool(t, c, tools.DescribeTableToolName, map[string]any{
+			"table": "users",
+		})
+		require.True(t, res.IsError, "must surface as tool error, got: %s", textOf(res))
+	})
+}
+
+// TestIntegrationDescribeTableLive covers the Tier 3 path's three
+// outcomes:
+//
+//   - happy path: SHOW CREATE round-trips through catalog.Load and the
+//     envelope reports tier=connected with the catalog.Table payload.
+//   - unqualified miss: 42P01 envelope error (no available_tables
+//     context — the live path does not enumerate to keep the response
+//     small).
+//   - unqualified ambiguity: 42P09 envelope error carrying the
+//     candidate schemas in Context.schemas so an agent can re-issue
+//     the call with a qualifier.
+func TestIntegrationDescribeTableLive(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+
+	dbName := uniqueMCPDBName(t, "mcp_desc_live")
+	dropDB := setupMCPDB(t, cluster.DSN, dbName,
+		"CREATE SCHEMA app",
+		"CREATE TABLE public.users (id INT8 PRIMARY KEY, email STRING NOT NULL)",
+		"CREATE TABLE app.users (id INT8 PRIMARY KEY)",
+	)
+	t.Cleanup(dropDB)
+
+	dsn := dsnWithDB(t, cluster.DSN, dbName)
+	c := newMCPClient(t)
+
+	t.Run("qualified hit returns description", func(t *testing.T) {
+		res := callTool(t, c, tools.DescribeTableToolName, map[string]any{
+			"table": "public.users",
+			"dsn":   dsn,
+		})
+		env := decodeEnvelope(t, res)
+		require.Equal(t, output.TierConnected, env.Tier)
+		require.Equal(t, output.ConnectionConnected, env.ConnectionStatus)
+		require.Empty(t, env.Errors)
+
+		var tbl struct {
+			Name    string           `json:"name"`
+			Columns []map[string]any `json:"columns"`
+		}
+		require.NoError(t, json.Unmarshal(env.Data, &tbl))
+		require.Equal(t, "users", tbl.Name)
+		require.Len(t, tbl.Columns, 2)
+	})
+
+	t.Run("unqualified miss is 42P01", func(t *testing.T) {
+		res := callTool(t, c, tools.DescribeTableToolName, map[string]any{
+			"table": "nope",
+			"dsn":   dsn,
+		})
+		env := decodeEnvelope(t, res)
+		require.Equal(t, output.TierConnected, env.Tier)
+		require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus,
+			"connection_status must remain disconnected when the round-trip surfaced an envelope error")
+		require.Len(t, env.Errors, 1)
+		require.Equal(t, "42P01", env.Errors[0].Code)
+	})
+
+	t.Run("unqualified ambiguity is 42P09", func(t *testing.T) {
+		res := callTool(t, c, tools.DescribeTableToolName, map[string]any{
+			"table": "users",
+			"dsn":   dsn,
+		})
+		env := decodeEnvelope(t, res)
+		require.Equal(t, output.TierConnected, env.Tier)
+		require.Len(t, env.Errors, 1)
+		require.Equal(t, "42P09", env.Errors[0].Code)
+
+		schemas, ok := env.Errors[0].Context["schemas"].([]any)
+		require.True(t, ok, "schemas context must be a JSON array")
+		require.ElementsMatch(t, []any{"app", "public"}, schemas)
 	})
 }
 
@@ -477,4 +602,69 @@ func assertEnvelopeError(t *testing.T, env output.Envelope, code string) {
 	require.Equal(t, code, first.Code)
 	require.Equal(t, output.SeverityError, first.Severity)
 	require.NotNil(t, first.Position, "parser errors must carry source position")
+}
+
+// uniqueMCPDBName returns a database identifier scoped to the calling
+// test so tests in this package never collide with each other or with
+// a re-run after a Ctrl-C left state behind. The lowercased,
+// underscore-normalized t.Name suffix keeps the result a valid
+// CockroachDB identifier even when t.Name contains slashes from
+// t.Run subtests.
+func uniqueMCPDBName(t *testing.T, prefix string) string {
+	t.Helper()
+	suffix := strings.ToLower(strings.NewReplacer("/", "_", "-", "_").Replace(t.Name()))
+	return prefix + "_" + suffix
+}
+
+// setupMCPDB creates a per-test database, runs the setup statements
+// against it, and returns a cleanup function that drops the database.
+// Used by the live-path catalog tests so each call has a known,
+// isolated namespace and concurrent tests cannot collide.
+func setupMCPDB(t *testing.T, baseDSN, dbName string, setupSQL ...string) func() {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	c, err := pgx.Connect(ctx, baseDSN)
+	require.NoError(t, err)
+	defer c.Close(ctx) //nolint:errcheck // best-effort
+
+	_, err = c.Exec(ctx, "CREATE DATABASE "+dbName)
+	require.NoError(t, err)
+
+	if len(setupSQL) > 0 {
+		dbConn, err := pgx.Connect(ctx, dsnWithDB(t, baseDSN, dbName))
+		require.NoError(t, err)
+		defer dbConn.Close(ctx) //nolint:errcheck // best-effort
+
+		for _, stmt := range setupSQL {
+			_, err = dbConn.Exec(ctx, stmt)
+			require.NoError(t, err, "exec setup SQL: %s", stmt)
+		}
+	}
+
+	return func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		c, err := pgx.Connect(ctx, baseDSN)
+		if err != nil {
+			t.Logf("setupMCPDB cleanup: connect failed: %v", err)
+			return
+		}
+		defer c.Close(ctx) //nolint:errcheck // best-effort
+		if _, err := c.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName+" CASCADE"); err != nil {
+			t.Logf("setupMCPDB cleanup: drop failed: %v", err)
+		}
+	}
+}
+
+// dsnWithDB returns a copy of dsn with its database path replaced by
+// dbName. Used to point per-test database setup and the
+// list_tables/describe_table live paths at the same isolated DB.
+func dsnWithDB(t *testing.T, dsn, dbName string) string {
+	t.Helper()
+	u, err := url.Parse(dsn)
+	require.NoError(t, err)
+	u.Path = "/" + dbName
+	return u.String()
 }
