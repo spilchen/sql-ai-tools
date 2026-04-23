@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -19,6 +20,51 @@ import (
 func TestNewManagerDoesNotConnect(t *testing.T) {
 	mgr := NewManager("postgres://localhost:26257/defaultdb")
 	require.Nil(t, mgr.conn, "NewManager must not connect eagerly")
+}
+
+// TestWithStatementTimeoutFallback pins the load-bearing safety
+// behaviour of WithStatementTimeout: a non-positive duration must
+// fall back to DefaultStatementTimeout, never propagate as
+// `SET LOCAL statement_timeout = '0ms'` (which CRDB interprets as
+// "no timeout" and would silently disable the guardrail). A regression
+// that flips the comparison from `<= 0` to `< 0` would let
+// WithStatementTimeout(0) leak through and is exactly the bug this
+// test exists to catch.
+func TestWithStatementTimeoutFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		input time.Duration
+	}{
+		{name: "zero falls back to default", input: 0},
+		{name: "negative falls back to default", input: -1},
+		{name: "large negative falls back to default", input: -1 * time.Hour},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewManager("postgres://localhost:26257/defaultdb",
+				WithStatementTimeout(tc.input))
+			require.Equal(t, DefaultStatementTimeout, mgr.stmtTimeout,
+				"non-positive duration must fall back to DefaultStatementTimeout")
+		})
+	}
+}
+
+// TestWithStatementTimeoutHonorsPositive verifies the happy path:
+// positive durations are stored verbatim. Pairs with the fallback
+// test so the boundary at zero is unambiguously exercised on both
+// sides.
+func TestWithStatementTimeoutHonorsPositive(t *testing.T) {
+	mgr := NewManager("postgres://localhost:26257/defaultdb",
+		WithStatementTimeout(5*time.Second))
+	require.Equal(t, 5*time.Second, mgr.stmtTimeout)
+}
+
+// TestNewManagerDefaultStatementTimeout pins the no-options default
+// so a future refactor that drops the field initialisation in
+// NewManager cannot silently regress to a zero timeout.
+func TestNewManagerDefaultStatementTimeout(t *testing.T) {
+	mgr := NewManager("postgres://localhost:26257/defaultdb")
+	require.Equal(t, DefaultStatementTimeout, mgr.stmtTimeout)
 }
 
 // TestCloseWhenNotConnected verifies that Close is a safe no-op when

@@ -16,6 +16,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/conn"
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/safety"
 )
 
 // ExplainSchemaChangeTool returns the MCP tool definition for
@@ -35,6 +36,8 @@ func ExplainSchemaChangeTool() mcp.Tool {
 		mcp.WithString("sql", mcp.Required(), mcp.Description("DDL statement to plan (e.g. ALTER TABLE ... ADD COLUMN ...)")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI)")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
+		mcp.WithString(ModeParamName, mcp.Description(ModeParamDescription)),
+		mcp.WithNumber(StatementTimeoutParamName, mcp.Description(StatementTimeoutParamDescription)),
 	)
 }
 
@@ -63,10 +66,28 @@ func ExplainSchemaChangeHandler(parserVersion, defaultTargetVersion string) serv
 		if toolErr != nil {
 			return toolErr, nil
 		}
+		mode, toolErr := resolveSafetyMode(req)
+		if toolErr != nil {
+			return toolErr, nil
+		}
+		timeout, toolErr := resolveStatementTimeout(req)
+		if toolErr != nil {
+			return toolErr, nil
+		}
 
 		env := connectedEnvelope(parserVersion, target)
 
-		mgr := conn.NewManager(dsn)
+		violation, err := safety.Check(mode, safety.OpExplainDDL, sql)
+		if err != nil {
+			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			return envelopeResult(env)
+		}
+		if violation != nil {
+			env.Errors = []output.Error{safety.Envelope(violation)}
+			return envelopeResult(env)
+		}
+
+		mgr := conn.NewManager(dsn, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 		result, err := mgr.ExplainDDL(ctx, sql)

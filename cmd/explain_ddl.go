@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/conn"
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/safety"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
 )
 
@@ -31,11 +33,17 @@ import (
 //
 // Like explain, this is a Tier 3 (connected) command. EXPLAIN (DDL,
 // SHAPE) does not execute the wrapped DDL — it only asks the
-// declarative schema changer to compile a plan — but the read-only
-// allowlist (issue #21) will still wrap this path so non-DDL statements
-// are rejected before reaching the cluster.
+// declarative schema changer to compile a plan — and the safety
+// allowlist still gates the call: in the default read_only mode every
+// DDL is rejected (since DDL modifies schema), so users must escalate
+// to --mode=safe_write or --mode=full_access (issues #28/#29) to
+// exercise this command.
 func newExplainDDLCmd(state *rootState) *cobra.Command {
-	var expr string
+	var (
+		expr    string
+		mode    string
+		timeout time.Duration
+	)
 
 	cmd := &cobra.Command{
 		Use:   "explain-ddl [file]",
@@ -44,7 +52,13 @@ func newExplainDDLCmd(state *rootState) *cobra.Command {
 against the supplied DDL statement. The wrapped statement is not executed
 — the declarative schema changer only compiles a plan. Input is read
 from the -e flag (inline SQL), a positional file argument, or stdin. The
-connection string is read from --dsn or CRDB_DSN (flag wins).`,
+connection string is read from --dsn or CRDB_DSN (flag wins).
+
+The --mode flag selects the safety policy applied before the cluster
+call. The default "read_only" rejects every DDL (since DDL modifies
+schema), so this command requires --mode=safe_write or
+--mode=full_access — both reserved for follow-up issues #28 and #29
+and currently rejected with a "not yet implemented" violation.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierConnected, cmd)
@@ -63,7 +77,22 @@ connection string is read from --dsn or CRDB_DSN (flag wins).`,
 					fmt.Errorf("no connection string: pass --dsn or set CRDB_DSN"))
 			}
 
-			mgr := conn.NewManager(state.dsn)
+			parsedMode, err := safety.ParseMode(mode)
+			if err != nil {
+				return r.RenderError(baseEnv, err)
+			}
+
+			violation, err := safety.Check(parsedMode, safety.OpExplainDDL, sql)
+			if err != nil {
+				return r.RenderErrorEntry(baseEnv, err, diag.FromParseError(err, sql))
+			}
+			if violation != nil {
+				return r.RenderErrorEntry(baseEnv,
+					fmt.Errorf("safety violation: %s", violation.Reason),
+					safety.Envelope(violation))
+			}
+
+			mgr := conn.NewManager(state.dsn, conn.WithStatementTimeout(timeout))
 			defer mgr.Close(cmd.Context()) //nolint:errcheck // best-effort cleanup
 
 			result, err := mgr.ExplainDDL(cmd.Context(), sql)
@@ -87,6 +116,10 @@ connection string is read from --dsn or CRDB_DSN (flag wins).`,
 	}
 
 	cmd.Flags().StringVarP(&expr, "expression", "e", "", "inline DDL to explain")
+	cmd.Flags().StringVar(&mode, "mode", string(safety.DefaultMode),
+		"safety mode: read_only (default), safe_write, full_access")
+	cmd.Flags().DurationVar(&timeout, "timeout", conn.DefaultStatementTimeout,
+		"statement timeout for the wrapped EXPLAIN (DDL, SHAPE) call")
 
 	return cmd
 }

@@ -16,6 +16,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/conn"
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/safety"
 )
 
 // ExplainSQLTool returns the MCP tool definition for explain_sql. The
@@ -29,6 +30,8 @@ func ExplainSQLTool() mcp.Tool {
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL DML statement to explain")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI)")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
+		mcp.WithString(ModeParamName, mcp.Description(ModeParamDescription)),
+		mcp.WithNumber(StatementTimeoutParamName, mcp.Description(StatementTimeoutParamDescription)),
 	)
 }
 
@@ -58,10 +61,33 @@ func ExplainSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 		if toolErr != nil {
 			return toolErr, nil
 		}
+		mode, toolErr := resolveSafetyMode(req)
+		if toolErr != nil {
+			return toolErr, nil
+		}
+		timeout, toolErr := resolveStatementTimeout(req)
+		if toolErr != nil {
+			return toolErr, nil
+		}
 
 		env := connectedEnvelope(parserVersion, target)
 
-		mgr := conn.NewManager(dsn)
+		// Safety check runs before any cluster contact: a rejection
+		// surfaces in env.Errors with connection_status=disconnected,
+		// matching the CLI's behaviour. Parse errors propagate via
+		// diag.FromParseError so the agent gets the SQLSTATE-tagged
+		// syntax diagnostic, not a misleading safety violation.
+		violation, err := safety.Check(mode, safety.OpExplain, sql)
+		if err != nil {
+			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			return envelopeResult(env)
+		}
+		if violation != nil {
+			env.Errors = []output.Error{safety.Envelope(violation)}
+			return envelopeResult(env)
+		}
+
+		mgr := conn.NewManager(dsn, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 		result, err := mgr.Explain(ctx, sql)

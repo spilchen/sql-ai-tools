@@ -1,0 +1,79 @@
+// Copyright 2026 The Cockroach Authors.
+//
+// Use of this software is governed by the CockroachDB Software License
+// included in the /LICENSE file.
+
+// Package safety implements the Tier 3 statement allowlist that gates
+// every cluster-bound command in crdb-sql (today: explain,
+// explain-ddl). Defense-in-depth at the MCP/CLI layer: even if the
+// downstream cluster's role would permit a write, a SELECT-only Mode
+// rejects the statement before any pgwire round-trip.
+//
+// The package is split into three concerns:
+//
+//	mode.go      — the Mode enum (read_only, safe_write, full_access)
+//	               and ParseMode for flag/parameter validation.
+//	allowlist.go — Check, the pure AST classifier that decides whether
+//	               a statement is permitted under a given Mode and
+//	               Operation.
+//	envelope.go  — Envelope, the helper that converts a Violation into
+//	               the structured output.Error agents consume.
+//
+// allowlist.go has no dependency on internal/output, so the
+// classification logic stays unit-testable without dragging in the CLI
+// envelope. envelope.go is the single bridge between the two.
+//
+// Design doc reference: §Safety Model (read_only is the default,
+// safe_write and full_access are opt-in escalations). Issue #21 wires
+// read_only end-to-end; safe_write and full_access enforcement land in
+// follow-up issues #28 and #29.
+package safety
+
+import "fmt"
+
+// Mode names the safety policy applied to a Tier 3 command. Values are
+// the lowercase strings agents pass on the wire so the same token works
+// across the CLI --mode flag and the MCP tool parameter.
+type Mode string
+
+// Mode values. ModeReadOnly is the default for every Tier 3 command;
+// the other two are recognised by ParseMode but rejected by Check
+// until issues #28 and #29 land.
+const (
+	ModeReadOnly   Mode = "read_only"
+	ModeSafeWrite  Mode = "safe_write"
+	ModeFullAccess Mode = "full_access"
+)
+
+// DefaultMode is the safety mode applied when a caller does not set
+// one. Every Tier 3 surface (CLI flag, MCP parameter) defaults to
+// ModeReadOnly — explicit opt-in is required for any path that could
+// reach a write.
+const DefaultMode = ModeReadOnly
+
+// ParseMode validates a user-supplied mode token and returns the
+// canonical Mode. The empty string maps to DefaultMode so callers can
+// pass a flag value through unconditionally without needing to
+// special-case "unset". Any other unrecognised value produces an error
+// that names the valid choices, so the message a user sees on a typo
+// is actionable on its own.
+//
+// safe_write and full_access parse successfully even though Check
+// currently rejects them — the split keeps the flag-parsing layer
+// stable across issues #28/#29 so the only churn when those modes land
+// is inside Check.
+func ParseMode(s string) (Mode, error) {
+	switch Mode(s) {
+	case "":
+		return DefaultMode, nil
+	case ModeReadOnly:
+		return ModeReadOnly, nil
+	case ModeSafeWrite:
+		return ModeSafeWrite, nil
+	case ModeFullAccess:
+		return ModeFullAccess, nil
+	default:
+		return "", fmt.Errorf("invalid safety mode %q: valid choices are %q, %q, %q",
+			s, ModeReadOnly, ModeSafeWrite, ModeFullAccess)
+	}
+}

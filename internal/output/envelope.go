@@ -111,6 +111,15 @@ const (
 	// agents can branch programmatically without parsing the
 	// human-readable Message.
 	CodeFeatureNotYetIntroduced = "feature_not_yet_introduced"
+
+	// CodeSafetyViolation is emitted by the Tier 3 safety allowlist
+	// (internal/safety) when a statement is rejected before any
+	// cluster round-trip. The accompanying Error.Context carries the
+	// tag (e.g. "DROP TABLE"), mode (e.g. "read_only"), operation
+	// (e.g. "explain"), and reason keys so agents can branch
+	// programmatically — for example, prompt the user to escalate the
+	// safety mode — without parsing the human-readable Message.
+	CodeSafetyViolation = "safety_violation"
 )
 
 // Severity is the severity level of a structured Error. Values use the

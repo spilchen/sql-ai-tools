@@ -195,16 +195,22 @@ func TestExplainSchemaChangeToolAdvertisesTargetVersionParam(t *testing.T) {
 		"explain_schema_change schema must advertise the target_version property")
 }
 
-// TestExplainSchemaChangeHandlerConnectionFailureSurfacesEnvelopeError
-// verifies that when the cluster is unreachable, the handler returns a
-// successful MCP tool result whose envelope carries the error — not a
-// tool-level error. Same discipline as explain_sql.
-func TestExplainSchemaChangeHandlerConnectionFailureSurfacesEnvelopeError(t *testing.T) {
+// TestExplainSchemaChangeHandlerSafetyRejectionSurfacesEnvelopeError
+// verifies that the safety allowlist rejects DDL in the default
+// read_only mode and the rejection lands as an envelope error (not a
+// tool-level error), with no cluster contact. The previous "connect
+// failure" assertion was retired when issue #21 added the safety
+// gate: a DDL inner statement now stops at the AST classifier before
+// any pgwire round-trip.
+func TestExplainSchemaChangeHandlerSafetyRejectionSurfacesEnvelopeError(t *testing.T) {
 	handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
 	req := mcpgo.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
 		"sql": "ALTER TABLE t ADD COLUMN x INT",
-		// Unreachable host — connection will fail before any query.
+		// DSN points at an unreachable host on purpose: if the safety
+		// check ever stops short-circuiting, this test will fail with
+		// a connect error instead of the safety_violation we expect,
+		// surfacing the regression loudly.
 		"dsn": "postgres://nope:1/db?connect_timeout=1",
 	}
 
@@ -213,9 +219,71 @@ func TestExplainSchemaChangeHandlerConnectionFailureSurfacesEnvelopeError(t *tes
 	env := requireEnvelope(t, res)
 	require.Equal(t, output.TierConnected, env.Tier)
 	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus,
-		"failed connect must leave status disconnected")
+		"safety rejection must short-circuit before any cluster contact")
 	require.Len(t, env.Errors, 1)
-	require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
+	require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
+	require.Equal(t, "ALTER TABLE", env.Errors[0].Context["tag"])
+	require.Equal(t, "read_only", env.Errors[0].Context["mode"])
+}
+
+// TestExplainSQLHandlerSafetyRejection verifies that the read_only
+// allowlist intercepts mutating inner statements before any cluster
+// contact, in the MCP surface. Mirror of the CLI safety-rejection
+// test in cmd/explain_test.go.
+func TestExplainSQLHandlerSafetyRejection(t *testing.T) {
+	handler := ExplainSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql": "DROP TABLE users",
+		// Unreachable on purpose: a regression that lets the safety
+		// check fall through would surface here as a connect error
+		// instead of the safety_violation we expect.
+		"dsn": "postgres://nope:1/db?connect_timeout=1",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
+	require.Len(t, env.Errors, 1)
+	require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
+	require.Equal(t, "DROP TABLE", env.Errors[0].Context["tag"])
+	require.Equal(t, "explain", env.Errors[0].Context["operation"])
+}
+
+// TestExplainSQLHandlerRejectsInvalidMode covers the tool-level error
+// path for a malformed mode argument: an unknown token must produce a
+// clear "valid choices are…" error rather than a misleading envelope
+// entry.
+func TestExplainSQLHandlerRejectsInvalidMode(t *testing.T) {
+	handler := ExplainSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":  "SELECT 1",
+		"dsn":  "postgres://nope:1/db",
+		"mode": "yolo",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, res.IsError, "invalid mode must produce a tool-level error, not an envelope")
+}
+
+// TestExplainSQLHandlerRejectsNonNumericTimeout covers the tool-level
+// error path for a malformed statement_timeout_ms argument: a string
+// (instead of a number) must produce a clear type error.
+func TestExplainSQLHandlerRejectsNonNumericTimeout(t *testing.T) {
+	handler := ExplainSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":                  "SELECT 1",
+		"dsn":                  "postgres://nope:1/db",
+		"statement_timeout_ms": "not-a-number",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, res.IsError, "non-numeric timeout must produce a tool-level error")
 }
 
 func TestExtractSQL(t *testing.T) {
