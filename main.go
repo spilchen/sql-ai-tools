@@ -17,9 +17,16 @@ import (
 	"github.com/spilchen/sql-ai-tools/cmd"
 	"github.com/spilchen/sql-ai-tools/internal/builtinstubs"
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/versionroute"
 )
 
 func main() {
+	// Routing must happen before any work that depends on the parser
+	// version (builtin registration, cobra wiring). When --target-version
+	// requests a different Year.Quarter than this binary was built
+	// against, MaybeReexec replaces the process with the matching
+	// crdb-sql-vXXX sibling and never returns.
+	versionroute.MaybeReexec()
 	builtinstubs.Init("")
 	if err := cmd.Execute(); err != nil {
 		// cmd.Execute() suppresses cobra's own error printing
