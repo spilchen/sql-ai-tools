@@ -20,6 +20,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/schemawarn"
 	"github.com/spilchen/sql-ai-tools/internal/semcheck"
 	"github.com/spilchen/sql-ai-tools/internal/validateresult"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // ValidateSQLTool returns the MCP tool definition for validate_sql.
@@ -76,14 +77,16 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 
 		stmts, parseErr := parser.Parse(sql)
 		if parseErr != nil {
-			env.Errors = []output.Error{diag.FromParseError(parseErr, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(parseErr, sql))
 			return envelopeResult(env)
 		}
 
 		if typeErrs := semcheck.CheckExprTypes(stmts, sql); len(typeErrs) > 0 {
-			env.Errors = typeErrs
+			env.Errors = append(env.Errors, typeErrs...)
 			return envelopeResult(env)
 		}
+
+		env.Errors = append(env.Errors, version.Inspect(stmts, target, nil)...)
 
 		checks := validateresult.Checks{
 			Syntax:    validateresult.CheckOK,

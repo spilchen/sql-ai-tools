@@ -10,12 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/spilchen/sql-ai-tools/internal/diag"
-	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // ParseSQLTool returns the MCP tool definition for parse_sql.
@@ -47,11 +48,13 @@ func ParseSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHand
 
 		env := baseEnvelope(parserVersion, target)
 
-		stmts, err := sqlparse.Classify(sql)
+		parsed, err := parser.Parse(sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
 			return envelopeResult(env)
 		}
+		stmts := sqlparse.ClassifyParsed(parsed)
+		env.Errors = append(env.Errors, version.Inspect(parsed, target, nil)...)
 
 		data, err := json.Marshal(stmts)
 		if err != nil {

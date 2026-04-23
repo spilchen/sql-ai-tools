@@ -998,3 +998,140 @@ func TestParseSQLHandlerTargetVersion(t *testing.T) {
 		})
 	}
 }
+
+// TestParseSQLHandler_VersionWarning exercises the inspector wired
+// into the MCP parse_sql tool: a per-call target_version that
+// predates the seeded plpgsql_function_body Introduced version
+// produces a feature_not_yet_introduced WARNING in the envelope
+// while the data payload (classified statements) still populates.
+//
+// Mirrors TestParseCmdVersionWarning_PLpgSQL on the CLI surface so a
+// regression in either path is caught locally.
+func TestParseSQLHandler_VersionWarning(t *testing.T) {
+	const plpgsqlSQL = `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`
+
+	tests := []struct {
+		name           string
+		targetVersion  string
+		expectFeatWarn bool
+	}{
+		{name: "before introduced", targetVersion: "23.2", expectFeatWarn: true},
+		{name: "at introduced", targetVersion: "24.1", expectFeatWarn: false},
+		{name: "no target version skips", targetVersion: "", expectFeatWarn: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := ParseSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+			args := map[string]any{"sql": plpgsqlSQL}
+			if tc.targetVersion != "" {
+				args["target_version"] = tc.targetVersion
+			}
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = args
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			env := requireEnvelope(t, res)
+			require.NotEmpty(t, env.Data, "data payload must populate even with warnings")
+
+			featWarn := findEnvErrorByCode(env.Errors, output.CodeFeatureNotYetIntroduced)
+			if !tc.expectFeatWarn {
+				require.Nilf(t, featWarn, "unexpected feature warning: %+v", featWarn)
+				return
+			}
+			require.NotNilf(t, featWarn, "expected feature_not_yet_introduced in %+v", env.Errors)
+			require.Equal(t, output.SeverityWarning, featWarn.Severity)
+			require.Equal(t, "plpgsql_function_body", featWarn.Context["feature_tag"])
+			require.Equal(t, tc.targetVersion, featWarn.Context["target"])
+		})
+	}
+}
+
+// TestValidateSQLHandler_VersionWarning is the MCP-side mirror of the
+// issue #84 demo: per-call target_version=23.2 with PL/pgSQL emits
+// the feature warning while keeping valid: true. Coverage at this
+// layer ensures CLI and MCP stay in sync as the inspector grows.
+func TestValidateSQLHandler_VersionWarning(t *testing.T) {
+	const plpgsqlSQL = `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`
+
+	handler := ValidateSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":            plpgsqlSQL,
+		"target_version": "23.2",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+
+	featWarn := findEnvErrorByCode(env.Errors, output.CodeFeatureNotYetIntroduced)
+	require.NotNilf(t, featWarn, "expected feature warning in %+v", env.Errors)
+	require.Equal(t, "plpgsql_function_body", featWarn.Context["feature_tag"])
+
+	var result validateresult.Result
+	require.NoError(t, json.Unmarshal(env.Data, &result))
+	require.True(t, result.Valid, "warnings are advisory; verdict must remain valid")
+}
+
+// findEnvErrorByCode returns the first envelope Error whose Code
+// matches code, or nil. Tests use it instead of indexing into the
+// Errors slice so that an unrelated warning (e.g.
+// target_version_mismatch from the parser-version skew) sitting at
+// position 0 doesn't shift the assertion target.
+func findEnvErrorByCode(errs []output.Error, code string) *output.Error {
+	for i := range errs {
+		if errs[i].Code == code {
+			return &errs[i]
+		}
+	}
+	return nil
+}
+
+// TestParseSQLHandler_ParseErrorPreservesPriorWarnings pins that the
+// parse handler appends (rather than overwrites) on parse failure: a
+// pre-stamped target_version_mismatch warning from baseEnvelope must
+// survive into the response. Without this, agents lose the version-
+// skew signal exactly when their SQL is malformed.
+func TestParseSQLHandler_ParseErrorPreservesPriorWarnings(t *testing.T) {
+	handler := ParseSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	// target_version with a different MAJOR.MINOR than testParserVersion
+	// (v0.26.2) triggers VersionMismatchWarning; SELECTT 1 then forces
+	// a parse error.
+	req.Params.Arguments = map[string]any{
+		"sql":            "SELECTT 1",
+		"target_version": "25.4",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+
+	require.NotNilf(t, findEnvErrorByCode(env.Errors, output.CodeTargetVersionMismatch),
+		"target_version_mismatch warning must survive parse failure: %+v", env.Errors)
+	require.NotNilf(t, findEnvErrorByCode(env.Errors, "42601"),
+		"parse error must still be present: %+v", env.Errors)
+}
+
+// TestValidateSQLHandler_ParseErrorPreservesPriorWarnings is the
+// validate-side mirror — the same append-not-overwrite contract on
+// the validate handler's parse-error branch.
+func TestValidateSQLHandler_ParseErrorPreservesPriorWarnings(t *testing.T) {
+	handler := ValidateSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":            "SELECTT 1",
+		"target_version": "25.4",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+
+	require.NotNilf(t, findEnvErrorByCode(env.Errors, output.CodeTargetVersionMismatch),
+		"target_version_mismatch warning must survive parse failure: %+v", env.Errors)
+	require.NotNilf(t, findEnvErrorByCode(env.Errors, "42601"),
+		"parse error must still be present: %+v", env.Errors)
+}
