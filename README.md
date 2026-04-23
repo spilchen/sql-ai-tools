@@ -33,44 +33,287 @@ CockroachDB has a world-class SQL parser, type system, and structured error
 infrastructure — but these capabilities are trapped inside the server binary.
 This project exposes them as standalone, agent-friendly operations.
 
-## Features
+## Tool catalog
 
-**MCP tools and CLI commands** for the full SQL lifecycle:
+Every tool is exposed as both a CLI subcommand (`crdb-sql <name>`) and an
+MCP tool (`<name>`). The table below reflects what the current build
+registers in [`internal/mcp/server.go`](internal/mcp/server.go) and
+[`cmd/root.go`](cmd/root.go).
 
-| Tool | Description | Tier |
-|------|-------------|------|
-| `validate_sql` | Structured error list with positions, suggestions, available names | 1-2 |
-| `format_sql` | Canonicalized SQL with optional syntax highlighting | 1 |
-| `parse_sql` | Statement type, tag, fingerprint, parser version | 1 |
-| `list_tables` | Table names from loaded schema or live catalog | 2-3 |
-| `describe_table` | Columns, types, constraints, indexes | 2-3 |
-| `explain_sql` | EXPLAIN output as structured JSON | 3 |
-| `explain_schema_change` | Schema changer plan with phases and operations | 3 |
-| `detect_risky_query` | Risk assessment with reason codes and fix hints | 1-3 |
+| MCP tool / CLI command | Tier | Purpose |
+|------------------------|------|---------|
+| `validate_sql` / `validate` | 1-2 | Parse + type-check + (with `--schema`) name-resolve. Returns structured errors with positions, available names, and "did you mean?" suggestions. |
+| `format_sql` / `format` | 1 | Canonicalize SQL with optional syntax highlighting. Auto-strips `cockroach sql` shell prompts from pasted input. |
+| `parse_sql` / `parse` | 1 | Statement classification (DDL/DML/DCL/TCL), tag, fingerprint, parser version. |
+| `detect_risky_query` / `risk` | 1 | AST-only risk assessment with reason codes and fix hints (DELETE without WHERE, missing-WHERE UPDATE, DDL hygiene, etc.). |
+| `summarize_sql` / `summarize` | 1 | Structured per-statement summary (tables touched, operations). |
+| `list_tables` / `list-tables` | 2-3 | Tables from loaded `--schema` files or a live `--dsn` cluster. |
+| `describe_table` / `describe` | 2-3 | Columns, types, nullability, primary key, indexes. |
+| `explain_sql` / `explain` | 3 | EXPLAIN output as structured JSON. Requires `--dsn`. |
+| `explain_schema_change` / `explain-ddl` | 3 | EXPLAIN (DDL, SHAPE) — schema-change plan with phases and operations. Currently rejects every input: the default `read_only` mode forbids DDL planning and `safe_write`/`full_access` are wired only for `execute_sql` (the per-mode rules for `explain-ddl` are follow-up work). |
+| `simulate_sql` / `simulate` | 3 | Side-effect-free by construction: dispatches each statement to a non-mutating EXPLAIN flavor — SELECT runs through `EXPLAIN ANALYZE` inside `BEGIN READ ONLY` (the read does execute, but writes are blocked at the cluster), DML through plain `EXPLAIN` (planner-only, write never applied), DDL through `EXPLAIN (DDL, SHAPE)` (planner-only). Requires `--dsn`. |
+| `execute_sql` / `exec` | 3 | Run SQL against the cluster behind the safety allowlist. `--mode read_only` (default) admits the same set as `explain`; `--mode safe_write` additionally admits DML; `--mode full_access` admits anything that parses. Schema/privilege/cluster-admin ops require `full_access`. Requires `--dsn`. |
 
 **Three-tier progressive capability:**
 
-- **Tier 1 — Zero-config:** Parse, format, classify, type-check expressions.
+- **Tier 1 — Zero-config:** parse, format, classify, type-check expressions.
   Works offline with no setup.
-- **Tier 2 — Schema files:** Load CREATE TABLE files for name resolution,
-  column type validation, and "did you mean?" suggestions. No cluster needed.
-- **Tier 3 — Connected:** EXPLAIN, schema change analysis, and guarded
-  execution against a live CockroachDB cluster.
+- **Tier 2 — Schema files:** load `CREATE TABLE` files for name resolution,
+  column type validation, and "did you mean?" suggestions. No cluster
+  needed.
+- **Tier 3 — Connected:** EXPLAIN, schema-change analysis, and live
+  catalog introspection against a CockroachDB cluster via `--dsn` (or
+  `CRDB_DSN`).
 
-**Structured JSON error output:**
+## Installation
+
+### Prerequisites
+
+- Go 1.26+ (Go's `toolchain` directive will auto-download the matching
+  toolchain on first build if your local install is older but compatible).
+
+### Option A — Build from source (canonical)
+
+```bash
+git clone https://github.com/spilchen/sql-ai-tools.git
+cd sql-ai-tools
+make build
+```
+
+Produces `bin/crdb-sql`. Add `bin/` to your `PATH` or copy the binary
+somewhere on it.
+
+### Option B — `go install`
+
+```bash
+go install github.com/spilchen/sql-ai-tools/cmd/crdb-sql@latest
+```
+
+This installs the unsuffixed `crdb-sql` (latest quarter) into
+`$GOBIN`. It does **not** install the per-quarter `crdb-sql-vXXX`
+siblings shipped in the release archives — those are needed when you
+pass `--target-version` for an older quarter. Without the matching
+sibling on `$PATH`, `crdb-sql` prints a discovery hint to stderr and
+exits with status 2 rather than silently falling back to the wrong
+parser. Install the matching `crdb-sql-vXXX` from a release archive
+when you need an older quarter.
+
+### Verify
+
+```bash
+crdb-sql version
+# crdb-sql: dev
+# cockroachdb-parser: v0.26.2
+# builtins-stubs: v26.2
+```
+
+## Quickstart
+
+The same scenario from
+[`docs/hackathon_plan.md`](docs/hackathon_plan.md) §Demo Vision, as three
+copy/pasteable blocks — one per tier.
+
+### Tier 1 — Zero-config (no cluster, no schema)
+
+Catch a type mismatch before it ever reaches a cluster:
+
+```bash
+crdb-sql validate -o json -e "SELECT 1 + 'hello'"
+```
 
 ```json
 {
-  "errors": [{
-    "code": "42703",
-    "message": "column \"nme\" does not exist",
-    "position": {"line": 1, "column": 8},
-    "category": "unknown_column",
-    "available": ["name", "email", "id"],
-    "suggestions": [{"replacement": "name", "confidence": 0.9}]
-  }]
+  "tier": "zero_config",
+  "parser_version": "v0.26.2",
+  "connection_status": "disconnected",
+  "errors": [
+    {
+      "code": "capability_required",
+      "severity": "WARNING",
+      "message": "name resolution skipped: --schema not provided",
+      "category": "capability_required",
+      "context": {
+        "capability": "name_resolution",
+        "hint": "pass --schema FILE to enable table name resolution"
+      }
+    },
+    {
+      "code": "22023",
+      "severity": "ERROR",
+      "message": "unsupported binary operator: <int> + <string>",
+      "position": {"line": 1, "column": 8, "byte_offset": 7}
+    }
+  ],
+  "data": {
+    "valid": false,
+    "checks": {
+      "syntax": "ok",
+      "function_resolution": "ok",
+      "type_check": "failed",
+      "name_resolution": "skipped"
+    }
+  }
 }
 ```
+
+Without `--schema`, the `capability_required` WARNING tells the agent
+that name resolution did not run — even when the rest of validation
+passes — so a partial-coverage result is never silently mistaken for a
+clean one.
+
+### Tier 2 — Schema-aware (no cluster, schema files only)
+
+Drop a `CREATE TABLE` file alongside your queries and get
+"did you mean?" suggestions on misspelled column names:
+
+```bash
+cat > schema.sql <<'EOF'
+CREATE TABLE users (
+  id INT PRIMARY KEY,
+  name STRING,
+  email STRING
+);
+EOF
+
+crdb-sql validate -o json --schema schema.sql -e "SELECT nme FROM users"
+```
+
+```json
+{
+  "tier": "schema_file",
+  "parser_version": "v0.26.2",
+  "connection_status": "disconnected",
+  "errors": [
+    {
+      "code": "42703",
+      "severity": "ERROR",
+      "message": "column \"nme\" does not exist",
+      "position": {"line": 1, "column": 8, "byte_offset": 7},
+      "category": "unknown_column",
+      "context": {"available_columns": ["id", "name", "email"]},
+      "suggestions": [
+        {
+          "replacement": "name",
+          "range": {"start": 7, "end": 10},
+          "confidence": 0.75,
+          "reason": "levenshtein_distance_1"
+        }
+      ]
+    }
+  ],
+  "data": {
+    "valid": false,
+    "checks": {
+      "syntax": "ok",
+      "function_resolution": "ok",
+      "type_check": "ok",
+      "name_resolution": "failed"
+    }
+  }
+}
+```
+
+The agent reads the structured `suggestions[].replacement`, applies the
+fix, and re-runs — no second LLM round-trip needed.
+
+### Tier 3 — Connected (live cluster)
+
+Start a single-node cluster (either is fine):
+
+```bash
+# If you have the cockroach binary installed:
+cockroach demo --no-example-database
+
+# Or via Docker (cleanup: docker rm -f crdb when done):
+docker run -d --name crdb -p 26257:26257 \
+  cockroachdb/cockroach:latest start-single-node --insecure
+```
+
+Point `crdb-sql` at it via `--dsn` (or set `CRDB_DSN` once), then load
+the same `users` schema from Tier 2 into the cluster so the
+introspection tools have something to inspect:
+
+```bash
+export CRDB_DSN="postgresql://root@localhost:26257/defaultdb?sslmode=disable"
+
+# Load schema.sql (created in the Tier 2 example) into the cluster:
+psql "$CRDB_DSN" -f schema.sql
+# or, if psql isn't installed: cockroach sql --insecure -f schema.sql
+
+crdb-sql ping -o json
+crdb-sql list-tables -o json
+crdb-sql describe users -o json
+```
+
+Example `describe` output against a `users` table:
+
+```json
+{
+  "tier": "connected",
+  "parser_version": "v0.26.2",
+  "connection_status": "connected",
+  "data": {
+    "name": "users",
+    "columns": [
+      {"name": "id",    "type": "INT8",   "nullable": false},
+      {"name": "name",  "type": "STRING", "nullable": true},
+      {"name": "email", "type": "STRING", "nullable": true}
+    ],
+    "primary_key": ["id"],
+    "indexes": []
+  }
+}
+```
+
+`crdb-sql explain --dsn ... -e "SELECT ..."` returns the EXPLAIN plan
+as structured JSON, and `crdb-sql simulate --dsn ... -e "..."` runs a
+side-effect-free dispatch (see the catalog row for the exact rules).
+For actual writes, `crdb-sql exec --dsn ... --mode safe_write -e
+"..."` runs SQL behind the safety allowlist; the default
+`--mode read_only` admits the same shape as `explain`. `crdb-sql
+explain-ddl` is the planned schema-change-impact tool, but it cannot
+run today — its per-mode rules are still follow-up work and every
+input is rejected.
+
+## Use as an MCP server
+
+`crdb-sql mcp` runs the binary as a Model Context Protocol server over
+stdio. Every tool in the catalog above is registered.
+
+Register the binary with Claude Code. After Option A (build from
+source), point at the build output directly:
+
+```bash
+claude mcp add crdb-sql -- "$(pwd)/bin/crdb-sql" mcp
+```
+
+After Option B (`go install`), use the bare command name (the
+installed binary is on `$PATH` via `$GOBIN`):
+
+```bash
+claude mcp add crdb-sql -- crdb-sql mcp
+```
+
+The leading `--` is required so the `mcp` argument is forwarded to
+`crdb-sql` instead of being parsed by the `claude` CLI. No transport
+flags are needed — `claude mcp add` defaults to stdio, which is what
+this server speaks.
+
+Verify discovery from inside Claude Code:
+
+```
+/mcp
+```
+
+`crdb-sql` should appear with all registered tools. Calling the
+health-check tool returns:
+
+```json
+{"ok": true, "parser_version": "v0.26.2"}
+```
+
+The `parser_version` value should match the `cockroachdb-parser:` line
+from `crdb-sql version`.
 
 ## Architecture
 
@@ -90,83 +333,7 @@ Semantic analysis is built above the parser extraction: expression type checking
 via `MakeSemaContext(nil)`, name resolution against an in-memory schema catalog,
 and function validation against the builtins registry.
 
-## Getting Started
-
-### Prerequisites
-
-- Go 1.26+ (Go's `toolchain` directive will auto-download the matching
-  toolchain on first build if your local install is older but compatible)
-
-### Build
-
-```bash
-make build
-```
-
-Produces `bin/crdb-sql`.
-
-Alternatively, install the latest-quarter binary directly with `go install`:
-
-```bash
-go install github.com/spilchen/sql-ai-tools/cmd/crdb-sql@latest
-crdb-sql version
-```
-
-`go install` produces only the unsuffixed `crdb-sql` (latest quarter)
-without the per-quarter `crdb-sql-vXXX` siblings shipped in the release
-archives. Passing `--target-version` for a different quarter without
-the matching sibling on `$PATH` is a hard error: `crdb-sql` prints a
-discovery hint to stderr and exits with status 2 (no silent fallback
-to the wrong parser). Install the matching `crdb-sql-vXXX` from a
-release archive when you need an older quarter.
-
-### Run
-
-```bash
-# Show available subcommands
-./bin/crdb-sql --help
-
-# Print binary and parser versions
-./bin/crdb-sql version
-# crdb-sql: dev
-# cockroachdb-parser: v0.26.2
-```
-
-### Use as an MCP server
-
-`crdb-sql mcp` runs the binary as a Model Context Protocol server over
-stdio. The current build only registers a `ping` health-check tool;
-real SQL tools (`validate_sql`, `format_sql`, …) listed in the
-[Features](#features) table land in subsequent issues.
-
-Register the binary with Claude Code:
-
-```bash
-claude mcp add crdb-sql -- "$(pwd)/bin/crdb-sql" mcp
-```
-
-The leading `--` is required so the `mcp` argument is forwarded to
-`crdb-sql` instead of being parsed by the `claude` CLI. No transport
-flags are needed — `claude mcp add` defaults to stdio, which is what
-this server speaks.
-
-Verify discovery from inside Claude Code:
-
-```
-/mcp
-```
-
-`crdb-sql` should appear in the list with its `ping` tool. Calling
-`ping` returns:
-
-```json
-{"ok": true, "parser_version": "v0.26.2"}
-```
-
-The `parser_version` value should match the `cockroachdb-parser:` line
-from `./bin/crdb-sql version`.
-
-### Test & Lint
+## Development
 
 ```bash
 make test    # go test ./...
@@ -177,10 +344,17 @@ make fmt     # auto-format sources
 `make lint` is the CI gate. `go fmt` violations do not block `make build`,
 so configure your editor to run `gofmt`/`goimports` on save.
 
-## Project Status
+## Project status
 
-Early development. See [docs/](docs/) for the design document, hackathon plan,
-and research lessons that inform the architecture.
+Tier 1 and Tier 2 are usable today. Tier 3 connected tools (`ping`,
+`list-tables`, `describe`, `explain`, `simulate`, `exec`) work;
+`exec` honours all three safety modes (`read_only`, `safe_write`,
+`full_access`). `explain-ddl` is the only Tier 3 tool that cannot run
+today — its per-mode rules are still follow-up work, so every input
+is rejected.
+
+See [`docs/`](docs/) for the design document, hackathon plan, and
+research lessons that inform the architecture.
 
 ## License
 
