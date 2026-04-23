@@ -23,11 +23,11 @@ import (
 )
 
 // ErrRendered is returned by Renderer.RenderError after it has emitted
-// an envelope describing the failure. main.go uses errors.Is to
-// recognize this sentinel and suppress its default "Error: ..." stderr
-// print, while still exiting with a non-zero status. This preserves the
-// JSON-mode contract that stdout is the single source of truth and keeps
-// agents from having to parse stderr.
+// an envelope describing the failure. cmd/crdb-sql/main.go uses
+// errors.Is to recognize this sentinel and suppress its default
+// "Error: ..." stderr print, while still exiting with a non-zero
+// status. This preserves the JSON-mode contract that stdout is the
+// single source of truth and keeps agents from having to parse stderr.
 var ErrRendered = errors.New("output: error already rendered as envelope")
 
 // Tier identifies which analysis tier produced a response. The names

@@ -236,8 +236,8 @@ func appendSchemaWarnings(env *output.Envelope, cat *catalog.Catalog) {
 // so agents can branch on it; otherwise the error is tagged
 // "schema_load_error" for I/O and validation failures.
 //
-// Returns output.ErrRendered so the caller signals failure to main.go
-// the same way renderDiagErrors does.
+// Returns output.ErrRendered so the caller signals failure to
+// cmd/crdb-sql/main.go the same way renderDiagErrors does.
 func renderSchemaLoadError(r output.Renderer, env output.Envelope, err error) error {
 	// pgerror.GetPGCode returns "XXUUU" (Uncategorized) when the
 	// error chain has no SQLSTATE attached — typical for I/O errors

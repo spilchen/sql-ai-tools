@@ -21,9 +21,10 @@ BUILTINS_GEN            := internal/builtinstubs/stubs_$(subst .,_,$(STUBS_VERSI
 # LATEST_QUARTER is the CRDB Year.Quarter the default `make build`
 # target compiles against. It is stamped into the binary via the
 # versionroute.builtQuarterStamp ldflag so the routing logic in
-# main.go knows which sibling to delegate to when --target-version
-# requests a different quarter. Bump it (and add a build/go.vXXX.mod
-# / stubs file) when a newer parser fork is the new default.
+# cmd/crdb-sql/main.go knows which sibling to delegate to when
+# --target-version requests a different quarter. Bump it (and add
+# a build/go.vXXX.mod / stubs file) when a newer parser fork is
+# the new default.
 #
 # QUARTERS lists every supported per-quarter backend. `make build-all`
 # walks this list. Adding an entry here without a matching
@@ -42,7 +43,7 @@ help: ## Show this help.
 
 build: ## Compile the latest-quarter binary into bin/crdb-sql.
 	@mkdir -p $(BIN_DIR)
-	go build -ldflags "$(LDFLAGS_LATEST)" -o $(BIN) .
+	go build -ldflags "$(LDFLAGS_LATEST)" -o $(BIN) ./cmd/crdb-sql
 
 # Pattern target: build-vXXX produces bin/crdb-sql-vXXX from the
 # matching build/go.vXXX.mod (a copy of the top-level go.mod with its
@@ -57,11 +58,11 @@ build-v%:
 	@mkdir -p $(BIN_DIR)
 	@modfile=build/go.v$*.mod; \
 	if [ -f "$$modfile" ]; then \
-		echo "go build -modfile=$$modfile -o $(BIN_DIR)/$(BINARY)-v$* ."; \
-		go build -modfile="$$modfile" -ldflags "-X $(ROUTE_PKG).builtQuarterStamp=v$*" -o $(BIN_DIR)/$(BINARY)-v$* .; \
+		echo "go build -modfile=$$modfile -o $(BIN_DIR)/$(BINARY)-v$* ./cmd/crdb-sql"; \
+		go build -modfile="$$modfile" -ldflags "-X $(ROUTE_PKG).builtQuarterStamp=v$*" -o $(BIN_DIR)/$(BINARY)-v$* ./cmd/crdb-sql; \
 	elif [ "v$*" = "$(LATEST_QUARTER)" ]; then \
-		echo "go build (latest, no modfile) -o $(BIN_DIR)/$(BINARY)-v$* ."; \
-		go build -ldflags "-X $(ROUTE_PKG).builtQuarterStamp=v$*" -o $(BIN_DIR)/$(BINARY)-v$* .; \
+		echo "go build (latest, no modfile) -o $(BIN_DIR)/$(BINARY)-v$* ./cmd/crdb-sql"; \
+		go build -ldflags "-X $(ROUTE_PKG).builtQuarterStamp=v$*" -o $(BIN_DIR)/$(BINARY)-v$* ./cmd/crdb-sql; \
 	else \
 		echo "build-v$*: missing build/go.v$*.mod and v$* != LATEST_QUARTER ($(LATEST_QUARTER))"; \
 		echo "Add build/go.v$*.mod (see build/parser-versions.yaml) or fix the quarter tag."; \

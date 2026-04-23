@@ -41,12 +41,13 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/testutil/cockroachtest"
 )
 
-// modulePath is the module root that buildBinary compiles into the
-// test temp dir. The integration suite builds its own binary rather
-// than reusing whatever `make build` produced so the tests are
-// self-contained — they do not require a prior make invocation and
-// cannot be silently invalidated by a stale bin/crdb-sql.
-const modulePath = "github.com/spilchen/sql-ai-tools"
+// cmdPkgPath is the import path of the crdb-sql main package that
+// buildBinary compiles into the test temp dir. The integration suite
+// builds its own binary rather than reusing whatever `make build`
+// produced so the tests are self-contained — they do not require a
+// prior make invocation and cannot be silently invalidated by a stale
+// bin/crdb-sql.
+const cmdPkgPath = "github.com/spilchen/sql-ai-tools/cmd/crdb-sql"
 
 // callTimeout bounds every Tier 1/2 tools/call round-trip. These
 // complete in milliseconds; five seconds leaves headroom for a loaded
@@ -112,7 +113,7 @@ func buildBinary() error {
 		// compiler diagnostics in the wrapped error rather than
 		// scattering them across the test runner's output.
 		var stderr bytes.Buffer
-		cmd := exec.Command("go", "build", "-o", out, modulePath)
+		cmd := exec.Command("go", "build", "-o", out, cmdPkgPath)
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err != nil {
 			buildErr = fmt.Errorf("go build: %w\n%s", err, stderr.String())

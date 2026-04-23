@@ -15,7 +15,7 @@
 // registration code). Multiple CRDB versions can be compiled in; the
 // caller selects one via Init before any SQL is parsed.
 //
-// Typical usage from main.go:
+// Typical usage from cmd/crdb-sql/main.go:
 //
 //	builtinstubs.Init("")  // registers the default version (matches parser)
 package builtinstubs
