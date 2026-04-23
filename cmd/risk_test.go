@@ -141,7 +141,11 @@ func TestRiskCmdNoFindings(t *testing.T) {
 }
 
 // TestRiskCmdParseErrorJSON verifies that invalid SQL in JSON mode
-// produces an envelope with errors and nil data.
+// produces an envelope with errors and nil data, and that the parse
+// error surfaces with its real PGCODE (42601) rather than a generic
+// internal_error. The PGCODE assertion is the regression guard for the
+// risk-cmd switch from r.RenderError to renderParseError — without it,
+// reverting that switch would silently demote agents' parser errors.
 func TestRiskCmdParseErrorJSON(t *testing.T) {
 	root := newRootCmd()
 	var stdout bytes.Buffer
@@ -157,6 +161,15 @@ func TestRiskCmdParseErrorJSON(t *testing.T) {
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
 	require.NotEmpty(t, env.Errors)
 	require.Nil(t, env.Data)
+
+	var got *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == "42601" {
+			got = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, got, "expected SQLSTATE 42601 (syntax_error) in %+v", env.Errors)
 }
 
 // TestRiskCmdEmptyInput verifies that empty stdin produces an error.
@@ -168,4 +181,93 @@ func TestRiskCmdEmptyInput(t *testing.T) {
 	root.SetArgs([]string{"risk"})
 
 	require.Error(t, root.Execute())
+}
+
+// plpgsqlRiskWarningSQL is the PL/pgSQL fixture used by the risk-side
+// version-warning tests, mirroring the parse-side fixture.
+const plpgsqlRiskWarningSQL = `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`
+
+// TestRiskCmdVersionWarning_PLpgSQL is the risk mirror of
+// TestParseCmdVersionWarning_PLpgSQL: --target-version=23.2 with PL/pgSQL
+// emits a feature_not_yet_introduced warning while the data payload (the
+// risk findings array, possibly empty) still populates.
+func TestRiskCmdVersionWarning_PLpgSQL(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"risk",
+		"--target-version", "23.2",
+		"-e", plpgsqlRiskWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, "23.2", env.TargetVersion)
+
+	var got *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == output.CodeFeatureNotYetIntroduced {
+			got = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, got, "expected a feature_not_yet_introduced warning in %+v", env.Errors)
+	require.Equal(t, output.SeverityWarning, got.Severity)
+	require.Equal(t, "plpgsql_function_body", got.Context["feature_tag"])
+	require.Equal(t, "24.1", got.Context["introduced"])
+	require.Equal(t, "23.2", got.Context["target"])
+	require.NotEmpty(t, env.Data, "risk must still succeed and emit a data payload")
+}
+
+// TestRiskCmdVersionWarning_NoneAtNewerTarget pins the negative case:
+// target at or after Introduced emits no feature warning.
+func TestRiskCmdVersionWarning_NoneAtNewerTarget(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"risk",
+		"--target-version", "24.1",
+		"-e", plpgsqlRiskWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"target at Introduced must not warn, got %+v", e)
+	}
+}
+
+// TestRiskCmdVersionWarning_NoFlagSkips covers the documented short-
+// circuit: no --target-version means version.Inspect is skipped.
+func TestRiskCmdVersionWarning_NoFlagSkips(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"risk",
+		"-e", plpgsqlRiskWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Empty(t, env.TargetVersion)
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"no --target-version must skip feature warnings, got %+v", e)
+	}
 }

@@ -11,11 +11,13 @@ import (
 	"io"
 	"strings"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/risk"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // newRiskCmd builds the `crdb-sql risk` subcommand. It reads SQL from
@@ -50,10 +52,13 @@ human-readable message, and fix hint.`,
 				return r.RenderError(baseEnv, err)
 			}
 
-			findings, err := risk.Analyze(sql)
-			if err != nil {
-				return r.RenderError(baseEnv, err)
+			parsed, parseErr := parser.Parse(sql)
+			if parseErr != nil {
+				return renderParseError(r, baseEnv, parseErr, sql)
 			}
+			baseEnv.Errors = append(baseEnv.Errors,
+				version.Inspect(parsed, state.targetVersion, nil)...)
+			findings := risk.AnalyzeParsed(parsed, sql)
 
 			data, err := json.Marshal(findings)
 			if err != nil {

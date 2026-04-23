@@ -166,7 +166,16 @@ func (r *Registry) Analyze(sql string) ([]Finding, error) {
 	if err != nil {
 		return nil, err
 	}
+	return r.AnalyzeParsed(stmts, sql), nil
+}
 
+// AnalyzeParsed runs every registered rule against already-parsed
+// statements. sql is the original source text — required for
+// positionFromSQL to locate each statement's line/column. Exposed so
+// callers that already invoked parser.Parse (e.g. to also run
+// version.Inspect on the same AST) can reuse the parsed output rather
+// than reparsing. Returns no error: parsing happened upstream.
+func (r *Registry) AnalyzeParsed(stmts statements.Statements, sql string) []Finding {
 	findings := []Finding{}
 	positions := make([]Position, len(stmts))
 	offset := 0
@@ -195,7 +204,7 @@ func (r *Registry) Analyze(sql string) ([]Finding, error) {
 			findings = append(findings, f)
 		}
 	}
-	return findings, nil
+	return findings
 }
 
 // Analyze is a convenience function that runs the default rule set
@@ -203,6 +212,13 @@ func (r *Registry) Analyze(sql string) ([]Finding, error) {
 // NewRegistry(DefaultRules(), DefaultMultiRules()).Analyze(sql).
 func Analyze(sql string) ([]Finding, error) {
 	return NewRegistry(DefaultRules(), DefaultMultiRules()).Analyze(sql)
+}
+
+// AnalyzeParsed is a convenience function that runs the default rule
+// set against already-parsed statements. It is equivalent to
+// NewRegistry(DefaultRules(), DefaultMultiRules()).AnalyzeParsed(stmts, sql).
+func AnalyzeParsed(stmts statements.Statements, sql string) []Finding {
+	return NewRegistry(DefaultRules(), DefaultMultiRules()).AnalyzeParsed(stmts, sql)
 }
 
 // positionFromSQL computes the Position of stmtSQL within fullSQL,

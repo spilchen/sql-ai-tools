@@ -12,12 +12,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/sqlformat"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // colorMode is the value space accepted by --color. It mirrors the
@@ -110,14 +111,15 @@ JSON output is never colorized.`,
 
 			sql = strings.TrimSpace(sqlformat.StripShellPrompts(sql))
 
-			formatted, err := sqlformat.Format(sql)
+			parsed, parseErr := parser.Parse(sql)
+			if parseErr != nil {
+				return renderParseError(r, baseEnv, parseErr, sql)
+			}
+			baseEnv.Errors = append(baseEnv.Errors,
+				version.Inspect(parsed, state.targetVersion, nil)...)
+
+			formatted, err := sqlformat.FormatParsed(parsed)
 			if err != nil {
-				// Format can fail during parsing (candidate PGCODE
-				// present) or during pretty-printing (no candidate
-				// code). Only parser errors get the enriched path.
-				if pgerror.HasCandidateCode(err) {
-					return renderParseError(r, baseEnv, err, sql)
-				}
 				return r.RenderError(baseEnv, err)
 			}
 

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 )
 
@@ -27,6 +28,15 @@ func Format(sql string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return FormatParsed(stmts)
+}
+
+// FormatParsed pretty-prints already-parsed statements. Exposed so
+// callers that already invoked parser.Parse (e.g. to also run
+// version.Inspect on the same AST) can reuse the parsed output rather
+// than reparsing. The only error surface is the pretty-printer itself
+// (cfg.Pretty); parser errors are no longer possible at this layer.
+func FormatParsed(stmts statements.Statements) (string, error) {
 	if len(stmts) == 0 {
 		return "", nil
 	}

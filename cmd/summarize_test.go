@@ -205,3 +205,94 @@ func TestSummarizeCmdEmptyInput(t *testing.T) {
 
 	require.Error(t, root.Execute())
 }
+
+// plpgsqlSummarizeWarningSQL is the PL/pgSQL fixture used by the
+// summarize-side version-warning tests. It mirrors the fixture used by
+// TestParseCmdVersionWarning_PLpgSQL so a regression in either path is
+// caught locally.
+const plpgsqlSummarizeWarningSQL = `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`
+
+// TestSummarizeCmdVersionWarning_PLpgSQL is the summarize mirror of
+// TestParseCmdVersionWarning_PLpgSQL: --target-version=23.2 with PL/pgSQL
+// emits a feature_not_yet_introduced warning while the data payload (the
+// per-statement summaries) still populates.
+func TestSummarizeCmdVersionWarning_PLpgSQL(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"summarize",
+		"--target-version", "23.2",
+		"-e", plpgsqlSummarizeWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, "23.2", env.TargetVersion)
+
+	var got *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == output.CodeFeatureNotYetIntroduced {
+			got = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, got, "expected a feature_not_yet_introduced warning in %+v", env.Errors)
+	require.Equal(t, output.SeverityWarning, got.Severity)
+	require.Equal(t, "plpgsql_function_body", got.Context["feature_tag"])
+	require.Equal(t, "24.1", got.Context["introduced"])
+	require.Equal(t, "23.2", got.Context["target"])
+	require.NotEmpty(t, env.Data, "summarize must still succeed and emit a data payload")
+}
+
+// TestSummarizeCmdVersionWarning_NoneAtNewerTarget pins the negative
+// case: target at or after Introduced emits no feature warning.
+func TestSummarizeCmdVersionWarning_NoneAtNewerTarget(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"summarize",
+		"--target-version", "24.1",
+		"-e", plpgsqlSummarizeWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"target at Introduced must not warn, got %+v", e)
+	}
+}
+
+// TestSummarizeCmdVersionWarning_NoFlagSkips covers the documented
+// short-circuit: no --target-version means version.Inspect is skipped.
+func TestSummarizeCmdVersionWarning_NoFlagSkips(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"summarize",
+		"-e", plpgsqlSummarizeWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Empty(t, env.TargetVersion)
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"no --target-version must skip feature warnings, got %+v", e)
+	}
+}

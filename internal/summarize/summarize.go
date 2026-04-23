@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 
 	"github.com/spilchen/sql-ai-tools/internal/risk"
@@ -115,7 +116,17 @@ func Summarize(sql string) ([]Summary, error) {
 	if err != nil {
 		return nil, err
 	}
+	return Parsed(stmts, sql), nil
+}
 
+// Parsed produces summaries for already-parsed statements. sql is the
+// original source text — required for positionFromSQL to locate each
+// statement's line/column. Exposed so callers that already invoked
+// parser.Parse (e.g. to also run version.Inspect on the same AST) can
+// reuse the parsed output rather than reparsing. Mirrors the
+// Classify/ClassifyParsed split in package sqlparse; the shorter name
+// avoids stuttering with the package name.
+func Parsed(stmts statements.Statements, sql string) []Summary {
 	summaries := make([]Summary, 0, len(stmts))
 	offset := 0
 	for _, stmt := range stmts {
@@ -125,7 +136,7 @@ func Summarize(sql string) ([]Summary, error) {
 		s.RiskLevel = riskLevelFor(stmt.SQL)
 		summaries = append(summaries, s)
 	}
-	return summaries, nil
+	return summaries
 }
 
 // summarizeStatement summarizes one already-parsed statement. Position

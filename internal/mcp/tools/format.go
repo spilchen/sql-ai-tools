@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/sqlformat"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // FormatSQLTool returns the MCP tool definition for format_sql.
@@ -51,9 +53,26 @@ func FormatSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHan
 		// get the same forgiving behavior.
 		sql = sqlformat.StripShellPrompts(sql)
 
-		formatted, err := sqlformat.Format(sql)
+		parsed, err := parser.Parse(sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
+			return envelopeResult(env)
+		}
+		env.Errors = append(env.Errors, version.Inspect(parsed, target, nil)...)
+
+		formatted, err := sqlformat.FormatParsed(parsed)
+		if err != nil {
+			// Surface pretty-printer failures through the envelope (not
+			// mcp.NewToolResultError) so any version.Inspect warnings
+			// already appended above survive into the response. Without
+			// this, an opt-in target_version warning would be silently
+			// dropped the moment cfg.Pretty hiccuped — exactly the
+			// regression this tool was wired to prevent.
+			env.Errors = append(env.Errors, output.Error{
+				Code:     "internal_error",
+				Severity: output.SeverityError,
+				Message:  fmt.Sprintf("format: %v", err),
+			})
 			return envelopeResult(env)
 		}
 
