@@ -10,6 +10,7 @@ import (
 	"go/constant"
 	"strings"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 )
 
@@ -30,7 +31,8 @@ func isStar(expr tree.Expr) bool {
 	return false
 }
 
-// DefaultRules returns the built-in set of AST-only risk rules.
+// DefaultRules returns the built-in set of AST-only risk rules that
+// inspect a single statement at a time.
 func DefaultRules() []Rule {
 	return []Rule{
 		deleteNoWhereRule,
@@ -46,6 +48,16 @@ func DefaultRules() []Rule {
 		missingPrimaryKeyRule,
 		largeOffsetRule,
 		xaPreparedTxnRule,
+		savepointCockroachRestartRule,
+	}
+}
+
+// DefaultMultiRules returns the built-in set of AST-only risk rules
+// that need to look across more than one parsed statement at a time.
+func DefaultMultiRules() []MultiRule {
+	return []MultiRule{
+		multipleDDLInTxnRule,
+		ddlAndDMLInTxnRule,
 	}
 }
 
@@ -486,5 +498,187 @@ var selectStarRule = Rule{
 			}
 		}
 		return nil
+	},
+}
+
+// cockroachRestartSavepointName is the well-known savepoint name used
+// by the legacy CockroachDB client-side retry pattern.
+const cockroachRestartSavepointName = "cockroach_restart"
+
+// savepointName extracts the savepoint name from a SAVEPOINT, RELEASE
+// SAVEPOINT, or ROLLBACK TO SAVEPOINT statement and reports whether
+// the AST was one of those statement kinds.
+func savepointName(stmt tree.Statement) (tree.Name, bool) {
+	switch s := stmt.(type) {
+	case *tree.Savepoint:
+		return s.Name, true
+	case *tree.ReleaseSavepoint:
+		return s.Savepoint, true
+	case *tree.RollbackToSavepoint:
+		return s.Savepoint, true
+	}
+	return "", false
+}
+
+// savepointCockroachRestartRule flags any use of the well-known
+// `cockroach_restart` savepoint name. This is the legacy client-side
+// retry pattern for serialization failures (SQLSTATE 40001). The
+// recommended pattern in modern CockroachDB is to retry the whole
+// BEGIN..COMMIT with exponential backoff in the application or
+// driver, rather than relying on a per-savepoint rollback. The
+// savepoint syntax is still accepted, but applications that depend
+// on it are running fragile retry logic; the fix is to move retry
+// out of SQL and into the caller. Comparison is case-insensitive so
+// quoted variants like "Cockroach_Restart" are also caught.
+var savepointCockroachRestartRule = Rule{
+	ReasonCode: "SAVEPOINT_COCKROACH_RESTART",
+	Severity:   SeverityMedium,
+	Category:   "transactional_safety",
+	Check: func(input CheckInput) []Finding {
+		name, ok := savepointName(input.AST)
+		if !ok || !strings.EqualFold(string(name), cockroachRestartSavepointName) {
+			return nil
+		}
+		var verb string
+		switch input.AST.(type) {
+		case *tree.Savepoint:
+			verb = "SAVEPOINT cockroach_restart"
+		case *tree.ReleaseSavepoint:
+			verb = "RELEASE SAVEPOINT cockroach_restart"
+		case *tree.RollbackToSavepoint:
+			verb = "ROLLBACK TO SAVEPOINT cockroach_restart"
+		}
+		return []Finding{{
+			Message:  fmt.Sprintf("%s is the legacy client-side retry pattern; modern CockroachDB recommends retrying the whole BEGIN..COMMIT in the application instead", verb),
+			Position: &input.Position,
+			FixHint:  "Drop the savepoint and retry the entire BEGIN..COMMIT block with exponential backoff on SQLSTATE 40001",
+		}}
+	},
+}
+
+// txnBlock identifies one explicit BEGIN..COMMIT/ROLLBACK span
+// within a parsed statement list. Start is the index of the BEGIN
+// statement; End is the index of the closing COMMIT/ROLLBACK, or
+// len(stmts) if the block was never closed. The half-open range
+// [Start+1, End) covers the inner statements.
+type txnBlock struct {
+	Start, End int
+}
+
+// explicitTxnBlocks scans stmts for BEGIN..COMMIT/ROLLBACK spans and
+// returns one txnBlock per BEGIN encountered. CockroachDB does not
+// support real nested transactions, but the parser accepts a BEGIN
+// that appears while another block is open; in that case we open a
+// new block at the inner BEGIN and close it on the next
+// COMMIT/ROLLBACK (LIFO via a stack). Two consequences worth noting:
+//
+//   - In a nested case, the outer block's [Start+1, End) range
+//     subsumes the inner block's range, so each inner statement is
+//     visible to multi-rules as a member of every enclosing block.
+//     This matches CRDB semantics: anything inside the outer BEGIN is
+//     part of that outer transaction.
+//   - Any block that never sees a matching COMMIT/ROLLBACK keeps its
+//     initial End = len(stmts), so its range extends to end-of-input.
+//     Multi-rules then over-flag rather than under-flag, which is the
+//     intended conservative stance here.
+//
+// Surplus COMMIT/ROLLBACK statements with no open block are ignored.
+// Statements outside any block (implicit transactions) do not
+// contribute to any txnBlock.
+func explicitTxnBlocks(stmts statements.Statements) []txnBlock {
+	var blocks []txnBlock
+	// openStack holds indexes into blocks for currently-open spans;
+	// the innermost open block is at the top.
+	var openStack []int
+	for i, s := range stmts {
+		switch s.AST.(type) {
+		case *tree.BeginTransaction:
+			blocks = append(blocks, txnBlock{Start: i, End: len(stmts)})
+			openStack = append(openStack, len(blocks)-1)
+		case *tree.CommitTransaction, *tree.RollbackTransaction:
+			if len(openStack) == 0 {
+				continue
+			}
+			top := openStack[len(openStack)-1]
+			openStack = openStack[:len(openStack)-1]
+			blocks[top].End = i
+		}
+	}
+	return blocks
+}
+
+// multipleDDLInTxnRule flags any explicit BEGIN..COMMIT block that
+// contains more than one DDL statement. CockroachDB runs each DDL as
+// an asynchronous online schema change job; bundling several into one
+// user transaction is fragile because a failure mid-transaction can
+// leave the schema in a partially-applied state, and dropped names
+// cannot be reused in the same transaction. Best practice is one DDL
+// per transaction. The rule emits one finding per *extra* DDL beyond
+// the first, each pointing at the offending DDL's position, so a
+// block with three DDLs produces two findings.
+var multipleDDLInTxnRule = MultiRule{
+	ReasonCode: "MULTIPLE_DDL_IN_TXN",
+	Severity:   SeverityHigh,
+	Category:   "transactional_safety",
+	Check: func(input MultiCheckInput) []Finding {
+		var findings []Finding
+		for _, blk := range explicitTxnBlocks(input.Stmts) {
+			seenFirst := false
+			for i := blk.Start + 1; i < blk.End; i++ {
+				stmt := input.Stmts[i].AST
+				if stmt.StatementType() != tree.TypeDDL {
+					continue
+				}
+				if !seenFirst {
+					seenFirst = true
+					continue
+				}
+				pos := input.Positions[i]
+				findings = append(findings, Finding{
+					Message:  fmt.Sprintf("additional DDL (%s) in the same explicit transaction; CockroachDB runs each DDL as an online schema change and may leave the schema partially applied if any one fails", stmt.StatementTag()),
+					Position: &pos,
+					FixHint:  "Run each DDL in its own transaction (one BEGIN..COMMIT per DDL)",
+				})
+			}
+		}
+		return findings
+	},
+}
+
+// ddlAndDMLInTxnRule flags any explicit BEGIN..COMMIT block that
+// contains both a DDL statement and a DML statement, classified by
+// the parser's tree.StatementType() (TypeDDL vs TypeDML). The schema
+// change commits asynchronously, so the DML in the same txn may
+// observe an inconsistent intermediate schema or the txn may abort
+// with an error that is hard to reason about. The rule emits one
+// finding per offending block, anchored at the BEGIN, regardless of
+// how many DDL or DML statements the block contains.
+var ddlAndDMLInTxnRule = MultiRule{
+	ReasonCode: "DDL_AND_DML_IN_TXN",
+	Severity:   SeverityMedium,
+	Category:   "transactional_safety",
+	Check: func(input MultiCheckInput) []Finding {
+		var findings []Finding
+		for _, blk := range explicitTxnBlocks(input.Stmts) {
+			var hasDDL, hasDML bool
+			for i := blk.Start + 1; i < blk.End; i++ {
+				switch input.Stmts[i].AST.StatementType() {
+				case tree.TypeDDL:
+					hasDDL = true
+				case tree.TypeDML:
+					hasDML = true
+				}
+			}
+			if !hasDDL || !hasDML {
+				continue
+			}
+			pos := input.Positions[blk.Start]
+			findings = append(findings, Finding{
+				Message:  "explicit transaction mixes DDL and DML; the asynchronous schema change can leave the DML observing an inconsistent intermediate schema",
+				Position: &pos,
+				FixHint:  "Split the transaction so DDL and DML run separately (one BEGIN..COMMIT per DDL, with DML in its own transactions)",
+			})
+		}
+		return findings
 	},
 }

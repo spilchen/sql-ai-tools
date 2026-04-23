@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 )
 
@@ -81,19 +82,49 @@ type Rule struct {
 	Check      func(input CheckInput) []Finding
 }
 
-// Registry holds an ordered set of rules and runs them against parsed
-// SQL. Built by NewRegistry and immutable afterward; rule evaluation
-// order matches the order provided to the constructor.
-type Registry struct {
-	rules []Rule
+// MultiCheckInput is the context passed to a multi-statement rule's
+// check function. Stmts is the full parsed statement list for the SQL
+// passed to Analyze; Positions[i] is the location of Stmts[i] within
+// the original SQL. The two slices have the same length and are
+// indexed in parallel.
+type MultiCheckInput struct {
+	Stmts     statements.Statements
+	Positions []Position
 }
 
-// NewRegistry creates a registry from the given rules. Rules are
-// evaluated in the order provided. It panics if any rule has a nil
-// Check function, an empty ReasonCode, or a ReasonCode that duplicates
-// a previously registered rule.
-func NewRegistry(rules ...Rule) *Registry {
-	seen := make(map[string]bool, len(rules))
+// MultiRule defines a risk detection rule that needs to look across
+// more than one parsed statement at a time (e.g. spotting multiple
+// DDL statements inside a single explicit BEGIN..COMMIT block). The
+// Check function is invoked once per Analyze call with the full
+// statement list and returns any findings; it is expected to return
+// nil when the input does not contain anything relevant.
+type MultiRule struct {
+	ReasonCode string
+	Severity   Severity
+	Category   string
+	Check      func(input MultiCheckInput) []Finding
+}
+
+// Registry holds an ordered set of per-statement rules and an ordered
+// set of multi-statement rules, and runs them against parsed SQL.
+// Built by NewRegistry and immutable afterward; rule evaluation order
+// matches the order provided to the constructor (per-statement rules
+// run first, in registration order, for each statement; multi-rules
+// run afterward, in registration order, once per Analyze call).
+type Registry struct {
+	rules      []Rule
+	multiRules []MultiRule
+}
+
+// NewRegistry creates a registry from the given per-statement rules
+// and multi-statement rules. Either slice may be nil. Rules are
+// evaluated in the order provided: per-statement rules in
+// registration order for each statement, then multi-statement rules
+// in registration order once per Analyze call. It panics if any rule
+// has a nil Check function, an empty ReasonCode, or a ReasonCode that
+// duplicates any other registered rule (across both slices).
+func NewRegistry(rules []Rule, multiRules []MultiRule) *Registry {
+	seen := make(map[string]bool, len(rules)+len(multiRules))
 	for _, rule := range rules {
 		if rule.Check == nil {
 			panic(fmt.Sprintf("risk: rule %q has nil Check function", rule.ReasonCode))
@@ -106,15 +137,30 @@ func NewRegistry(rules ...Rule) *Registry {
 		}
 		seen[rule.ReasonCode] = true
 	}
-	return &Registry{rules: rules}
+	for _, rule := range multiRules {
+		if rule.Check == nil {
+			panic(fmt.Sprintf("risk: multi-rule %q has nil Check function", rule.ReasonCode))
+		}
+		if rule.ReasonCode == "" {
+			panic("risk: multi-rule has empty ReasonCode")
+		}
+		if seen[rule.ReasonCode] {
+			panic(fmt.Sprintf("risk: duplicate ReasonCode %q", rule.ReasonCode))
+		}
+		seen[rule.ReasonCode] = true
+	}
+	return &Registry{rules: rules, multiRules: multiRules}
 }
 
-// Analyze parses sql and applies every registered rule to every
-// statement. Findings are returned in statement order; within a
-// statement, rules are evaluated in registration order. The registry
-// stamps each finding's ReasonCode and Severity from the rule that
-// produced it, so individual rules only need to set Message, Position,
-// and FixHint.
+// Analyze parses sql and applies every registered rule. Per-statement
+// rules run first, in statement order, with rules evaluated in
+// registration order within each statement; multi-statement rules run
+// afterward, in registration order, each invoked once over the full
+// statement list. Findings are returned in production order, so all
+// per-statement findings precede all multi-statement findings. The
+// registry stamps each finding's ReasonCode and Severity from the
+// rule that produced it, so individual rules only need to set
+// Message, Position, and FixHint.
 func (r *Registry) Analyze(sql string) ([]Finding, error) {
 	stmts, err := parser.Parse(sql)
 	if err != nil {
@@ -122,9 +168,11 @@ func (r *Registry) Analyze(sql string) ([]Finding, error) {
 	}
 
 	findings := []Finding{}
+	positions := make([]Position, len(stmts))
 	offset := 0
-	for _, stmt := range stmts {
+	for i, stmt := range stmts {
 		pos := positionFromSQL(sql, stmt.SQL, &offset)
+		positions[i] = pos
 		input := CheckInput{
 			AST:      stmt.AST,
 			StmtSQL:  stmt.SQL,
@@ -138,13 +186,23 @@ func (r *Registry) Analyze(sql string) ([]Finding, error) {
 			}
 		}
 	}
+
+	multiInput := MultiCheckInput{Stmts: stmts, Positions: positions}
+	for _, rule := range r.multiRules {
+		for _, f := range rule.Check(multiInput) {
+			f.ReasonCode = rule.ReasonCode
+			f.Severity = rule.Severity
+			findings = append(findings, f)
+		}
+	}
 	return findings, nil
 }
 
 // Analyze is a convenience function that runs the default rule set
-// against sql. It is equivalent to NewRegistry(DefaultRules()...).Analyze(sql).
+// against sql. It is equivalent to
+// NewRegistry(DefaultRules(), DefaultMultiRules()).Analyze(sql).
 func Analyze(sql string) ([]Finding, error) {
-	return NewRegistry(DefaultRules()...).Analyze(sql)
+	return NewRegistry(DefaultRules(), DefaultMultiRules()).Analyze(sql)
 }
 
 // positionFromSQL computes the Position of stmtSQL within fullSQL,

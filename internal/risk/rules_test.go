@@ -287,6 +287,126 @@ func TestAnalyze(t *testing.T) {
 			sql:                 "PREPARE q AS SELECT 1",
 			expectedReasonCodes: nil,
 		},
+		{
+			name:                "two DDLs in explicit txn flag",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY); COMMIT;",
+			expectedReasonCodes: []string{"MULTIPLE_DDL_IN_TXN"},
+		},
+		{
+			name:                "three DDLs in explicit txn flag twice",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY); CREATE TABLE c (id INT PRIMARY KEY); COMMIT;",
+			expectedReasonCodes: []string{"MULTIPLE_DDL_IN_TXN", "MULTIPLE_DDL_IN_TXN"},
+		},
+		{
+			name:                "single DDL in explicit txn is safe",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); COMMIT;",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "two DDLs in implicit txn do not flag",
+			sql:                 "CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY);",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "DDL then DML in explicit txn flags",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); SELECT 1; COMMIT;",
+			expectedReasonCodes: []string{"DDL_AND_DML_IN_TXN"},
+		},
+		{
+			name:                "DML then DDL in explicit txn flags",
+			sql:                 "BEGIN; INSERT INTO t VALUES (1); ALTER TABLE t ADD COLUMN x INT; COMMIT;",
+			expectedReasonCodes: []string{"DDL_AND_DML_IN_TXN"},
+		},
+		{
+			name:                "explicit txn with only DDLs does not trigger DDL_AND_DML",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY); COMMIT;",
+			expectedReasonCodes: []string{"MULTIPLE_DDL_IN_TXN"},
+		},
+		{
+			name:                "explicit txn with only DML does not flag",
+			sql:                 "BEGIN; INSERT INTO t VALUES (1); SELECT id FROM t WHERE id = 1; COMMIT;",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "ROLLBACK closes the txn block for cross-stmt rules",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); SELECT 1; ROLLBACK;",
+			expectedReasonCodes: []string{"DDL_AND_DML_IN_TXN"},
+		},
+		{
+			name:                "multi-DDL plus DML emits both rules",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY); INSERT INTO a VALUES (1); COMMIT;",
+			expectedReasonCodes: []string{"MULTIPLE_DDL_IN_TXN", "DDL_AND_DML_IN_TXN"},
+		},
+		{
+			name:                "SAVEPOINT cockroach_restart flags",
+			sql:                 "SAVEPOINT cockroach_restart",
+			expectedReasonCodes: []string{"SAVEPOINT_COCKROACH_RESTART"},
+		},
+		{
+			name:                "RELEASE SAVEPOINT cockroach_restart flags",
+			sql:                 "RELEASE SAVEPOINT cockroach_restart",
+			expectedReasonCodes: []string{"SAVEPOINT_COCKROACH_RESTART"},
+		},
+		{
+			name:                "ROLLBACK TO SAVEPOINT cockroach_restart flags",
+			sql:                 "ROLLBACK TO SAVEPOINT cockroach_restart",
+			expectedReasonCodes: []string{"SAVEPOINT_COCKROACH_RESTART"},
+		},
+		{
+			name:                "SAVEPOINT cockroach_restart case-insensitive",
+			sql:                 `SAVEPOINT "Cockroach_Restart"`,
+			expectedReasonCodes: []string{"SAVEPOINT_COCKROACH_RESTART"},
+		},
+		{
+			name:                "user-named savepoint is safe",
+			sql:                 "SAVEPOINT my_app_sp",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "explicit txn with multi-DDL plus multi-DML emits one DDL_AND_DML finding",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); INSERT INTO t VALUES (1); SELECT id FROM t WHERE id = 1; COMMIT;",
+			expectedReasonCodes: []string{"DDL_AND_DML_IN_TXN"},
+		},
+		{
+			name:                "DDL plus UPDATE flags DDL_AND_DML",
+			sql:                 "BEGIN; CREATE TABLE u (id INT PRIMARY KEY); UPDATE u SET id = 2 WHERE id = 1; COMMIT;",
+			expectedReasonCodes: []string{"DDL_AND_DML_IN_TXN"},
+		},
+		{
+			name:                "DDL plus DELETE flags DDL_AND_DML",
+			sql:                 "BEGIN; CREATE TABLE d (id INT PRIMARY KEY); DELETE FROM d WHERE id = 1; COMMIT;",
+			expectedReasonCodes: []string{"DDL_AND_DML_IN_TXN"},
+		},
+		{
+			name:                "DDL plus UPSERT flags DDL_AND_DML",
+			sql:                 "BEGIN; CREATE TABLE u (id INT PRIMARY KEY); UPSERT INTO u VALUES (1); COMMIT;",
+			expectedReasonCodes: []string{"DDL_AND_DML_IN_TXN"},
+		},
+		{
+			name:                "two consecutive explicit txns each with multi-DDL flag separately",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY); COMMIT; BEGIN; CREATE TABLE c (id INT PRIMARY KEY); CREATE TABLE d (id INT PRIMARY KEY); COMMIT;",
+			expectedReasonCodes: []string{"MULTIPLE_DDL_IN_TXN", "MULTIPLE_DDL_IN_TXN"},
+		},
+		{
+			name:                "BEGIN without matching COMMIT still scans the unterminated block",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY);",
+			expectedReasonCodes: []string{"MULTIPLE_DDL_IN_TXN"},
+		},
+		{
+			name:                "surplus COMMIT before any BEGIN does not panic and emits nothing for the multi-rules",
+			sql:                 "COMMIT; CREATE TABLE x (id INT PRIMARY KEY);",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "surplus ROLLBACK before any BEGIN does not panic and emits nothing for the multi-rules",
+			sql:                 "ROLLBACK; CREATE TABLE x (id INT PRIMARY KEY);",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "nested BEGIN: outer block sees both DDLs and flags MULTIPLE_DDL once",
+			sql:                 "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); BEGIN; CREATE TABLE b (id INT PRIMARY KEY); COMMIT; COMMIT;",
+			expectedReasonCodes: []string{"MULTIPLE_DDL_IN_TXN"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -385,6 +505,21 @@ func TestFindingSeverity(t *testing.T) {
 			sql:              "PREPARE TRANSACTION 'tx1'",
 			expectedSeverity: SeverityHigh,
 		},
+		{
+			name:             "MULTIPLE_DDL_IN_TXN is high",
+			sql:              "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); CREATE TABLE b (id INT PRIMARY KEY); COMMIT;",
+			expectedSeverity: SeverityHigh,
+		},
+		{
+			name:             "DDL_AND_DML_IN_TXN is medium",
+			sql:              "BEGIN; CREATE TABLE a (id INT PRIMARY KEY); SELECT 1; COMMIT;",
+			expectedSeverity: SeverityMedium,
+		},
+		{
+			name:             "SAVEPOINT_COCKROACH_RESTART is medium",
+			sql:              "SAVEPOINT cockroach_restart",
+			expectedSeverity: SeverityMedium,
+		},
 	}
 
 	for _, tc := range tests {
@@ -442,4 +577,46 @@ func TestTruncateCascadeMessageMentionsForeignKeys(t *testing.T) {
 	require.Len(t, findings, 1)
 	require.Contains(t, findings[0].Message, "CASCADE")
 	require.Contains(t, findings[0].Message, "foreign keys")
+}
+
+// TestMultipleDDLInTxnFindingPositions pins down the rule's "one
+// finding per *extra* DDL beyond the first, anchored at that DDL"
+// contract. Each statement is on its own line so position.Line
+// uniquely identifies which statement the finding refers to.
+func TestMultipleDDLInTxnFindingPositions(t *testing.T) {
+	sql := "BEGIN;\n" +
+		"CREATE TABLE a (id INT PRIMARY KEY);\n" +
+		"CREATE TABLE b (id INT PRIMARY KEY);\n" +
+		"CREATE TABLE c (id INT PRIMARY KEY);\n" +
+		"COMMIT;"
+	findings, err := Analyze(sql)
+	require.NoError(t, err)
+	require.Len(t, findings, 2)
+	require.Equal(t, "MULTIPLE_DDL_IN_TXN", findings[0].ReasonCode)
+	require.Equal(t, "MULTIPLE_DDL_IN_TXN", findings[1].ReasonCode)
+	require.NotNil(t, findings[0].Position)
+	require.NotNil(t, findings[1].Position)
+	// First finding points at the second DDL (line 3); second points
+	// at the third DDL (line 4). The first DDL on line 2 is never
+	// itself flagged.
+	require.Equal(t, 3, findings[0].Position.Line)
+	require.Equal(t, 4, findings[1].Position.Line)
+}
+
+// TestDDLAndDMLInTxnFindingAnchoredAtBegin pins down the
+// "one finding per offending block, anchored at the BEGIN" contract.
+func TestDDLAndDMLInTxnFindingAnchoredAtBegin(t *testing.T) {
+	sql := "SELECT 1;\n" +
+		"BEGIN;\n" +
+		"CREATE TABLE a (id INT PRIMARY KEY);\n" +
+		"INSERT INTO a VALUES (1);\n" +
+		"COMMIT;"
+	findings, err := Analyze(sql)
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	require.Equal(t, "DDL_AND_DML_IN_TXN", findings[0].ReasonCode)
+	require.NotNil(t, findings[0].Position)
+	// BEGIN is on line 2; finding must point there, not at the inner
+	// DDL (line 3) or DML (line 4).
+	require.Equal(t, 2, findings[0].Position.Line)
 }
