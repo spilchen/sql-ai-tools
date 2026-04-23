@@ -94,6 +94,22 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "alter vc repl source at", tag: FeatureAlterVirtualClusterReplicationSrc, target: "25.2", expectedStatus: StatusSupported},
 		{name: "alter vc repl source after", tag: FeatureAlterVirtualClusterReplicationSrc, target: "25.3", expectedStatus: StatusSupported},
 
+		{name: "show create all triggers before", tag: FeatureShowCreateAllTriggers, target: "25.2", expectedStatus: StatusNotYetIntroduced},
+		{name: "show create all triggers at", tag: FeatureShowCreateAllTriggers, target: "25.3", expectedStatus: StatusSupported},
+		{name: "show create all triggers after", tag: FeatureShowCreateAllTriggers, target: "25.4", expectedStatus: StatusSupported},
+
+		{name: "show create all routines before", tag: FeatureShowCreateAllRoutines, target: "25.2", expectedStatus: StatusNotYetIntroduced},
+		{name: "show create all routines at", tag: FeatureShowCreateAllRoutines, target: "25.3", expectedStatus: StatusSupported},
+		{name: "show create all routines after", tag: FeatureShowCreateAllRoutines, target: "25.4", expectedStatus: StatusSupported},
+
+		{name: "alter table logged toggle before", tag: FeatureAlterTableLoggedToggle, target: "25.2", expectedStatus: StatusNotYetIntroduced},
+		{name: "alter table logged toggle at", tag: FeatureAlterTableLoggedToggle, target: "25.3", expectedStatus: StatusSupported},
+		{name: "alter table logged toggle after", tag: FeatureAlterTableLoggedToggle, target: "25.4", expectedStatus: StatusSupported},
+
+		{name: "grant revoke routines before", tag: FeatureGrantRevokeRoutines, target: "25.2", expectedStatus: StatusNotYetIntroduced},
+		{name: "grant revoke routines at", tag: FeatureGrantRevokeRoutines, target: "25.3", expectedStatus: StatusSupported},
+		{name: "grant revoke routines after", tag: FeatureGrantRevokeRoutines, target: "25.4", expectedStatus: StatusSupported},
+
 		{name: "cross-major: target predates oldest seed", tag: FeaturePLpgSQLFunctionBody, target: "19.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "cross-major: target newer than newest seed", tag: FeaturePLpgSQLFunctionBody, target: "26.2", expectedStatus: StatusSupported},
 	}
@@ -181,6 +197,10 @@ func TestExportedConstantsAreRegistered(t *testing.T) {
 		FeatureCreatePolicyIfNotExists,
 		FeatureRefreshMaterializedViewAsOf,
 		FeatureAlterVirtualClusterReplicationSrc,
+		FeatureShowCreateAllTriggers,
+		FeatureShowCreateAllRoutines,
+		FeatureAlterTableLoggedToggle,
+		FeatureGrantRevokeRoutines,
 	} {
 		_, ok := reg.Lookup(tag)
 		require.Truef(t, ok, "constant %q is not registered in DefaultRegistry", tag)
