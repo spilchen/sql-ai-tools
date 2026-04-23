@@ -95,6 +95,11 @@ const (
 	FeatureTrigramIndex        = "trigram_index"
 	FeatureRegionalByRow       = "regional_by_row"
 	FeatureAlterChangefeed     = "alter_changefeed"
+
+	// v24.3 features.
+	FeatureTriggers                   = "triggers"
+	FeatureShowLogicalReplicationJobs = "show_logical_replication_jobs"
+	FeatureLDRSkipSchemaCheck         = "ldr_skip_schema_check"
 )
 
 // Registry holds an immutable set of Feature entries, indexed by
@@ -170,6 +175,23 @@ func DefaultRegistry() *Registry {
 			Tag:        FeatureAlterChangefeed,
 			Name:       "ALTER CHANGEFEED",
 			Introduced: "22.1",
+		},
+
+		// v24.3 features.
+		Feature{
+			Tag:        FeatureTriggers,
+			Name:       "triggers (CREATE/ALTER/DROP TRIGGER)",
+			Introduced: "24.3",
+		},
+		Feature{
+			Tag:        FeatureShowLogicalReplicationJobs,
+			Name:       "SHOW LOGICAL REPLICATION JOBS",
+			Introduced: "24.3",
+		},
+		Feature{
+			Tag:        FeatureLDRSkipSchemaCheck,
+			Name:       "LDR SKIP SCHEMA CHECK option",
+			Introduced: "24.3",
 		},
 	)
 }
