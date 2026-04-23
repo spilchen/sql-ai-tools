@@ -102,6 +102,15 @@ const (
 	// version differs from the bundled parser version at the
 	// MAJOR.MINOR level.
 	CodeTargetVersionMismatch = "target_version_mismatch"
+
+	// CodeFeatureNotYetIntroduced is emitted when the AST inspector
+	// recognizes a CockroachDB SQL feature whose Introduced version
+	// (per the version registry) is newer than the user's declared
+	// target version. The accompanying Error.Context carries the
+	// feature_tag, feature_name, introduced, and target keys so
+	// agents can branch programmatically without parsing the
+	// human-readable Message.
+	CodeFeatureNotYetIntroduced = "feature_not_yet_introduced"
 )
 
 // Severity is the severity level of a structured Error. Values use the

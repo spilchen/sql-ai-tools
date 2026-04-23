@@ -21,6 +21,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/semcheck"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
 	"github.com/spilchen/sql-ai-tools/internal/validateresult"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // newValidateCmd builds the `crdb-sql validate` subcommand. It reads
@@ -101,6 +102,9 @@ matched by the config and reports per-file results in one envelope.`,
 				return renderDiagErrors(r, baseEnv, typeErrs)
 			}
 
+			baseEnv.Errors = append(baseEnv.Errors,
+				version.Inspect(stmts, state.targetVersion, nil)...)
+
 			checks := validateresult.Checks{
 				Syntax:    validateresult.CheckOK,
 				TypeCheck: validateresult.CheckOK,
@@ -154,8 +158,11 @@ matched by the config and reports per-file results in one envelope.`,
 }
 
 // fileResult is one entry in the JSON payload for the config-driven
-// validate path. Each query file gets exactly one entry; ErrorCount
-// is the number of structured Errors attributable to that file.
+// validate path. Each query file gets exactly one entry. ErrorCount
+// counts ERROR-severity diagnostics only; advisory WARNING entries
+// (today: version-aware feature warnings) are excluded so the field
+// stays consistent with Valid — a file with valid=true cannot have
+// error_count>0.
 type fileResult struct {
 	File       string `json:"file"`
 	Valid      bool   `json:"valid"`
@@ -209,11 +216,11 @@ func runValidateConfig(state *rootState, cmd *cobra.Command) error {
 		}
 
 		for _, qp := range queryPaths {
-			fileErrs, ok := validateQueryFile(qp, cat)
+			fileErrs, ok := validateQueryFile(qp, cat, state.targetVersion)
 			results = append(results, fileResult{
 				File:       qp,
 				Valid:      ok,
-				ErrorCount: len(fileErrs),
+				ErrorCount: countErrors(fileErrs),
 			})
 			baseEnv.Errors = append(baseEnv.Errors, fileErrs...)
 			if !ok {
@@ -248,11 +255,19 @@ func runValidateConfig(state *rootState, cmd *cobra.Command) error {
 
 // validateQueryFile reads one query file and runs the same parse +
 // type-check pipeline used in the single-input path. When cat is
-// non-nil, table-name resolution also runs against it. Each returned
-// output.Error is tagged with the file path in Context["file"] so
-// agents can attribute diagnostics across many files in one envelope.
-// Returns ok=true when no errors were found.
-func validateQueryFile(path string, cat *catalog.Catalog) (errs []output.Error, ok bool) {
+// non-nil, table-name resolution also runs against it. When
+// targetVersion is non-empty, version-aware feature warnings are
+// appended too. Each returned output.Error is tagged with the file
+// path in Context["file"] so agents can attribute diagnostics across
+// many files in one envelope.
+//
+// ok is true when no ERROR-severity diagnostics were found. Advisory
+// WARNING-severity entries (today: version-aware feature warnings)
+// are surfaced in errs but do not flip ok — the per-file Valid
+// status mirrors the single-input path, where warnings are advisory.
+func validateQueryFile(
+	path string, cat *catalog.Catalog, targetVersion string,
+) (errs []output.Error, ok bool) {
 	data, readErr := os.ReadFile(path)
 	if readErr != nil {
 		return []output.Error{{
@@ -277,22 +292,49 @@ func validateQueryFile(path string, cat *catalog.Catalog) (errs []output.Error, 
 		return []output.Error{tagFile(e, path)}, false
 	}
 
-	var fileErrs []output.Error
-	for _, e := range semcheck.CheckExprTypes(stmts, sql) {
+	var (
+		fileErrs   []output.Error
+		hardErrors bool
+	)
+	addHard := func(e output.Error) {
 		fileErrs = append(fileErrs, tagFile(e, path))
+		hardErrors = true
+	}
+	addAdvisory := func(e output.Error) {
+		fileErrs = append(fileErrs, tagFile(e, path))
+	}
+	for _, e := range semcheck.CheckExprTypes(stmts, sql) {
+		addHard(e)
 	}
 	if cat != nil {
 		for _, e := range semcheck.CheckTableNames(stmts, sql, cat) {
-			fileErrs = append(fileErrs, tagFile(e, path))
+			addHard(e)
 		}
 		for _, e := range semcheck.CheckColumnNames(stmts, sql, cat) {
-			fileErrs = append(fileErrs, tagFile(e, path))
+			addHard(e)
 		}
+	}
+	for _, e := range version.Inspect(stmts, targetVersion, nil) {
+		addAdvisory(e)
 	}
 	if len(fileErrs) == 0 {
 		return nil, true
 	}
-	return fileErrs, false
+	return fileErrs, !hardErrors
+}
+
+// countErrors returns the number of ERROR-severity entries in errs,
+// excluding advisory warnings. Used to keep fileResult.ErrorCount
+// consistent with fileResult.Valid: an advisory-only file should
+// report error_count=0 alongside valid=true.
+func countErrors(errs []output.Error) int {
+	n := 0
+	for _, e := range errs {
+		if e.Severity == output.SeverityError {
+			n++
+		}
+	}
+	return n
 }
 
 // tagFile attaches the source file path to an error's Context so

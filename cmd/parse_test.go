@@ -185,3 +185,94 @@ func TestParseCmdConflictingInput(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "cannot use -e flag and file argument together")
 }
+
+// TestParseCmdVersionWarning_PLpgSQL exercises the new feature-warning
+// path: when --target-version predates a feature's Introduced version,
+// the envelope carries a feature_not_yet_introduced WARNING, but the
+// parse still succeeds (data payload is populated, no ErrRendered).
+func TestParseCmdVersionWarning_PLpgSQL(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"parse",
+		"--target-version", "23.2",
+		"-e", `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, "23.2", env.TargetVersion)
+
+	// Find the feature warning. The envelope may also carry a
+	// target_version_mismatch warning (parser is on v0.26 in this
+	// build) so we filter rather than index.
+	var got *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == output.CodeFeatureNotYetIntroduced {
+			got = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, got, "expected a feature_not_yet_introduced warning in %+v", env.Errors)
+	require.Equal(t, output.SeverityWarning, got.Severity)
+	require.Equal(t, "plpgsql_function_body", got.Context["feature_tag"])
+	require.Equal(t, "24.1", got.Context["introduced"])
+	require.Equal(t, "23.2", got.Context["target"])
+	require.NotEmpty(t, env.Data, "parse must still succeed and emit a data payload")
+}
+
+// TestParseCmdVersionWarning_NoneAtNewerTarget pins the negative case:
+// when target is at or after the feature's Introduced version, no
+// feature warning is emitted.
+func TestParseCmdVersionWarning_NoneAtNewerTarget(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"parse",
+		"--target-version", "24.1",
+		"-e", `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"target at Introduced must not warn, got %+v", e)
+	}
+}
+
+// TestParseCmdVersionWarning_NoFlagSkips covers the documented short-
+// circuit: omitting --target-version skips the inspector entirely.
+// Without this, a regression that promoted "" to "warn anyway" would
+// only surface in MCP tests.
+func TestParseCmdVersionWarning_NoFlagSkips(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"parse",
+		"-e", `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Empty(t, env.TargetVersion)
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"no --target-version must skip feature warnings, got %+v", e)
+	}
+}

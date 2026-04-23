@@ -14,6 +14,7 @@ package sqlparse
 
 import (
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 )
 
@@ -56,12 +57,25 @@ type ClassifiedStatement struct {
 // mode).
 //
 // An empty input returns an empty slice with no error.
+//
+// Callers that need both the classified output and the underlying AST
+// (to layer additional analysis like version.Inspect on top) should
+// call parser.Parse themselves and use ClassifyParsed instead, to
+// avoid double-parsing.
 func Classify(sql string) ([]ClassifiedStatement, error) {
 	stmts, err := parser.Parse(sql)
 	if err != nil {
 		return nil, err
 	}
+	return ClassifyParsed(stmts), nil
+}
 
+// ClassifyParsed turns an already-parsed statement set into per-
+// statement classifications. It is the second half of Classify, exposed
+// so callers that already invoked parser.Parse (e.g. to also run
+// type-checking or AST inspection) can reuse the parsed output rather
+// than reparsing the SQL string.
+func ClassifyParsed(stmts statements.Statements) []ClassifiedStatement {
 	result := make([]ClassifiedStatement, len(stmts))
 	for i, stmt := range stmts {
 		result[i] = ClassifiedStatement{
@@ -71,7 +85,7 @@ func Classify(sql string) ([]ClassifiedStatement, error) {
 			Normalized:    tree.FormatStatementHideConstants(stmt.AST),
 		}
 	}
-	return result, nil
+	return result
 }
 
 // mapStatementType converts a tree.StatementType enum value to its

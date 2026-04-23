@@ -858,3 +858,237 @@ func TestValidateCmdSchemaTextSuccess(t *testing.T) {
 	require.NoError(t, root.Execute())
 	require.Equal(t, "Valid.\n", stdout.String())
 }
+
+// TestValidateCmdVersionWarning_PLpgSQL is the issue #84 demo case:
+// validate --target-version 23.2 on a PL/pgSQL routine returns
+// valid: true alongside a feature_not_yet_introduced WARNING. The
+// verdict is unchanged; the warning is advisory.
+func TestValidateCmdVersionWarning_PLpgSQL(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--target-version", "23.2",
+		"-e", `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+
+	var got *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == output.CodeFeatureNotYetIntroduced {
+			got = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, got, "expected feature_not_yet_introduced in %+v", env.Errors)
+	require.Equal(t, output.SeverityWarning, got.Severity)
+	require.Equal(t, "plpgsql_function_body", got.Context["feature_tag"])
+	require.Contains(t, got.Message, "PL/pgSQL")
+	require.Contains(t, got.Message, "24.1")
+	require.Contains(t, got.Message, "23.2")
+
+	var result struct {
+		Valid bool `json:"valid"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &result))
+	require.True(t, result.Valid, "verdict must remain valid: warnings are advisory")
+}
+
+// TestValidateCmdVersionWarning_NoneAtNewerTarget pins that no
+// feature warning fires when the target meets the introduced version.
+func TestValidateCmdVersionWarning_NoneAtNewerTarget(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--target-version", "24.1",
+		"-e", `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"target at Introduced must not warn, got %+v", e)
+	}
+}
+
+// TestValidateCmdConfigVersionWarning exercises the config-driven path
+// with a query that uses a feature unavailable at the target version.
+// The per-file Valid status must remain true (warnings are advisory),
+// the envelope must carry a feature_not_yet_introduced WARNING tagged
+// with the originating file, and overall execution must succeed (no
+// ErrRendered). This is the only test that exercises validateQueryFile's
+// new addAdvisory path end-to-end.
+func TestValidateCmdConfigVersionWarning(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "schema/users.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY);\n")
+	queryPath := writeFile(t, dir, "queries/fn.sql",
+		`CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$;`+"\n")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["schema/*.sql"]
+    queries: ["queries/*.sql"]
+`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--target-version", "23.2",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	require.NoError(t, root.Execute(),
+		"version warnings are advisory; the run must not exit non-zero")
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+
+	var featWarn *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == output.CodeFeatureNotYetIntroduced {
+			featWarn = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, featWarn, "expected feature warning in %+v", env.Errors)
+	require.Equal(t, queryPath, featWarn.Context["file"],
+		"advisory warning must carry the originating file path")
+
+	var payload struct {
+		Files []struct {
+			File       string `json:"file"`
+			Valid      bool   `json:"valid"`
+			ErrorCount int    `json:"error_count"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.Len(t, payload.Files, 1)
+	require.True(t, payload.Files[0].Valid,
+		"advisory warning must not flip per-file Valid")
+}
+
+// TestValidateCmdConfigMixedErrorAndWarning pins the validateQueryFile
+// contract for files that have BOTH a hard ERROR (table that doesn't
+// resolve against the schema) and an advisory WARNING (PL/pgSQL at a
+// pre-Introduced target). The hard error must flip Valid to false;
+// the warning must still appear in the envelope; ErrorCount must
+// count only the hard error so the field stays consistent with Valid.
+func TestValidateCmdConfigMixedErrorAndWarning(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "schema/users.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY);\n")
+	queryPath := writeFile(t, dir, "queries/q.sql",
+		`SELECT * FROM nonexistent;`+"\n"+
+			`CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$;`+"\n")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["schema/*.sql"]
+    queries: ["queries/*.sql"]
+`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--target-version", "23.2",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered, "hard error must exit non-zero")
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+
+	hardErr, advisoryWarn := false, false
+	for _, e := range env.Errors {
+		if e.Code == "42P01" {
+			hardErr = true
+		}
+		if e.Code == output.CodeFeatureNotYetIntroduced {
+			advisoryWarn = true
+		}
+	}
+	require.True(t, hardErr, "missing hard 42P01 error: %+v", env.Errors)
+	require.True(t, advisoryWarn, "missing advisory feature warning: %+v", env.Errors)
+
+	var payload struct {
+		Files []struct {
+			File       string `json:"file"`
+			Valid      bool   `json:"valid"`
+			ErrorCount int    `json:"error_count"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.Len(t, payload.Files, 1)
+	require.False(t, payload.Files[0].Valid, "hard error must flip Valid")
+	require.Equal(t, queryPath, payload.Files[0].File)
+	require.Equal(t, 1, payload.Files[0].ErrorCount,
+		"ErrorCount must count only the hard error, not the advisory warning")
+}
+
+// TestValidateCmdConfigVersionWarningErrorCount pins that an advisory-
+// only file reports error_count=0 alongside valid=true. This is the
+// regression guard for the iteration-2 fix that excluded WARNINGs
+// from ErrorCount.
+func TestValidateCmdConfigVersionWarningErrorCount(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "schema/users.sql",
+		"CREATE TABLE users (id INT PRIMARY KEY);\n")
+	writeFile(t, dir, "queries/fn.sql",
+		`CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$;`+"\n")
+	writeFile(t, dir, "crdb-sql.yaml", `version: 1
+sql:
+  - schema: ["schema/*.sql"]
+    queries: ["queries/*.sql"]
+`)
+
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"validate",
+		"--target-version", "23.2",
+		"--output", "json",
+		"--config", filepath.Join(dir, "crdb-sql.yaml"),
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+
+	var payload struct {
+		Files []struct {
+			Valid      bool `json:"valid"`
+			ErrorCount int  `json:"error_count"`
+		} `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.Len(t, payload.Files, 1)
+	require.True(t, payload.Files[0].Valid)
+	require.Equal(t, 0, payload.Files[0].ErrorCount,
+		"advisory-only file must report error_count=0")
+}

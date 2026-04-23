@@ -11,11 +11,13 @@ import (
 	"io"
 	"strings"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // newParseCmd builds the `crdb-sql parse` subcommand. It reads SQL from
@@ -52,10 +54,13 @@ normalized form with literal constants replaced by placeholders.`,
 
 			sql = strings.TrimSpace(sql)
 
-			stmts, err := sqlparse.Classify(sql)
-			if err != nil {
-				return renderParseError(r, baseEnv, err, sql)
+			parsed, parseErr := parser.Parse(sql)
+			if parseErr != nil {
+				return renderParseError(r, baseEnv, parseErr, sql)
 			}
+			stmts := sqlparse.ClassifyParsed(parsed)
+			baseEnv.Errors = append(baseEnv.Errors,
+				version.Inspect(parsed, state.targetVersion, nil)...)
 
 			data, err := json.Marshal(stmts)
 			if err != nil {
