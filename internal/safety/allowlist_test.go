@@ -42,6 +42,20 @@ func TestCheckReadOnlyExplain(t *testing.T) {
 		// Read-only allowlist rejects DCL writes.
 		{name: "grant", sql: "GRANT SELECT ON t TO bob", expectedReject: true, expectedTag: "GRANT"},
 		{name: "revoke", sql: "REVOKE SELECT ON t FROM bob", expectedReject: true, expectedTag: "REVOKE"},
+
+		// classifyReadOnly's OpExplain/OpExecute case arm is shared,
+		// so the tenant-DML gate added for issue #136 must reject
+		// these on the OpExplain path too. A future refactor that
+		// splits the case must not silently drop OpExplain coverage.
+		{name: "alter tenant capability rejected on explain path",
+			sql:            "ALTER VIRTUAL CLUSTER 'foo' GRANT CAPABILITY can_admin_split",
+			expectedReject: true, expectedTag: "ALTER VIRTUAL CLUSTER CAPABILITY"},
+		{name: "alter tenant replication rejected on explain path",
+			sql:            "ALTER VIRTUAL CLUSTER 'foo' PAUSE REPLICATION",
+			expectedReject: true, expectedTag: "ALTER VIRTUAL CLUSTER REPLICATION"},
+		{name: "create tenant from replication rejected on explain path",
+			sql:            "CREATE VIRTUAL CLUSTER 'foo' FROM REPLICATION OF 'bar' ON 'connstr'",
+			expectedReject: true, expectedTag: "CREATE VIRTUAL CLUSTER FROM REPLICATION"},
 	}
 
 	for _, tc := range tests {
@@ -184,6 +198,26 @@ func TestCheckReadOnlyExecute(t *testing.T) {
 		{name: "configure zone tagged as cluster admin",
 			sql:            "ALTER TABLE t CONFIGURE ZONE USING num_replicas = 5",
 			expectedReject: true, expectedTag: "CONFIGURE ZONE", expectedKind: safety.KindClusterAdmin},
+
+		// The parser tags these three nodes TypeDML rather than
+		// TypeDCL, so without the dedicated isTenantMgmtDMLStmt
+		// guard AlterTenantCapability would be silently admitted
+		// (its CanWriteData/CanModifySchema both return false) and
+		// the other two would be tagged KindWrite — pointing the
+		// escalation hint at safe_write, which itself rejects them.
+		// These rows pin the cluster-admin classification.
+		{name: "alter tenant capability tagged as cluster admin",
+			sql:            "ALTER VIRTUAL CLUSTER 'foo' GRANT CAPABILITY can_admin_split",
+			expectedReject: true, expectedTag: "ALTER VIRTUAL CLUSTER CAPABILITY",
+			expectedKind: safety.KindClusterAdmin},
+		{name: "alter tenant replication tagged as cluster admin",
+			sql:            "ALTER VIRTUAL CLUSTER 'foo' PAUSE REPLICATION",
+			expectedReject: true, expectedTag: "ALTER VIRTUAL CLUSTER REPLICATION",
+			expectedKind: safety.KindClusterAdmin},
+		{name: "create tenant from replication tagged as cluster admin",
+			sql:            "CREATE VIRTUAL CLUSTER 'foo' FROM REPLICATION OF 'bar' ON 'connstr'",
+			expectedReject: true, expectedTag: "CREATE VIRTUAL CLUSTER FROM REPLICATION",
+			expectedKind: safety.KindClusterAdmin},
 	}
 
 	for _, tc := range tests {
@@ -261,6 +295,29 @@ func TestCheckSafeWriteExecute(t *testing.T) {
 			sql:            "SET TRACING = on",
 			expectedReject: true,
 			expectedReason: "tracing changes require full_access"},
+
+		// Tenant-management DML nodes (parser tags them TypeDML
+		// rather than TypeDCL) must reject under safe_write with the
+		// same tenant-management Reason as their TypeDCL siblings.
+		// AlterTenantReplication and CreateTenantFromReplication were
+		// previously admitted here because safe_write permits
+		// CanWriteData=true statements and the parser marks both as
+		// writes. AlterTenantCapability was admitted for the opposite
+		// reason: neither CanWriteData nor CanModifySchema returns
+		// true for it, so nothing in classifySafeWriteExecute rejected
+		// it either.
+		{name: "alter tenant capability rejected as cluster admin",
+			sql:            "ALTER VIRTUAL CLUSTER 'foo' GRANT CAPABILITY can_admin_split",
+			expectedReject: true,
+			expectedReason: "tenant management requires full_access"},
+		{name: "alter tenant replication rejected as cluster admin",
+			sql:            "ALTER VIRTUAL CLUSTER 'foo' PAUSE REPLICATION",
+			expectedReject: true,
+			expectedReason: "tenant management requires full_access"},
+		{name: "create tenant from replication rejected as cluster admin",
+			sql:            "CREATE VIRTUAL CLUSTER 'foo' FROM REPLICATION OF 'bar' ON 'connstr'",
+			expectedReject: true,
+			expectedReason: "tenant management requires full_access"},
 		{name: "explain analyze ddl rejected as nested",
 			sql:            "EXPLAIN ANALYZE ALTER TABLE t ADD COLUMN x INT",
 			expectedReject: true,
@@ -298,6 +355,18 @@ func TestCheckFullAccessExecute(t *testing.T) {
 		{name: "create table", sql: "CREATE TABLE x (id INT PRIMARY KEY)"},
 		{name: "grant", sql: "GRANT SELECT ON t TO bob"},
 		{name: "multi statement", sql: "SELECT 1; INSERT INTO t VALUES (1)"},
+
+		// The tenant-DML gate added for issue #136 must not leak into
+		// full_access — these are the explicit opt-in cases, so the
+		// allowlist must admit them. Pin all three so a future
+		// classifyFullAccessExecute that grew an unrelated rejection
+		// branch can't silently re-block the tenant-management path.
+		{name: "alter tenant capability admitted under full_access",
+			sql: "ALTER VIRTUAL CLUSTER 'foo' GRANT CAPABILITY can_admin_split"},
+		{name: "alter tenant replication admitted under full_access",
+			sql: "ALTER VIRTUAL CLUSTER 'foo' PAUSE REPLICATION"},
+		{name: "create tenant from replication admitted under full_access",
+			sql: "CREATE VIRTUAL CLUSTER 'foo' FROM REPLICATION OF 'bar' ON 'connstr'"},
 	}
 
 	for _, tc := range tests {
