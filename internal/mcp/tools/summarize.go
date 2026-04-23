@@ -22,7 +22,7 @@ import (
 func SummarizeSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		SummarizeSQLToolName,
-		mcp.WithDescription("Summarize SQL statements via AST walk. Returns per-statement operation, tables, predicates, joins, affected columns, and risk level."),
+		mcp.WithDescription("Summarize SQL statements via AST walk. Returns per-statement operation, tables, predicates, joins, affected_columns (DML write set), referenced_columns (full read+write footprint), select_star (true when projection uses '*' or 't.*' so referenced_columns is a lower bound), and risk level."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to summarize")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)

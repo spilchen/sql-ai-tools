@@ -18,95 +18,114 @@ import (
 // has its own dedicated case so a regression there is obvious.
 func TestSummarize(t *testing.T) {
 	tests := []struct {
-		name             string
-		sql              string
-		expectedOp       Operation
-		expectedTag      string
-		expectedTables   []string
-		expectedPreds    []string
-		expectedJoins    []Join
-		expectedAffected []string
-		expectedRisk     risk.Severity
+		name               string
+		sql                string
+		expectedOp         Operation
+		expectedTag        string
+		expectedTables     []string
+		expectedPreds      []string
+		expectedJoins      []Join
+		expectedAffected   []string
+		expectedReferenced []string
+		expectedSelectStar bool
+		expectedRisk       risk.Severity
 	}{
 		{
-			name:             "issue demo: delete with WHERE",
-			sql:              "DELETE FROM orders WHERE status='x'",
-			expectedOp:       OpDelete,
-			expectedTables:   []string{"orders"},
-			expectedPreds:    []string{"status = 'x'"},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "issue demo: delete with WHERE",
+			sql:                "DELETE FROM orders WHERE status='x'",
+			expectedOp:         OpDelete,
+			expectedTables:     []string{"orders"},
+			expectedPreds:      []string{"status = 'x'"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"status"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "delete without WHERE delegates risk",
-			sql:              "DELETE FROM orders",
-			expectedOp:       OpDelete,
-			expectedTables:   []string{"orders"},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityCritical,
+			name:               "delete without WHERE delegates risk",
+			sql:                "DELETE FROM orders",
+			expectedOp:         OpDelete,
+			expectedTables:     []string{"orders"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityCritical,
 		},
 		{
-			name:             "insert with explicit column list",
-			sql:              "INSERT INTO t (a, b) VALUES (1, 2)",
-			expectedOp:       OpInsert,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{"a", "b"},
-			expectedRisk:     risk.SeverityInfo,
+			// VALUES literals are not column references; the explicit
+			// (a, b) target list comes in via the affected→referenced
+			// union, so referenced_columns echoes affected_columns.
+			name:               "insert with explicit column list",
+			sql:                "INSERT INTO t (a, b) VALUES (1, 2)",
+			expectedOp:         OpInsert,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"a", "b"},
+			expectedReferenced: []string{"a", "b"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "insert without column list leaves affected empty",
-			sql:              "INSERT INTO t VALUES (1, 2)",
-			expectedOp:       OpInsert,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "insert without column list leaves affected empty",
+			sql:                "INSERT INTO t VALUES (1, 2)",
+			expectedOp:         OpInsert,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "upsert short form detected",
-			sql:              "UPSERT INTO t (a) VALUES (1)",
-			expectedOp:       OpUpsert,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{"a"},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "upsert short form detected",
+			sql:                "UPSERT INTO t (a) VALUES (1)",
+			expectedOp:         OpUpsert,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"a"},
+			expectedReferenced: []string{"a"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "update set targets become affected columns",
-			sql:              "UPDATE t SET a=1, b=2 WHERE id=3",
-			expectedOp:       OpUpdate,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{"id = 3"},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{"a", "b"},
-			expectedRisk:     risk.SeverityInfo,
+			// referenced_columns is a superset of affected_columns:
+			// id is read by WHERE; a and b are written by SET.
+			name:               "update set targets become affected columns",
+			sql:                "UPDATE t SET a=1, b=2 WHERE id=3",
+			expectedOp:         OpUpdate,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{"id = 3"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"a", "b"},
+			expectedReferenced: []string{"id", "a", "b"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "select WHERE splits on top-level AND",
-			sql:              "SELECT 1 FROM t WHERE a=1 AND b>2 AND c IS NULL",
-			expectedOp:       OpSelect,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{"a = 1", "b > 2", "c IS NULL"},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "select WHERE splits on top-level AND",
+			sql:                "SELECT 1 FROM t WHERE a=1 AND b>2 AND c IS NULL",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{"a = 1", "b > 2", "c IS NULL"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"a", "b", "c"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "select star raises low risk",
-			sql:              "SELECT * FROM t",
-			expectedOp:       OpSelect,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityLow,
+			// select_star is set because the projection is a bare *;
+			// referenced_columns stays empty since there is no other
+			// expression position contributing column refs.
+			name:               "select star raises low risk",
+			sql:                "SELECT * FROM t",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedSelectStar: true,
+			expectedRisk:       risk.SeverityLow,
 		},
 		{
 			name:           "inner join with ON",
@@ -117,10 +136,16 @@ func TestSummarize(t *testing.T) {
 			expectedJoins: []Join{
 				{Type: "INNER", Left: "a", Right: "b", Condition: "a.id = b.id"},
 			},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"a.id", "b.id"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
+			// USING (id) names a column shared by both sides; the
+			// parser stores it as a NameList rather than an Expr, so
+			// the reference walker doesn't see it. Documenting via
+			// expectations here: USING column names are NOT surfaced
+			// in referenced_columns today.
 			name:           "left join with USING",
 			sql:            "SELECT 1 FROM a LEFT JOIN b USING (id)",
 			expectedOp:     OpSelect,
@@ -129,8 +154,9 @@ func TestSummarize(t *testing.T) {
 			expectedJoins: []Join{
 				{Type: "LEFT", Left: "a", Right: "b", Condition: "USING (id)"},
 			},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
 			name:           "three-way join produces two join entries",
@@ -142,53 +168,58 @@ func TestSummarize(t *testing.T) {
 				{Type: "INNER", Left: "a", Right: "b", Condition: "a.id = b.id"},
 				{Type: "INNER", Left: "", Right: "c", Condition: "b.id = c.id"},
 			},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"a.id", "b.id", "c.id"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "schema-qualified table renders bare name",
-			sql:              "SELECT 1 FROM public.users",
-			expectedOp:       OpSelect,
-			expectedTables:   []string{"users"},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "schema-qualified table renders bare name",
+			sql:                "SELECT 1 FROM public.users",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"users"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "CTE alias excluded from tables",
-			sql:              "WITH x AS (SELECT 1 FROM t) SELECT 2 FROM x",
-			expectedOp:       OpSelect,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "CTE alias excluded from tables",
+			sql:                "WITH x AS (SELECT 1 FROM t) SELECT 2 FROM x",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
 			// The walker visits projection → WHERE → FROM, so the
 			// subquery's table appears before the outer FROM table.
 			// The ordering is intentional and documented on
 			// collectTables.
-			name:             "subquery tables roll up",
-			sql:              "SELECT 1 FROM t WHERE id IN (SELECT id FROM u)",
-			expectedOp:       OpSelect,
-			expectedTables:   []string{"u", "t"},
-			expectedPreds:    []string{"id IN (SELECT id FROM u)"},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "subquery tables roll up",
+			sql:                "SELECT 1 FROM t WHERE id IN (SELECT id FROM u)",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"u", "t"},
+			expectedPreds:      []string{"id IN (SELECT id FROM u)"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"id"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "DDL fallback to OTHER with tag and risk",
-			sql:              "DROP TABLE foo",
-			expectedOp:       OpOther,
-			expectedTag:      "DROP TABLE",
-			expectedTables:   []string{},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityCritical,
+			name:               "DDL fallback to OTHER with tag and risk",
+			sql:                "DROP TABLE foo",
+			expectedOp:         OpOther,
+			expectedTag:        "DROP TABLE",
+			expectedTables:     []string{},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityCritical,
 		},
 		{
 			// NATURAL JOIN must not flatten to plain INNER — agents
@@ -202,8 +233,9 @@ func TestSummarize(t *testing.T) {
 			expectedJoins: []Join{
 				{Type: "NATURAL", Left: "a", Right: "b", Condition: "NATURAL"},
 			},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
 			name:           "natural left join combines markers",
@@ -214,8 +246,9 @@ func TestSummarize(t *testing.T) {
 			expectedJoins: []Join{
 				{Type: "NATURAL LEFT", Left: "a", Right: "b", Condition: "NATURAL"},
 			},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
 			name:           "cross join has empty condition",
@@ -226,56 +259,225 @@ func TestSummarize(t *testing.T) {
 			expectedJoins: []Join{
 				{Type: "CROSS", Left: "a", Right: "b", Condition: ""},
 			},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			expectedAffected:   []string{},
+			expectedReferenced: []string{},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
 			// DELETE ... USING must collect both the target and the
 			// USING tables; otherwise change-impact analysis would
 			// silently drop the second table.
-			name:             "delete using collects both tables",
-			sql:              "DELETE FROM a USING b WHERE a.id=b.id",
-			expectedOp:       OpDelete,
-			expectedTables:   []string{"a", "b"},
-			expectedPreds:    []string{"a.id = b.id"},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "delete using collects both tables",
+			sql:                "DELETE FROM a USING b WHERE a.id=b.id",
+			expectedOp:         OpDelete,
+			expectedTables:     []string{"a", "b"},
+			expectedPreds:      []string{"a.id = b.id"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"a.id", "b.id"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
-			name:             "update from collects both tables",
-			sql:              "UPDATE a SET x=b.y FROM b WHERE a.id=b.id",
-			expectedOp:       OpUpdate,
-			expectedTables:   []string{"a", "b"},
-			expectedPreds:    []string{"a.id = b.id"},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{"x"},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "update from collects both tables",
+			sql:                "UPDATE a SET x=b.y FROM b WHERE a.id=b.id",
+			expectedOp:         OpUpdate,
+			expectedTables:     []string{"a", "b"},
+			expectedPreds:      []string{"a.id = b.id"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"x"},
+			expectedReferenced: []string{"b.y", "a.id", "b.id", "x"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
 			// Only the bare UPSERT keyword is OpUpsert; the explicit
 			// ON CONFLICT DO UPDATE form stays as OpInsert because
 			// OnConflict.IsUpsertAlias() distinguishes them.
-			name:             "explicit on conflict do update stays as insert",
-			sql:              "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) DO UPDATE SET a=2",
-			expectedOp:       OpInsert,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{"a"},
-			expectedRisk:     risk.SeverityInfo,
+			//
+			// affected_columns dedupes the insert column 'a' against
+			// the DO UPDATE SET LHS 'a'; referenced_columns picks up
+			// the arbiter column 'a' from the OnConflict walker.
+			name:               "explicit on conflict do update stays as insert",
+			sql:                "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) DO UPDATE SET a=2",
+			expectedOp:         OpInsert,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"a"},
+			expectedReferenced: []string{"a"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 		{
 			// Tuple SET targets flatten into individual column names
 			// per updateTargets's documented contract.
-			name:             "tuple update flattens to individual columns",
-			sql:              "UPDATE t SET (a,b)=(1,2) WHERE id=3",
-			expectedOp:       OpUpdate,
-			expectedTables:   []string{"t"},
-			expectedPreds:    []string{"id = 3"},
-			expectedJoins:    []Join{},
-			expectedAffected: []string{"a", "b"},
-			expectedRisk:     risk.SeverityInfo,
+			name:               "tuple update flattens to individual columns",
+			sql:                "UPDATE t SET (a,b)=(1,2) WHERE id=3",
+			expectedOp:         OpUpdate,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{"id = 3"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"a", "b"},
+			expectedReferenced: []string{"id", "a", "b"},
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// Issue #100 demo: explicit projection plus WHERE
+			// predicates roll up into referenced_columns in source
+			// order.
+			name:               "issue demo: select projection plus WHERE",
+			sql:                "SELECT a, b FROM t WHERE c = 1 AND d > 2",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{"c = 1", "d > 2"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"a", "b", "c", "d"},
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// Function-argument stars (count(*)) MUST NOT trigger
+			// select_star: they don't introduce an unenumerated column
+			// footprint; they count rows. GROUP BY / HAVING / ORDER
+			// BY positions all contribute to referenced_columns.
+			name:               "group by having order by reach referenced",
+			sql:                "SELECT count(*) FROM t GROUP BY g HAVING count(*) > 1 ORDER BY g",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"g"},
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// CTE bodies contribute their refs but the CTE alias name
+			// itself does not appear as a column.
+			name:               "CTE body refs roll up",
+			sql:                "WITH x AS (SELECT a FROM t WHERE b=1) SELECT a FROM x",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"a", "b"},
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// Correlated EXISTS subquery: outer t.a is read inside the
+			// inner WHERE; the outer projection adds the bare 'a'. The
+			// qualifier stays as the user wrote it.
+			name:               "correlated subquery refs",
+			sql:                "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM o WHERE o.x = t.a)",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"o", "t"},
+			expectedPreds:      []string{"EXISTS (SELECT 1 FROM o WHERE o.x = t.a)"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"a", "o.x", "t.a"},
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// INSERT ... SELECT: the source SELECT contributes its
+			// own projection and predicate refs; the destination
+			// column list is unioned in via the affected→referenced
+			// merge.
+			name:               "insert select unions source and target columns",
+			sql:                "INSERT INTO t (a, b) SELECT x, y FROM src WHERE z = 1",
+			expectedOp:         OpInsert,
+			expectedTables:     []string{"t", "src"},
+			expectedPreds:      []string{"z = 1"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"a", "b"},
+			expectedReferenced: []string{"x", "y", "z", "a", "b"},
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// Qualified t.* sets select_star just like a bare *;
+			// agents must not assume the column footprint is complete.
+			name:               "qualified star sets select_star",
+			sql:                "SELECT t.* FROM t WHERE c = 1",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{"c = 1"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"c"},
+			expectedSelectStar: true,
+			// t.* raises the same SELECT-star risk as a bare *.
+			expectedRisk: risk.SeverityLow,
+		},
+		{
+			// Case-folded dedup with first-seen casing wins. The
+			// parser lowercases unquoted identifiers, so quoted
+			// "ID" surfaces as "ID" and bare id surfaces as "id".
+			// Their lowercased dedup key is the same ("id"), so the
+			// first form ("ID") is kept and the later bare "id" is
+			// dropped. Same pattern for "Foo" vs foo.
+			name:               "case insensitive dedup keeps first casing",
+			sql:                `SELECT "ID", id, "Foo", foo FROM t`,
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"ID", "Foo"},
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// RETURNING is walked by the upstream parser; lock in
+			// that its expressions contribute to referenced_columns.
+			name:               "RETURNING expressions reach referenced",
+			sql:                "UPDATE t SET a=1 WHERE id=2 RETURNING a, t.b",
+			expectedOp:         OpUpdate,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{"id = 2"},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"a"},
+			expectedReferenced: []string{"id", "a", "t.b"},
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// Top-level UNION with one branch projecting * must set
+			// select_star; both branches' projections are part of
+			// the result shape.
+			//
+			// The risk registry inspects the top-level statement
+			// shape (SetOp, not a bare SELECT), so its SELECT-*
+			// rule does not fire here even though a star is
+			// present. summarize's select_star captures what the
+			// risk rule misses.
+			name:               "union branch with star sets select_star",
+			sql:                "SELECT * FROM t UNION SELECT b FROM u",
+			expectedOp:         OpSelect,
+			expectedTables:     []string{"t", "u"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{},
+			expectedReferenced: []string{"b"},
+			expectedSelectStar: true,
+			expectedRisk:       risk.SeverityInfo,
+		},
+		{
+			// ON CONFLICT DO UPDATE: the parser walks the body's
+			// Expr-typed parts (RHS expressions, UPDATE WHERE) when
+			// passed an ExtendedVisitor, so excluded.x and t.id
+			// surface first. addOnConflictNameLists then appends
+			// the arbiter cols (a) and SET LHS (b) — both NameList
+			// values that no Expr walker can reach.
+			//
+			// "excluded" is the conflict-row pseudo-table — it
+			// surfaces only as a qualifier on column refs, never as
+			// a real TableExpr, so it does not appear in tables.
+			// affected_columns includes both the insert column "a"
+			// and the DO UPDATE SET target "b".
+			name:               "on conflict do update body refs surface",
+			sql:                "INSERT INTO t (a) VALUES (1) ON CONFLICT (a) DO UPDATE SET b = excluded.x WHERE t.id = 5",
+			expectedOp:         OpInsert,
+			expectedTables:     []string{"t"},
+			expectedPreds:      []string{},
+			expectedJoins:      []Join{},
+			expectedAffected:   []string{"a", "b"},
+			expectedReferenced: []string{"excluded.x", "t.id", "a", "b"},
+			expectedRisk:       risk.SeverityInfo,
 		},
 	}
 
@@ -294,6 +496,8 @@ func TestSummarize(t *testing.T) {
 			require.Equal(t, tc.expectedPreds, s.Predicates)
 			require.Equal(t, tc.expectedJoins, s.Joins)
 			require.Equal(t, tc.expectedAffected, s.AffectedColumns)
+			require.Equal(t, tc.expectedReferenced, s.ReferencedColumns)
+			require.Equal(t, tc.expectedSelectStar, s.SelectStar)
 			require.Equal(t, tc.expectedRisk, s.RiskLevel)
 		})
 	}

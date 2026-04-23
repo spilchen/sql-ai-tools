@@ -54,25 +54,41 @@ const (
 // field and any future MCP tool result.
 //
 // Field discipline:
-//   - Tables, Predicates, Joins, AffectedColumns are emitted as empty
-//     JSON arrays rather than null when there are no entries, so
-//     consumers can iterate without nil checks.
-//   - AffectedColumns contains only columns mutated by DML (INSERT
-//     explicit column list, UPDATE SET targets). It is empty for
-//     DELETE and SELECT. See issue #100 for tracking expansion to
-//     all referenced columns.
+//   - Tables, Predicates, Joins, AffectedColumns, ReferencedColumns
+//     are emitted as empty JSON arrays rather than null when there
+//     are no entries, so consumers can iterate without nil checks.
+//   - AffectedColumns contains only columns mutated by DML: the
+//     INSERT explicit column list, the UPDATE SET targets, and (for
+//     INSERT ... ON CONFLICT DO UPDATE) the conflict-resolution
+//     SET targets. It is empty for DELETE and SELECT.
+//   - ReferencedColumns is the full read-and-write footprint: every
+//     column the statement names in any expression position (SELECT
+//     projection, WHERE, JOIN ON, GROUP BY, HAVING, ORDER BY,
+//     RETURNING, ON CONFLICT body, plus subquery and CTE bodies)
+//     unioned with AffectedColumns. It is therefore a superset of
+//     AffectedColumns whenever any mutated columns are known.
+//     Known gap: JOIN USING (col) names are stored as a NameList,
+//     not an Expr, and are not surfaced.
+//   - SelectStar is true when the statement's outermost projection
+//     uses "*" or "t.*" (and for INSERT ... SELECT, when the embedded
+//     SELECT does). When set, ReferencedColumns is a lower bound:
+//     summarize never expands a star against a catalog because it has
+//     no schema. Function-argument stars like count(*) do not set
+//     this flag — they don't introduce an unenumerated footprint.
 //   - RiskLevel is the highest severity reported by risk.Analyze for
 //     the statement; risk.SeverityInfo is the baseline meaning "no
 //     risks detected", not "an info-level risk was detected".
 type Summary struct {
-	Operation       Operation     `json:"operation"`
-	Tag             string        `json:"tag"`
-	Tables          []string      `json:"tables"`
-	Predicates      []string      `json:"predicates"`
-	Joins           []Join        `json:"joins"`
-	AffectedColumns []string      `json:"affected_columns"`
-	RiskLevel       risk.Severity `json:"risk_level"`
-	Position        risk.Position `json:"position"`
+	Operation         Operation     `json:"operation"`
+	Tag               string        `json:"tag"`
+	Tables            []string      `json:"tables"`
+	Predicates        []string      `json:"predicates"`
+	Joins             []Join        `json:"joins"`
+	AffectedColumns   []string      `json:"affected_columns"`
+	ReferencedColumns []string      `json:"referenced_columns"`
+	SelectStar        bool          `json:"select_star"`
+	RiskLevel         risk.Severity `json:"risk_level"`
+	Position          risk.Position `json:"position"`
 }
 
 // Join describes one JOIN clause inside a statement.
@@ -117,11 +133,12 @@ func Summarize(sql string) ([]Summary, error) {
 // entry point fills them in because both require the full SQL text.
 func summarizeStatement(stmt tree.Statement) Summary {
 	s := Summary{
-		Tag:             stmt.StatementTag(),
-		Tables:          collectTables(stmt),
-		Predicates:      []string{},
-		Joins:           []Join{},
-		AffectedColumns: []string{},
+		Tag:               stmt.StatementTag(),
+		Tables:            collectTables(stmt),
+		Predicates:        []string{},
+		Joins:             []Join{},
+		AffectedColumns:   []string{},
+		ReferencedColumns: []string{},
 	}
 
 	switch n := stmt.(type) {
@@ -135,7 +152,7 @@ func summarizeStatement(stmt tree.Statement) Summary {
 		} else {
 			s.Operation = OpInsert
 		}
-		s.AffectedColumns = nameListToStrings(n.Columns)
+		s.AffectedColumns = insertAffectedColumns(n)
 		// INSERT ... SELECT can have a WHERE inside the embedded
 		// SELECT; surface those predicates so agents see the full
 		// row-selection footprint.
@@ -155,7 +172,43 @@ func summarizeStatement(stmt tree.Statement) Summary {
 	default:
 		s.Operation = OpOther
 	}
+
+	// Read footprint is computed independently of the per-op switch
+	// above so the same walker handles SELECT/DML/CTEs uniformly.
+	// Mutated columns are then unioned in to preserve the documented
+	// "referenced ⊇ affected" invariant for INSERT/UPDATE.
+	s.ReferencedColumns = mergeColumns(collectReferences(stmt), s.AffectedColumns)
+	s.SelectStar = hasProjectionStar(stmt)
 	return s
+}
+
+// mergeColumns returns refs ∪ extras, preserving refs' order and
+// appending any extras not already present (case-insensitive). Both
+// slices are treated as immutable; the result is freshly allocated so
+// callers may store either input independently.
+func mergeColumns(refs, extras []string) []string {
+	if len(refs) == 0 && len(extras) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(refs)+len(extras))
+	seen := make(map[string]struct{}, len(refs)+len(extras))
+	for _, r := range refs {
+		key := strings.ToLower(r)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, r)
+	}
+	for _, e := range extras {
+		key := strings.ToLower(e)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, e)
+	}
+	return out
 }
 
 // selectWhere returns the WHERE clause attached to the leaf
@@ -214,6 +267,22 @@ func updateTargets(exprs tree.UpdateExprs) []string {
 		return []string{}
 	}
 	return out
+}
+
+// insertAffectedColumns returns the columns an INSERT statement
+// mutates: the explicit (col, col, …) list plus, for ON CONFLICT DO
+// UPDATE, the SET LHS columns of the conflict-resolution UPDATE.
+// ON CONFLICT DO NOTHING contributes nothing. Insert columns come
+// first (the row being inserted), then any DO UPDATE SET targets
+// not already listed; case-insensitive dedup keeps the per-column
+// shape stable when an INSERT and its ON CONFLICT body name the
+// same column.
+func insertAffectedColumns(n *tree.Insert) []string {
+	out := nameListToStrings(n.Columns)
+	if n.OnConflict == nil || n.OnConflict.DoNothing {
+		return out
+	}
+	return mergeColumns(out, updateTargets(n.OnConflict.Exprs))
 }
 
 // nameListToStrings is NameList.ToStrings normalized to never return
