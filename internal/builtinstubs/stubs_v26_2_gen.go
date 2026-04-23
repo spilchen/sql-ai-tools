@@ -7,24 +7,9 @@ import (
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/volatility"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/types"
-	"github.com/lib/pq/oid"
 )
 
-// Ensure imports are used.
-var (
-	_ = oid.T_bool
-	_ = types.Any
-	_ = volatility.Immutable
-	_ = tree.NormalClass
-)
-
-// oidTyp looks up a type by OID, returning types.Any for unknown OIDs.
-func oidTyp(o oid.Oid) *types.T {
-	if t, ok := types.OidToType[o]; ok {
-		return t
-	}
-	return types.Any
-}
+// oidTyp is shared across versions; see internal/builtinstubs/typehelpers.go.
 
 func registerV26_2() {
 	builtinsregistry.Register("_st_contains", &tree.FunctionProperties{
