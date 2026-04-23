@@ -18,14 +18,21 @@ import (
 // (otherwise the underlying EXPLAIN (DDL, SHAPE) would always error),
 // while OpExplain must reject it (because the inner statement of plain
 // EXPLAIN is what defines the read/write character of the call).
+// OpSimulate dispatches each statement through a non-executing EXPLAIN
+// flavour, so it admits DDL/DML/SELECT under read_only without ever
+// reaching cluster execution. OpExecute, in contrast, admits the
+// read-only set under read_only, adds DML under safe_write, and
+// admits anything that parses under full_access — the full per-mode
+// matrix in the design doc.
 type Operation int
 
-// Operation values. New surfaces (e.g. an eventual OpExecute for
-// issue #29) extend this enum; the existing rules stay untouched.
+// Operation values. New surfaces extend this enum; the existing rules
+// stay untouched.
 const (
 	OpExplain Operation = iota + 1
 	OpExplainDDL
 	OpSimulate
+	OpExecute
 )
 
 // String returns the wire-stable token for op. Used in violation
@@ -38,10 +45,76 @@ func (op Operation) String() string {
 		return "explain_ddl"
 	case OpSimulate:
 		return "simulate"
+	case OpExecute:
+		return "execute"
 	default:
 		return "unknown"
 	}
 }
+
+// ViolationKind labels the structural reason a statement was
+// rejected, separate from the human-readable Reason text. Code that
+// needs to act on the rejection (e.g. envelope.suggestionsFor picking
+// the smallest mode that would admit the call) branches on Kind so
+// the decision is not coupled to specific Reason wording.
+type ViolationKind int
+
+// ViolationKind values. Start at one so the zero value is invalid;
+// Check always sets a meaningful kind on every Violation it produces.
+const (
+	// KindOther covers rejections that do not need fine-grained
+	// classification — currently the empty-input defensive case, the
+	// unknown-mode programmer-error case, and the unknown-Operation
+	// programmer-error case in classifyReadOnly. None can be
+	// unblocked by escalating mode, so suggestionsFor emits no
+	// escalation hint for them.
+	KindOther ViolationKind = iota + 1
+
+	// KindWrite labels statements rejected because they would mutate
+	// data (INSERT/UPDATE/UPSERT/DELETE/TRUNCATE). Escalating to
+	// safe_write unblocks these.
+	KindWrite
+
+	// KindSchema labels statements rejected because they would
+	// mutate schema (CREATE/ALTER/DROP). Escalating to full_access
+	// unblocks these — safe_write does not.
+	KindSchema
+
+	// KindPrivilege labels privilege and identity statements
+	// (GRANT/REVOKE, CREATE/DROP/ALTER ROLE, ownership and default-
+	// privilege changes). The classic SQL Data Control Language set.
+	// Escalating to full_access unblocks these — safe_write rejects
+	// privilege management even though the parser also tags GRANT
+	// and friends as schema-modifying.
+	KindPrivilege
+
+	// KindClusterAdmin labels statements that the parser also tags
+	// TypeDCL but that aren't privilege/role changes — cluster
+	// configuration (SET CLUSTER SETTING, SET TRACING), zone
+	// configuration (ALTER ... CONFIGURE ZONE), and tenant lifecycle
+	// (CREATE/DROP/ALTER TENANT). Treated as a separate Kind from
+	// KindPrivilege so the rejection Reason names what the user is
+	// actually doing rather than misleading them about a privilege
+	// change. Escalates to full_access.
+	KindClusterAdmin
+
+	// KindNestedExplain labels EXPLAIN/EXPLAIN ANALYZE wrappers
+	// rejected to prevent the inner statement from sneaking past
+	// CanWriteData / CanModifySchema. Mode escalation does not help
+	// — the user must pass the inner statement directly.
+	KindNestedExplain
+
+	// KindUnimplemented labels (mode, op) pairs that the package
+	// recognises at the flag layer but does not yet wire (today:
+	// safe_write/full_access for OpExplain/OpExplainDDL). The fix is
+	// for the upstream feature to land, not for the user to escalate.
+	KindUnimplemented
+
+	// KindBadOpInput labels rejections caused by the user passing the
+	// wrong shape of input for the operation — currently only
+	// non-DDL statements to OpExplainDDL.
+	KindBadOpInput
+)
 
 // Violation is the structured payload returned by Check when a
 // statement is rejected. It carries everything an agent (or the
@@ -53,13 +126,14 @@ func (op Operation) String() string {
 type Violation struct {
 	// Tag is the cockroachdb-parser StatementTag for the offending
 	// statement (e.g. "DROP TABLE", "INSERT", "SELECT"). Stable across
-	// CRDB versions for any given statement type.
+	// CRDB versions for any given statement type. Empty for the
+	// empty-input defensive case (no statement to tag).
 	Tag string
 
 	// Reason is a short human-readable explanation of why the
 	// statement was rejected (e.g. "writes data", "modifies schema",
 	// "expected DDL"). Embedded into the rendered Message; agents
-	// should branch on Mode/Operation/Tag rather than Reason.
+	// should branch on Kind/Mode/Operation/Tag rather than Reason.
 	Reason string
 
 	// Mode is the safety mode that was in effect when the violation
@@ -71,6 +145,12 @@ type Violation struct {
 	// agents distinguish "explain rejected DROP TABLE" from
 	// "explain-ddl rejected SELECT", which point at different fixes.
 	Op Operation
+
+	// Kind is the structural reason for the rejection. Used by
+	// envelope.suggestionsFor to pick the smallest mode escalation
+	// that would admit the call (or to skip the suggestion entirely
+	// when no escalation helps).
+	Kind ViolationKind
 }
 
 // Check parses sql and decides whether every statement in it is
@@ -112,10 +192,14 @@ func Check(mode Mode, op Operation, sql string) (*Violation, error) {
 		// the safety package's contract is "the single decision point"
 		// — keep the gate self-contained so a future caller that
 		// bypasses sqlinput cannot pass an empty batch through.
+		// Tag is the literal "EMPTY" sentinel so formatMessage doesn't
+		// render a stray empty parens cell ("(, mode=…, op=…)").
 		return &Violation{
+			Tag:    "EMPTY",
 			Reason: "no statements parsed",
 			Mode:   mode,
 			Op:     op,
+			Kind:   KindOther,
 		}, nil
 	}
 	for _, s := range stmts {
@@ -130,22 +214,29 @@ func Check(mode Mode, op Operation, sql string) (*Violation, error) {
 // Returns nil when the statement is permitted; a populated *Violation
 // otherwise. Pulled out of Check so the per-statement decision tree
 // stays readable as new (mode, op) combinations are added.
+//
+// Mode coverage is intentionally scoped per Operation:
+//
+//   - read_only is wired for every Op via classifyReadOnly.
+//   - safe_write and full_access are wired only for OpExecute (issue
+//     #29). OpExplain, OpExplainDDL, and OpSimulate in those modes
+//     still return the "not yet implemented" violation; wiring them
+//     is follow-up work so the other surfaces' mode story stays
+//     stable while exec adopts the full safety model.
 func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 	switch mode {
 	case ModeReadOnly:
 		return classifyReadOnly(op, stmt)
-	case ModeSafeWrite, ModeFullAccess:
-		// Modes are recognised at the flag layer (so the CLI accepts
-		// --mode=safe_write today without a "bad value" error), but
-		// no statement is admitted until issue #29 wires the
-		// per-mode rules. Returning a violation here keeps the
-		// rejection path uniform with read_only.
-		return &Violation{
-			Tag:    stmt.StatementTag(),
-			Reason: fmt.Sprintf("safety mode %q is not yet implemented", mode),
-			Mode:   mode,
-			Op:     op,
+	case ModeSafeWrite:
+		if op == OpExecute {
+			return classifySafeWriteExecute(stmt)
 		}
+		return notYetImplemented(mode, op, stmt)
+	case ModeFullAccess:
+		if op == OpExecute {
+			return classifyFullAccessExecute(stmt)
+		}
+		return notYetImplemented(mode, op, stmt)
 	default:
 		// Defensive: ParseMode should have rejected this earlier.
 		// Treat as a violation rather than admitting unknown modes.
@@ -154,7 +245,21 @@ func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 			Reason: fmt.Sprintf("unknown safety mode %q", mode),
 			Mode:   mode,
 			Op:     op,
+			Kind:   KindOther,
 		}
+	}
+}
+
+// notYetImplemented builds the placeholder violation returned for
+// (mode, op) pairs that ParseMode admits but Check does not yet wire.
+// Centralised so the message text stays consistent across surfaces.
+func notYetImplemented(mode Mode, op Operation, stmt tree.Statement) *Violation {
+	return &Violation{
+		Tag:    stmt.StatementTag(),
+		Reason: fmt.Sprintf("safety mode %q is not yet implemented", mode),
+		Mode:   mode,
+		Op:     op,
+		Kind:   KindUnimplemented,
 	}
 }
 
@@ -178,23 +283,19 @@ func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 //     user error. But because read_only mode is meant to forbid all
 //     schema modification, we reject DDL too — leaving OpExplainDDL
 //     effectively unusable in read_only mode. Users must escalate to
-//     safe_write or full_access (issue #29) to use explain-ddl.
-//     The reason text names the escalation path so the rejection is
-//     actionable.
-//
-//   - OpSimulate dispatches per-statement to a non-executing EXPLAIN
-//     flavor (EXPLAIN ANALYZE for SELECT, plain EXPLAIN for DML
-//     writes, EXPLAIN (DDL, SHAPE) for DDL). Because the dispatcher
-//     never executes the inner write or DDL at the cluster level,
-//     read_only mode admits every dispatched class — SELECT, DML
-//     writes, and DDL alike — and only rejects shapes the dispatcher
-//     has no route for: nested EXPLAIN (defense in depth, mirroring
-//     OpExplain), TCL (BEGIN/COMMIT/ROLLBACK have no EXPLAIN form),
-//     and DCL (GRANT/REVOKE, out of scope for the dispatcher).
+//     safe_write or full_access to use explain-ddl. The reason text
+//     names the escalation path so the rejection is actionable.
 func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 	tag := stmt.StatementTag()
 	switch op {
-	case OpExplain:
+	case OpExplain, OpExecute:
+		// OpExplain wraps the inner stmt in `EXPLAIN <stmt>` and
+		// OpExecute runs it directly; both share the same read-only
+		// admission set because either path that touches a write would
+		// violate the read_only contract (EXPLAIN doesn't execute, but
+		// nested EXPLAIN ANALYZE wrappers do — and OpExecute's runtime
+		// is the very thing we're gating).
+		//
 		// Reject nested EXPLAIN wrappers explicitly. The inner stmt of
 		// an *Explain or *ExplainAnalyze node is not classified by
 		// tree.CanWriteData/CanModifySchema, so without this branch a
@@ -210,6 +311,48 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 				Reason: "nested EXPLAIN is not permitted; pass the inner statement directly",
 				Mode:   ModeReadOnly,
 				Op:     op,
+				Kind:   KindNestedExplain,
+			}
+		}
+		// Order matters: a statement can satisfy more than one of
+		// these predicates, and the Kind we tag determines which
+		// escalation suggestion the envelope emits. Picking the
+		// *most-permissive-needed* mode keeps an agent from looping
+		// through retries on a mode that would also reject the
+		// statement.
+		//
+		// CRDB overloads TypeDCL beyond the SQL-standard "Data Control
+		// Language" definition — it covers GRANT/REVOKE/role
+		// management AND cluster configuration AND tenant lifecycle.
+		// We split the two so the rejection Reason matches what the
+		// user is actually doing. classifyDCL routes both cases.
+		//
+		// Empirical predicate matrix (verified against
+		// cockroachdb-parser v0.26.2):
+		//
+		//   GRANT/REVOKE/role mgmt
+		//                     : DCL + schema + write   → KindPrivilege    → full_access
+		//   SET CLUSTER SETTING / SET TRACING
+		//                     : DCL + write            → KindClusterAdmin → full_access
+		//   ALTER ... CONFIGURE ZONE
+		//                     : DCL + schema + write   → KindClusterAdmin → full_access
+		//   CREATE/DROP/ALTER TENANT *
+		//                     : DCL + write            → KindClusterAdmin → full_access
+		//   CREATE/DROP/ALTER TABLE etc.
+		//                     : DDL + schema           → KindSchema       → full_access
+		//   TRUNCATE          : DDL + schema + write   → KindSchema       → full_access
+		//   INSERT/UPDATE/DELETE/UPSERT
+		//                     : DML + write            → KindWrite        → safe_write
+		if v := classifyDCL(stmt, tag, ModeReadOnly, op); v != nil {
+			return v
+		}
+		if tree.CanModifySchema(stmt) {
+			return &Violation{
+				Tag:    tag,
+				Reason: "statement modifies schema; read_only mode forbids it",
+				Mode:   ModeReadOnly,
+				Op:     op,
+				Kind:   KindSchema,
 			}
 		}
 		if tree.CanWriteData(stmt) {
@@ -218,14 +361,7 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 				Reason: "statement writes data; read_only mode forbids it",
 				Mode:   ModeReadOnly,
 				Op:     op,
-			}
-		}
-		if tree.CanModifySchema(stmt) {
-			return &Violation{
-				Tag:    tag,
-				Reason: "statement modifies schema; read_only mode forbids it",
-				Mode:   ModeReadOnly,
-				Op:     op,
+				Kind:   KindWrite,
 			}
 		}
 		return nil
@@ -236,6 +372,7 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 				Reason: "explain_ddl requires a DDL statement",
 				Mode:   ModeReadOnly,
 				Op:     op,
+				Kind:   KindBadOpInput,
 			}
 		}
 		// Inner stmt is DDL, so it modifies schema. read_only mode
@@ -247,6 +384,7 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 			Reason: "explain_ddl modifies schema; rerun with --mode=safe_write or --mode=full_access",
 			Mode:   ModeReadOnly,
 			Op:     op,
+			Kind:   KindSchema,
 		}
 	case OpSimulate:
 		// Reject nested EXPLAIN wrappers explicitly. The dispatcher
@@ -263,6 +401,7 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 				Reason: "nested EXPLAIN is not permitted; pass the inner statement directly",
 				Mode:   ModeReadOnly,
 				Op:     op,
+				Kind:   KindNestedExplain,
 			}
 		}
 		switch stmt.StatementType() {
@@ -282,14 +421,159 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 				Reason: "simulate has no route for this statement type; only DDL, DML, and SELECT are supported",
 				Mode:   ModeReadOnly,
 				Op:     op,
+				Kind:   KindBadOpInput,
 			}
 		}
 	default:
 		return &Violation{
 			Tag:    tag,
-			Reason: fmt.Sprintf("unknown operation %v", op),
+			Reason: fmt.Sprintf("unknown operation %v (programmer error)", op),
 			Mode:   ModeReadOnly,
 			Op:     op,
+			Kind:   KindOther,
 		}
 	}
+}
+
+// classifySafeWriteExecute is the safe_write rule for OpExecute. It
+// admits the read_only set plus DML (INSERT/UPDATE/UPSERT/DELETE)
+// while still rejecting DDL and DCL.
+//
+//   - DDL: schema mutation is reserved for full_access. The reason
+//     names the escalation path so the rejection is actionable.
+//   - DCL: GRANT/REVOKE escape sql_safe_updates and can hand out
+//     privileges that outlive the session, so they require the
+//     explicit full_access opt-in.
+//
+// Defense-in-depth: Manager.Execute additionally sets
+// `SET LOCAL sql_safe_updates = on` for safe_write so the cluster
+// rejects unqualified UPDATE/DELETE at runtime, even though the AST
+// allowlist admits them in principle.
+func classifySafeWriteExecute(stmt tree.Statement) *Violation {
+	tag := stmt.StatementTag()
+	switch stmt.(type) {
+	case *tree.Explain, *tree.ExplainAnalyze:
+		// Same defense-in-depth as classifyReadOnly: the inner stmt of
+		// an EXPLAIN node is invisible to CanWriteData/CanModifySchema,
+		// so a wrapper around DDL would otherwise sneak through here.
+		return &Violation{
+			Tag:    tag,
+			Reason: "nested EXPLAIN is not permitted; pass the inner statement directly",
+			Mode:   ModeSafeWrite,
+			Op:     OpExecute,
+			Kind:   KindNestedExplain,
+		}
+	}
+	// classifyDCL handles the TypeDCL surface (privilege/role +
+	// cluster admin) with mode-appropriate Reason text. Both Kinds
+	// it produces — KindPrivilege and KindClusterAdmin — escalate
+	// to full_access; safe_write rejects both even though the parser
+	// also tags GRANT and friends as schema-modifying.
+	if v := classifyDCL(stmt, tag, ModeSafeWrite, OpExecute); v != nil {
+		return v
+	}
+	if tree.CanModifySchema(stmt) {
+		return &Violation{
+			Tag:    tag,
+			Reason: "statement modifies schema; rerun with --mode=full_access",
+			Mode:   ModeSafeWrite,
+			Op:     OpExecute,
+			Kind:   KindSchema,
+		}
+	}
+	return nil
+}
+
+// classifyDCL produces the Violation for a TypeDCL statement, or nil
+// if stmt isn't TypeDCL. It splits CRDB's overloaded TypeDCL set
+// (privilege/role changes vs. cluster admin / tenant lifecycle) so
+// the rejection Reason names the actual operation domain.
+//
+// The Reason wording is mode-specific: read_only's "forbids it"
+// framing wouldn't make sense for safe_write (where the same
+// statement is also rejected, but the user has already opted into
+// some writes), so safe_write uses "rerun with --mode=full_access".
+func classifyDCL(stmt tree.Statement, tag string, mode Mode, op Operation) *Violation {
+	if stmt.StatementType() != tree.TypeDCL {
+		return nil
+	}
+	if isClusterAdminStmt(stmt) {
+		reason := clusterAdminReason(stmt, mode)
+		return &Violation{
+			Tag:    tag,
+			Reason: reason,
+			Mode:   mode,
+			Op:     op,
+			Kind:   KindClusterAdmin,
+		}
+	}
+	return &Violation{
+		Tag:    tag,
+		Reason: "privilege/role changes require --mode=full_access",
+		Mode:   mode,
+		Op:     op,
+		Kind:   KindPrivilege,
+	}
+}
+
+// isClusterAdminStmt reports whether stmt is one of the TypeDCL nodes
+// that isn't actually a privilege/role change. The set is enumerated
+// rather than described by a predicate because the parser exposes no
+// "is admin" classification — see cockroachdb-parser v0.26.2's
+// pkg/sql/sem/tree/stmt.go for the full TypeDCL inventory.
+//
+// Defaulting to "privilege" (rather than "admin") is intentional: if
+// a future CRDB version adds a new privilege-related TypeDCL node
+// without updating this list, the agent gets the right escalation
+// hint with a slightly less-specific Reason. If the new node is an
+// admin one, this list is the only place to update.
+func isClusterAdminStmt(stmt tree.Statement) bool {
+	switch stmt.(type) {
+	case *tree.SetZoneConfig,
+		*tree.SetClusterSetting, *tree.SetTracing,
+		*tree.CreateTenant, *tree.DropTenant,
+		*tree.AlterTenantSetClusterSetting, *tree.AlterTenantRename,
+		*tree.AlterTenantReset, *tree.AlterTenantService:
+		return true
+	}
+	return false
+}
+
+// clusterAdminReason returns the Reason text for a cluster-admin
+// rejection, tailored both to the mode (so the verbiage matches the
+// rest of the classifier) and to the operation domain so an agent
+// reading the envelope knows whether it's tweaking a zone, a cluster
+// setting, tracing, or a tenant.
+func clusterAdminReason(stmt tree.Statement, mode Mode) string {
+	suffix := "rerun with --mode=full_access"
+	if mode == ModeReadOnly {
+		suffix = "read_only mode forbids it"
+	}
+	switch stmt.(type) {
+	case *tree.SetZoneConfig:
+		return "zone configuration changes require full_access; " + suffix
+	case *tree.SetClusterSetting:
+		return "cluster setting changes require full_access; " + suffix
+	case *tree.SetTracing:
+		return "tracing changes require full_access; " + suffix
+	case *tree.CreateTenant, *tree.DropTenant,
+		*tree.AlterTenantSetClusterSetting, *tree.AlterTenantRename,
+		*tree.AlterTenantReset, *tree.AlterTenantService:
+		return "tenant management requires full_access; " + suffix
+	}
+	// Defensive fallback — isClusterAdminStmt returned true so the
+	// switch above should be exhaustive over the cluster-admin set;
+	// a generic message keeps the user unblocked if the two lists
+	// drift.
+	return "cluster administration requires full_access; " + suffix
+}
+
+// classifyFullAccessExecute is the full_access rule for OpExecute.
+// Per design doc §Safety Model, full_access admits anything that
+// parses; defense-in-depth comes from the statement timeout enforced
+// by Manager.Execute and (eventually) an audit log. Empty input is
+// already rejected upstream by Check's defensive guard, so we have no
+// special case to handle here.
+func classifyFullAccessExecute(_ tree.Statement) *Violation {
+	return nil
 }

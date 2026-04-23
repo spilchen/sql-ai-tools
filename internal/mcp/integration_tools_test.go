@@ -45,6 +45,7 @@ var expectedTools = []string{
 	tools.ExplainSQLToolName,
 	tools.ExplainSchemaChangeToolName,
 	tools.SimulateSQLToolName,
+	tools.ExecuteSQLToolName,
 	tools.ListTablesToolName,
 	tools.DescribeTableToolName,
 }
@@ -549,6 +550,35 @@ func TestIntegrationDescribeTableLive(t *testing.T) {
 		require.True(t, ok, "schemas context must be a JSON array")
 		require.ElementsMatch(t, []any{"app", "public"}, schemas)
 	})
+}
+
+// TestIntegrationExecuteSQL exercises the execute_sql Tier 3 tool
+// against a real cluster. Smoke-style: a SELECT round-trips through
+// the handler and lands rows in the envelope. Per-mode and edge-case
+// behaviour is covered by the conn-level integration tests; here we
+// just verify the MCP wiring reaches the cluster and returns a
+// well-formed envelope.
+func TestIntegrationExecuteSQL(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+	c := newMCPClient(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var req mcp.CallToolRequest
+	req.Params.Name = tools.ExecuteSQLToolName
+	req.Params.Arguments = map[string]any{
+		"sql": "SELECT 1 AS n",
+		"dsn": cluster.DSN,
+	}
+	res, err := c.CallTool(ctx, req)
+	require.NoError(t, err)
+
+	env := decodeEnvelope(t, res)
+	require.Equal(t, output.TierConnected, env.Tier)
+	require.Equal(t, output.ConnectionConnected, env.ConnectionStatus)
+	require.Empty(t, env.Errors, "SELECT 1 must succeed")
+	require.NotEmpty(t, env.Data, "execute_sql must populate data")
 }
 
 // TestIntegrationExplainSQL exercises the only Tier 3 tool. It is

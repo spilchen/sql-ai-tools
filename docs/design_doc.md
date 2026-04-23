@@ -424,9 +424,35 @@ Tools that require a higher capability tier return structured
 
 | Mode | Default | Allowed Statements | Guardrails |
 |------|---------|-------------------|------------|
-| `read_only` | Yes | SELECT, SHOW, EXPLAIN, SET (session only) | LIMIT injection, statement timeouts, read-only txn |
-| `safe_write` | No | Above + INSERT, UPDATE, DELETE | `sql_safe_updates` enabled, WHERE required for UPDATE/DELETE, row caps, confirmation hooks |
-| `full_access` | No | All | Warning on dangerous statements, audit log |
+| `read_only` | Yes | SELECT, SHOW, EXPLAIN, SET (session only) | LIMIT injection + row-scan truncation (`--max-rows`, default 1000), statement timeouts, read-only txn |
+| `safe_write` | No | Above + INSERT, UPDATE, DELETE, UPSERT | `SET LOCAL sql_safe_updates = on` (cluster rejects bare UPDATE/DELETE), row-scan truncation, statement timeouts |
+| `full_access` | No | Anything that parses (DDL, DCL, etc.) | Row-scan truncation, statement timeouts (audit log planned) |
+
+Mode wiring per Tier 3 surface (issue #29 lands `execute_sql`; the
+explain surfaces still report "not yet implemented" for `safe_write` /
+`full_access` — wiring them is follow-up work):
+
+| Tool                   | `read_only` | `safe_write` | `full_access` |
+|------------------------|-------------|--------------|---------------|
+| `execute_sql` / `exec` | ✅          | ✅           | ✅            |
+| `explain_sql`          | ✅          | ⏳           | ⏳            |
+| `explain_schema_change`| ✅          | ⏳           | ⏳            |
+
+**LIMIT injection** (read_only only): `safety.MaybeInjectLimit` parses
+the SQL and, when the input is a single bare `SELECT` whose result is
+unbounded (no existing `LIMIT`/`LIMIT ALL`), rewrites it to add
+`LIMIT <max-rows>` before the cluster call. A `SELECT … OFFSET N`
+without a LIMIT counts as unbounded — the rewriter preserves the
+OFFSET and adds the LIMIT. The rewritten cap is surfaced in the
+result envelope (`limit_injected`) so an agent can tell the cluster
+did not return all rows.
+
+**Row-scan truncation** (every mode): independent of injection,
+`Manager.Execute` stops scanning rows from the wire once the cap is
+hit and sets `truncated=true` in the envelope. The statement still
+runs to completion on the cluster (so DML side effects of `INSERT …
+RETURNING` are not undone), but the response payload is bounded.
+`--max-rows 0` disables both LIMIT injection and runtime truncation.
 
 **Defense-in-depth** (three independent layers):
 

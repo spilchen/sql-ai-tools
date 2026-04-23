@@ -9,12 +9,12 @@
 // tools (parse_sql, validate_sql, format_sql, detect_risky_query,
 // summarize_sql), two Tier 2 catalog tools (list_tables,
 // describe_table) that operate on inline CREATE TABLE schemas, and
-// three Tier 3 connected tools (explain_sql, explain_schema_change,
-// simulate_sql) that run against a live cluster. validate_sql is
-// dual-tier: it runs Tier 1 by default and lifts to Tier 2 (name
-// resolution) when the caller supplies inline schemas. Keeping
-// construction pure (no transport, no I/O) lets the cmd layer pick
-// a transport — currently just stdio — and lets tests exercise
+// four Tier 3 connected tools (explain_sql, explain_schema_change,
+// simulate_sql, execute_sql) that run against a live cluster.
+// validate_sql is dual-tier: it runs Tier 1 by default and lifts to
+// Tier 2 (name resolution) when the caller supplies inline schemas.
+// Keeping construction pure (no transport, no I/O) lets the cmd layer
+// pick a transport — currently just stdio — and lets tests exercise
 // individual tool handlers directly.
 //
 // Versions are passed in by the caller rather than read from
@@ -78,6 +78,7 @@ func NewServer(crdbSQLVersion, parserVersion, defaultTargetVersion string) *serv
 	s.AddTool(tools.ExplainSQLTool(), tools.ExplainSQLHandler(parserVersion, defaultTargetVersion))
 	s.AddTool(tools.ExplainSchemaChangeTool(), tools.ExplainSchemaChangeHandler(parserVersion, defaultTargetVersion))
 	s.AddTool(tools.SimulateSQLTool(), tools.SimulateSQLHandler(parserVersion, defaultTargetVersion))
+	s.AddTool(tools.ExecuteSQLTool(), tools.ExecuteSQLHandler(parserVersion, defaultTargetVersion))
 	s.AddTool(tools.ListTablesTool(), tools.ListTablesHandler(parserVersion))
 	s.AddTool(tools.DescribeTableTool(), tools.DescribeTableHandler(parserVersion))
 	return s
