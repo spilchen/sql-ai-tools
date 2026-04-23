@@ -22,8 +22,8 @@ before:
 builds:
   # The unsuffixed `crdb-sql` is the latest-quarter binary — the
   # lazy-install path. Users who download just one file get this and the
-  # MaybeReexec router in main.go transparently delegates to a
-  # crdb-sql-vXXX sibling on --target-version. The builtQuarterStamp
+  # MaybeReexec router in cmd/crdb-sql/main.go transparently delegates
+  # to a crdb-sql-vXXX sibling on --target-version. The builtQuarterStamp
   # ldflag here MUST stay in lockstep with LATEST_QUARTER in the
   # Makefile; routing decisions hinge on it being correct.
   #
@@ -39,7 +39,7 @@ builds:
   # Then update build/parser-versions.yaml's quarters list and the
   # Makefile QUARTERS variable so `make build-all` picks it up.
   - id: crdb-sql
-    main: .
+    main: ./cmd/crdb-sql
     binary: crdb-sql
     env:
       - CGO_ENABLED=0

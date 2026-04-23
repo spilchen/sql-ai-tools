@@ -96,11 +96,11 @@ func TestIntegrationPingCmdJSON(t *testing.T) {
 
 // TestIntegrationPingCmdConnectionFailureText verifies the text-mode
 // error path. RenderError returns the underlying error unchanged in
-// text mode (see internal/output/render.go), so cobra/main.go own
-// the user-visible "Error: ..." print. The test pins two contracts:
-// (1) Execute returns a non-nil non-ErrRendered error carrying the
-// "connect to CockroachDB" prefix, and (2) stdout stays empty
-// because the success-path text writer was never invoked.
+// text mode (see internal/output/render.go), so cobra and
+// cmd/crdb-sql/main.go own the user-visible "Error: ..." print. The
+// test pins two contracts: (1) Execute returns a non-nil non-ErrRendered
+// error carrying the "connect to CockroachDB" prefix, and (2) stdout
+// stays empty because the success-path text writer was never invoked.
 func TestIntegrationPingCmdConnectionFailureText(t *testing.T) {
 	cluster := cockroachtest.Shared(t)
 	t.Setenv("CRDB_DSN", "")

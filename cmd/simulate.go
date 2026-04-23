@@ -135,8 +135,8 @@ are rejected before any cluster contact.`,
 			// which steps succeeded, not just a summary. Following
 			// the renderValidateFailure pattern in cmd/validate.go:
 			// append to env.Errors, render the body normally, then
-			// return ErrRendered so main.go signals failure without
-			// reprinting the error.
+			// return ErrRendered so cmd/crdb-sql/main.go signals failure
+			// without reprinting the error.
 			if entry, ok := simulateStepWarning(result); ok {
 				baseEnv.Errors = append(baseEnv.Errors, entry)
 				if err := r.Render(baseEnv, func(w io.Writer) error {

@@ -105,6 +105,21 @@ make build
 
 Produces `bin/crdb-sql`.
 
+Alternatively, install the latest-quarter binary directly with `go install`:
+
+```bash
+go install github.com/spilchen/sql-ai-tools/cmd/crdb-sql@latest
+crdb-sql version
+```
+
+`go install` produces only the unsuffixed `crdb-sql` (latest quarter)
+without the per-quarter `crdb-sql-vXXX` siblings shipped in the release
+archives. Passing `--target-version` for a different quarter without
+the matching sibling on `$PATH` is a hard error: `crdb-sql` prints a
+discovery hint to stderr and exits with status 2 (no silent fallback
+to the wrong parser). Install the matching `crdb-sql-vXXX` from a
+release archive when you need an older quarter.
+
 ### Run
 
 ```bash

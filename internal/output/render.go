@@ -93,10 +93,10 @@ func (r Renderer) Render(env Envelope, textFn func(io.Writer) error) error {
 
 // RenderError is the JSON-mode error path. It appends a single Error
 // describing failure to env, renders the envelope, and returns
-// ErrRendered so the caller (and main.go) know the failure has already
-// been surfaced as structured output and should not be reprinted to
-// stderr. In text mode it returns failure unchanged so cobra/main.go's
-// existing "Error: ..." path runs.
+// ErrRendered so the caller (and cmd/crdb-sql/main.go) know the
+// failure has already been surfaced as structured output and should
+// not be reprinted to stderr. In text mode it returns failure
+// unchanged so cobra's existing "Error: ..." path runs.
 //
 // The envelope's Data field is cleared because the partial result that
 // motivated env (parser version, connection status) is still meaningful
@@ -107,8 +107,8 @@ func (r Renderer) Render(env Envelope, textFn func(io.Writer) error) error {
 //
 // If marshalling the error envelope itself fails, both the original
 // failure and the marshal/write error are joined (via errors.Join) so
-// main.go's stderr fallback shows both causes. The joined error is NOT
-// wrapped in ErrRendered so main.go prints it.
+// cmd/crdb-sql/main.go's stderr fallback shows both causes. The joined
+// error is NOT wrapped in ErrRendered so cmd/crdb-sql/main.go prints it.
 //
 // EPIPE edge case: if the downstream consumer has already closed the
 // pipe, Render succeeds (EPIPE is suppressed) and RenderError returns
