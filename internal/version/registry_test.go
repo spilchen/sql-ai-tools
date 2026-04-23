@@ -42,6 +42,18 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "alter changefeed at", tag: FeatureAlterChangefeed, target: "22.1", expectedStatus: StatusSupported},
 		{name: "alter changefeed after", tag: FeatureAlterChangefeed, target: "22.2", expectedStatus: StatusSupported},
 
+		{name: "triggers before", tag: FeatureTriggers, target: "24.2", expectedStatus: StatusNotYetIntroduced},
+		{name: "triggers at", tag: FeatureTriggers, target: "24.3", expectedStatus: StatusSupported},
+		{name: "triggers after", tag: FeatureTriggers, target: "25.1", expectedStatus: StatusSupported},
+
+		{name: "show ldr jobs before", tag: FeatureShowLogicalReplicationJobs, target: "24.2", expectedStatus: StatusNotYetIntroduced},
+		{name: "show ldr jobs at", tag: FeatureShowLogicalReplicationJobs, target: "24.3", expectedStatus: StatusSupported},
+		{name: "show ldr jobs after", tag: FeatureShowLogicalReplicationJobs, target: "25.1", expectedStatus: StatusSupported},
+
+		{name: "ldr skip schema check before", tag: FeatureLDRSkipSchemaCheck, target: "24.2", expectedStatus: StatusNotYetIntroduced},
+		{name: "ldr skip schema check at", tag: FeatureLDRSkipSchemaCheck, target: "24.3", expectedStatus: StatusSupported},
+		{name: "ldr skip schema check after", tag: FeatureLDRSkipSchemaCheck, target: "25.1", expectedStatus: StatusSupported},
+
 		{name: "cross-major: target predates oldest seed", tag: FeaturePLpgSQLFunctionBody, target: "19.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "cross-major: target newer than newest seed", tag: FeaturePLpgSQLFunctionBody, target: "26.2", expectedStatus: StatusSupported},
 	}
@@ -116,6 +128,9 @@ func TestExportedConstantsAreRegistered(t *testing.T) {
 		FeatureTrigramIndex,
 		FeatureRegionalByRow,
 		FeatureAlterChangefeed,
+		FeatureTriggers,
+		FeatureShowLogicalReplicationJobs,
+		FeatureLDRSkipSchemaCheck,
 	} {
 		_, ok := reg.Lookup(tag)
 		require.Truef(t, ok, "constant %q is not registered in DefaultRegistry", tag)
