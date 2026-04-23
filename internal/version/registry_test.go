@@ -110,6 +110,26 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "grant revoke routines at", tag: FeatureGrantRevokeRoutines, target: "25.3", expectedStatus: StatusSupported},
 		{name: "grant revoke routines after", tag: FeatureGrantRevokeRoutines, target: "25.4", expectedStatus: StatusSupported},
 
+		{name: "inspect before", tag: FeatureInspectCommand, target: "25.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "inspect at", tag: FeatureInspectCommand, target: "25.4", expectedStatus: StatusSupported},
+		{name: "inspect after", tag: FeatureInspectCommand, target: "26.1", expectedStatus: StatusSupported},
+
+		{name: "show inspect errors before", tag: FeatureShowInspectErrors, target: "25.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "show inspect errors at", tag: FeatureShowInspectErrors, target: "25.4", expectedStatus: StatusSupported},
+		{name: "show inspect errors after", tag: FeatureShowInspectErrors, target: "26.1", expectedStatus: StatusSupported},
+
+		{name: "ltree type before", tag: FeatureLTreeType, target: "25.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "ltree type at", tag: FeatureLTreeType, target: "25.4", expectedStatus: StatusSupported},
+		{name: "ltree type after", tag: FeatureLTreeType, target: "26.1", expectedStatus: StatusSupported},
+
+		{name: "db changefeed before", tag: FeatureChangefeedDatabaseLevel, target: "25.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "db changefeed at", tag: FeatureChangefeedDatabaseLevel, target: "25.4", expectedStatus: StatusSupported},
+		{name: "db changefeed after", tag: FeatureChangefeedDatabaseLevel, target: "26.1", expectedStatus: StatusSupported},
+
+		{name: "alter external conn before", tag: FeatureAlterExternalConnection, target: "25.3", expectedStatus: StatusNotYetIntroduced},
+		{name: "alter external conn at", tag: FeatureAlterExternalConnection, target: "25.4", expectedStatus: StatusSupported},
+		{name: "alter external conn after", tag: FeatureAlterExternalConnection, target: "26.1", expectedStatus: StatusSupported},
+
 		{name: "cross-major: target predates oldest seed", tag: FeaturePLpgSQLFunctionBody, target: "19.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "cross-major: target newer than newest seed", tag: FeaturePLpgSQLFunctionBody, target: "26.2", expectedStatus: StatusSupported},
 	}
@@ -201,6 +221,11 @@ func TestExportedConstantsAreRegistered(t *testing.T) {
 		FeatureShowCreateAllRoutines,
 		FeatureAlterTableLoggedToggle,
 		FeatureGrantRevokeRoutines,
+		FeatureInspectCommand,
+		FeatureShowInspectErrors,
+		FeatureLTreeType,
+		FeatureChangefeedDatabaseLevel,
+		FeatureAlterExternalConnection,
 	} {
 		_, ok := reg.Lookup(tag)
 		require.Truef(t, ok, "constant %q is not registered in DefaultRegistry", tag)
