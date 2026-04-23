@@ -5,9 +5,11 @@
 
 // Package tools provides MCP tool handler constructors for the SQL
 // tools. The Tier 1 (zero-config) tools are parse_sql, validate_sql,
-// format_sql, and detect_risky_query; explain_sql is the only Tier 3
-// (connected) tool, requiring a per-call DSN since the MCP server holds
-// no per-session connection state.
+// format_sql, detect_risky_query, and summarize_sql; the Tier 2
+// (schema_file) tools are list_tables and describe_table; the Tier 3
+// (connected) tools are explain_sql and explain_schema_change, which
+// require a per-call DSN since the MCP server holds no per-session
+// connection state.
 //
 // Each handler returns the same output.Envelope JSON shape that the CLI
 // emits under --output=json, so MCP clients get structured errors,
@@ -36,6 +38,7 @@ const (
 	ValidateSQLToolName         = "validate_sql"
 	FormatSQLToolName           = "format_sql"
 	DetectRiskyQueryToolName    = "detect_risky_query"
+	SummarizeSQLToolName        = "summarize_sql"
 	ExplainSQLToolName          = "explain_sql"
 	ExplainSchemaChangeToolName = "explain_schema_change"
 	ListTablesToolName          = "list_tables"
@@ -77,8 +80,8 @@ func extractRequiredString(req mcp.CallToolRequest, name string) (string, *mcp.C
 }
 
 // extractSQL is a thin convenience wrapper around extractRequiredString
-// for the common "sql" parameter, kept so the four SQL-only handlers
-// (parse, validate, format, risk) stay terse.
+// for the common "sql" parameter, kept so the SQL-input handlers stay
+// terse.
 func extractSQL(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
 	return extractRequiredString(req, "sql")
 }
