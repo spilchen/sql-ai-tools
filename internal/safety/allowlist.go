@@ -327,6 +327,13 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 		// We split the two so the rejection Reason matches what the
 		// user is actually doing. classifyDCL routes both cases.
 		//
+		// Three tenant lifecycle nodes — AlterTenantCapability,
+		// AlterTenantReplication, CreateTenantFromReplication — are
+		// tagged TypeDML rather than TypeDCL upstream. That's an
+		// upstream classification quirk, not a deliberate policy
+		// signal, so we route them through isTenantMgmtDMLStmt to
+		// land in the cluster-admin gate alongside their DCL siblings.
+		//
 		// Empirical predicate matrix (verified against
 		// cockroachdb-parser v0.26.2):
 		//
@@ -338,6 +345,11 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 		//                     : DCL + schema + write   → KindClusterAdmin → full_access
 		//   CREATE/DROP/ALTER TENANT *
 		//                     : DCL + write            → KindClusterAdmin → full_access
+		//   ALTER VIRTUAL CLUSTER CAPABILITY
+		//                     : DML                    → KindClusterAdmin → full_access
+		//   ALTER VIRTUAL CLUSTER REPLICATION,
+		//   CREATE VIRTUAL CLUSTER FROM REPLICATION
+		//                     : DML + write            → KindClusterAdmin → full_access
 		//   CREATE/DROP/ALTER TABLE etc.
 		//                     : DDL + schema           → KindSchema       → full_access
 		//   TRUNCATE          : DDL + schema + write   → KindSchema       → full_access
@@ -345,6 +357,25 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 		//                     : DML + write            → KindWrite        → safe_write
 		if v := classifyDCL(stmt, tag, ModeReadOnly, op); v != nil {
 			return v
+		}
+		// Tenant lifecycle nodes the parser tags TypeDML rather than
+		// TypeDCL belong with the cluster-admin family, not the
+		// generic write/schema branches below. Without this guard,
+		// AlterTenantCapability — for which the parser marks neither
+		// CanWriteData nor CanModifySchema — would slip past every
+		// remaining check and be silently admitted under read_only.
+		// AlterTenantReplication and CreateTenantFromReplication do
+		// have CanWriteData=true, so they would still be rejected by
+		// the branch below, but as KindWrite — pointing the agent at
+		// safe_write, which would also reject them.
+		if isTenantMgmtDMLStmt(stmt) {
+			return &Violation{
+				Tag:    tag,
+				Reason: clusterAdminReason(stmt, ModeReadOnly),
+				Mode:   ModeReadOnly,
+				Op:     op,
+				Kind:   KindClusterAdmin,
+			}
 		}
 		if tree.CanModifySchema(stmt) {
 			return &Violation{
@@ -472,6 +503,23 @@ func classifySafeWriteExecute(stmt tree.Statement) *Violation {
 	if v := classifyDCL(stmt, tag, ModeSafeWrite, OpExecute); v != nil {
 		return v
 	}
+	// Tenant lifecycle DML nodes (see isTenantMgmtDMLStmt) require
+	// full_access for the same reason their DCL siblings do — they
+	// reshape cluster-level tenant state, not row data. Without this
+	// guard, AlterTenantReplication and CreateTenantFromReplication
+	// would be admitted as ordinary CanWriteData=true statements
+	// (safe_write permits writes), and AlterTenantCapability — which
+	// the parser marks neither CanWriteData nor CanModifySchema —
+	// would fall through every remaining check.
+	if isTenantMgmtDMLStmt(stmt) {
+		return &Violation{
+			Tag:    tag,
+			Reason: clusterAdminReason(stmt, ModeSafeWrite),
+			Mode:   ModeSafeWrite,
+			Op:     OpExecute,
+			Kind:   KindClusterAdmin,
+		}
+	}
 	if tree.CanModifySchema(stmt) {
 		return &Violation{
 			Tag:    tag,
@@ -539,6 +587,40 @@ func isClusterAdminStmt(stmt tree.Statement) bool {
 	return false
 }
 
+// isTenantMgmtDMLStmt reports whether stmt is one of the tenant
+// lifecycle nodes the parser tags TypeDML rather than TypeDCL. These
+// belong in the cluster-admin gate alongside CreateTenant /
+// DropTenant / AlterTenant* — the parser tag is an upstream
+// classification quirk, not a deliberate choice that the safety
+// model should honour. Kept as a sibling of isClusterAdminStmt (and
+// not folded into it) so the invariant "isClusterAdminStmt is only
+// consulted for TypeDCL nodes" — relied on by classifyDCL — stays
+// intact.
+//
+// Without this list:
+//   - AlterTenantCapability is silently admitted under read_only
+//     (its CanWriteData and CanModifySchema both return false).
+//   - AlterTenantReplication and CreateTenantFromReplication land at
+//     KindWrite under read_only (admitted under safe_write), so the
+//     escalation hint and Reason mislabel a tenant-lifecycle
+//     operation as a row write.
+//
+// Invariant: every type in this switch must also appear in
+// clusterAdminReason's switch. A type listed here without a matching
+// reason case is not a security bug (the reason fallback still says
+// "cluster administration requires full_access"), but the agent loses
+// the tenant-specific Reason text. The two switches are kept
+// physically adjacent so the coupling is easy to see.
+func isTenantMgmtDMLStmt(stmt tree.Statement) bool {
+	switch stmt.(type) {
+	case *tree.AlterTenantCapability,
+		*tree.AlterTenantReplication,
+		*tree.CreateTenantFromReplication:
+		return true
+	}
+	return false
+}
+
 // clusterAdminReason returns the Reason text for a cluster-admin
 // rejection, tailored both to the mode (so the verbiage matches the
 // rest of the classifier) and to the operation domain so an agent
@@ -558,7 +640,9 @@ func clusterAdminReason(stmt tree.Statement, mode Mode) string {
 		return "tracing changes require full_access; " + suffix
 	case *tree.CreateTenant, *tree.DropTenant,
 		*tree.AlterTenantSetClusterSetting, *tree.AlterTenantRename,
-		*tree.AlterTenantReset, *tree.AlterTenantService:
+		*tree.AlterTenantReset, *tree.AlterTenantService,
+		*tree.AlterTenantCapability, *tree.AlterTenantReplication,
+		*tree.CreateTenantFromReplication:
 		return "tenant management requires full_access; " + suffix
 	}
 	// Defensive fallback — isClusterAdminStmt returned true so the
