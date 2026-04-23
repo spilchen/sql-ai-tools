@@ -44,6 +44,7 @@ const (
 	SummarizeSQLToolName        = "summarize_sql"
 	ExplainSQLToolName          = "explain_sql"
 	ExplainSchemaChangeToolName = "explain_schema_change"
+	SimulateSQLToolName         = "simulate_sql"
 	ListTablesToolName          = "list_tables"
 	DescribeTableToolName       = "describe_table"
 )

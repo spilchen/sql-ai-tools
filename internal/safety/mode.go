@@ -26,7 +26,7 @@
 // Design doc reference: §Safety Model (read_only is the default,
 // safe_write and full_access are opt-in escalations). Issue #21 wires
 // read_only end-to-end; safe_write and full_access enforcement land in
-// follow-up issues #28 and #29.
+// follow-up issue #29.
 package safety
 
 import "fmt"
@@ -38,7 +38,7 @@ type Mode string
 
 // Mode values. ModeReadOnly is the default for every Tier 3 command;
 // the other two are recognised by ParseMode but rejected by Check
-// until issues #28 and #29 land.
+// until issue #29 lands.
 const (
 	ModeReadOnly   Mode = "read_only"
 	ModeSafeWrite  Mode = "safe_write"
@@ -60,7 +60,7 @@ const DefaultMode = ModeReadOnly
 //
 // safe_write and full_access parse successfully even though Check
 // currently rejects them — the split keeps the flag-parsing layer
-// stable across issues #28/#29 so the only churn when those modes land
+// stable across issue #29 so the only churn when those modes land
 // is inside Check.
 func ParseMode(s string) (Mode, error) {
 	switch Mode(s) {

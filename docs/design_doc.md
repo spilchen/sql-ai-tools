@@ -111,7 +111,7 @@ simulate → execute.
 | `explain_sql` | SQL string | EXPLAIN output as structured JSON | 3 |
 | `explain_schema_change` | DDL string | Schema changer plan with phases, elements, operations | 3 |
 | `detect_risky_query` | SQL string | Risk assessment with reason codes, severity, fix hints | 1-3 |
-| `simulate_sql` | SQL string | Query results without side effects (txn+rollback) | 3 |
+| `simulate_sql` | SQL string | Per-statement EXPLAIN-based simulation (ANALYZE for SELECT, plain EXPLAIN for DML writes, EXPLAIN (DDL, SHAPE) + table stats for DDL); no inner statement is executed at the cluster level | 3 |
 | `execute_sql` | SQL string | Query results with safety guardrails | 3 |
 
 **CLI** (mirrors MCP tools):
@@ -627,17 +627,37 @@ the pragmatic alternative.
 
 ### Simulation Layer
 
-EXPLAIN ANALYZE (NO_WRITE) for execute-without-side-effects. Two
-implementation paths:
+`simulate_sql` (issue #28, shipped) takes a per-statement
+EXPLAIN-based dispatcher rather than the txn+rollback wrapper that
+issue #28 originally proposed. The dispatcher routes each parsed
+statement to a non-executing EXPLAIN flavor:
 
-- **(A) Transaction+rollback wrapper**: Execute the query in a transaction,
-  capture results, then ROLLBACK. Simple to implement. Leaks: sequence
-  increments, volatile function side effects, audit triggers.
-- **(B) No-commit execution mode**: A new CRDB execution mode that runs the
-  query with full semantics but never commits. Cleaner, but requires CRDB
-  server changes.
+- SELECT (and other read-only DML) → `EXPLAIN ANALYZE` inside a
+  read-only txn. ANALYZE physically executes the inner statement, but
+  SELECT has no side effects, so the runtime stats (rows read,
+  network bytes, time) come back without persisting anything.
+- INSERT/UPDATE/DELETE/UPSERT → plain `EXPLAIN`. Returns the
+  optimizer's estimated plan only — the write is never applied. We
+  trade measured stats for honest safety here.
+- DDL → `EXPLAIN (DDL, SHAPE)` plus `SHOW STATISTICS` for each
+  affected table. The declarative schema changer compiles a plan
+  without applying it; the row-count annotation gives the agent a
+  rough handle on backfill cost.
 
-Option A is sufficient for the near term. Option B is cleaner for production.
+This sidesteps the side-effect leaks the txn+rollback approach
+cannot prevent (sequence increments, volatile function side effects,
+audit triggers, INSERT-into-CDC) because none of the EXPLAIN flavors
+execute the inner write at the cluster level.
+
+For the cases where measured stats on a write would be valuable, two
+longer-term options remain on the table:
+
+- **Transaction+rollback wrapper for writes**: revisit only if a
+  user explicitly asks for ANALYZE-quality stats on DML and accepts
+  the leak surface.
+- **No-commit execution mode**: a new CRDB execution mode that runs
+  the query with full semantics but never commits. Cleanest answer,
+  but requires CRDB server changes.
 
 ### Schema Change Simulation
 

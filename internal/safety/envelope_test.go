@@ -67,7 +67,7 @@ func TestEnvelopeSuggestionsByOp(t *testing.T) {
 
 func TestEnvelopeNoSuggestionForUnimplementedModes(t *testing.T) {
 	// safe_write/full_access violations are "not implemented" — the
-	// fix is to wait for issues #28/#29, not to escalate. So no
+	// fix is to wait for issue #29, not to escalate. So no
 	// suggestion is offered.
 	e := safety.Envelope(&safety.Violation{
 		Tag:  "SELECT",
