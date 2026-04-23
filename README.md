@@ -4,6 +4,21 @@ Agent-friendly SQL tooling for CockroachDB. An MCP server and CLI that wraps
 CockroachDB's parser, type system, and error infrastructure in a structured,
 agent-consumable interface.
 
+## How this fits with `cockroachdb/claude-plugin`
+
+`sql-ai-tools` is the **offline, parser-grade validation layer**: parse,
+type-check, and name-resolve CRDB SQL without a cluster, with structured
+fix-suggestion errors. It complements
+[`cockroachdb/claude-plugin`](https://github.com/cockroachdb/claude-plugin),
+which is the **distribution and execution layer** — a Claude-Code plugin
+bundling sub-agents, skills, hooks, and proxied MCP backends (MCP Toolbox,
+CockroachDB Cloud MCP) for live cluster work.
+
+The two projects are complementary, not competing: `claude-plugin` requires
+a live cluster for every tool; `sql-ai-tools` works on a plane. See
+[`docs/claude_plugin_comparison.md`](docs/claude_plugin_comparison.md) for
+the full breakdown.
+
 ## Problem
 
 AI agents write SQL for CockroachDB constantly — and get it wrong in subtle
