@@ -26,13 +26,19 @@ BUILTINS_GEN            := internal/builtinstubs/stubs_$(subst .,_,$(STUBS_VERSI
 # a build/go.vXXX.mod / stubs file) when a newer parser fork is
 # the new default.
 #
-# QUARTERS lists every supported per-quarter backend. `make build-all`
-# walks this list. Adding an entry here without a matching
-# build/go.vXXX.mod and internal/builtinstubs/stubs_vN_M_gen.go will
-# fail the per-quarter target — see build/parser-versions.yaml for
-# the new-quarter checklist.
+# QUARTERS lists every per-quarter sibling backend. `make build-all`
+# walks this list and additionally builds the unsuffixed latest via
+# the `build` target. LATEST_QUARTER must NOT appear here — its
+# binary is `bin/crdb-sql` (no -vXXX suffix), and adding it would
+# produce a byte-identical duplicate `bin/crdb-sql-$(LATEST_QUARTER)`
+# that bloats releases for no benefit. .goreleaser.yaml mirrors this:
+# one entry for the unsuffixed latest, one per non-latest sibling.
+#
+# Adding an entry here without a matching build/go.vXXX.mod and
+# internal/builtinstubs/stubs_vN_M_gen.go will fail the per-quarter
+# target — see build/parser-versions.yaml for the new-quarter checklist.
 LATEST_QUARTER          := v262
-QUARTERS                := v262
+QUARTERS                := v261
 ROUTE_PKG               := github.com/spilchen/sql-ai-tools/internal/versionroute
 LDFLAGS_LATEST          := -X $(ROUTE_PKG).builtQuarterStamp=$(LATEST_QUARTER)
 

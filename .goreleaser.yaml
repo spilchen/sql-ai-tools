@@ -62,6 +62,30 @@ builds:
       - -X github.com/spilchen/sql-ai-tools/cmd.Version={{.Version}}
       - -X github.com/spilchen/sql-ai-tools/internal/versionroute.builtQuarterStamp=v262
 
+  # Per-quarter sibling backend for CRDB v26.1. Selected at runtime by
+  # the latest crdb-sql binary's MaybeReexec router when the user
+  # requests --target-version 26.1.x. Built against the v0.26.1 parser
+  # fork via build/go.v261.mod's replace directive.
+  - id: crdb-sql-v261
+    main: .
+    binary: crdb-sql-v261
+    gomod:
+      modfile: build/go.v261.mod
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/spilchen/sql-ai-tools/cmd.Version={{.Version}}
+      - -X github.com/spilchen/sql-ai-tools/internal/versionroute.builtQuarterStamp=v261
+
 archives:
   - id: default
     formats: [tar.gz]
