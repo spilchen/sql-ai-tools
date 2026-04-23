@@ -100,6 +100,15 @@ const (
 	FeatureTriggers                   = "triggers"
 	FeatureShowLogicalReplicationJobs = "show_logical_replication_jobs"
 	FeatureLDRSkipSchemaCheck         = "ldr_skip_schema_check"
+
+	// v25.1 features.
+	FeatureVectorIndex             = "vector_index"
+	FeatureRowLevelSecurity        = "row_level_security"
+	FeatureCheckExternalConnection = "check_external_connection"
+	FeatureLDRBidirectional        = "ldr_bidirectional"
+	FeatureDoBlock                 = "do_block"
+	FeatureReturnsTable            = "returns_table"
+	FeatureXATransactions          = "xa_transactions"
 )
 
 // Registry holds an immutable set of Feature entries, indexed by
@@ -192,6 +201,43 @@ func DefaultRegistry() *Registry {
 			Tag:        FeatureLDRSkipSchemaCheck,
 			Name:       "LDR SKIP SCHEMA CHECK option",
 			Introduced: "24.3",
+		},
+
+		// v25.1 features.
+		Feature{
+			Tag:        FeatureVectorIndex,
+			Name:       "vector indexes (CSPANN)",
+			Introduced: "25.1",
+		},
+		Feature{
+			Tag:        FeatureRowLevelSecurity,
+			Name:       "row-level security (CREATE/ALTER/DROP POLICY)",
+			Introduced: "25.1",
+		},
+		Feature{
+			Tag:        FeatureCheckExternalConnection,
+			Name:       "CHECK EXTERNAL CONNECTION",
+			Introduced: "25.1",
+		},
+		Feature{
+			Tag:        FeatureLDRBidirectional,
+			Name:       "LDR BIDIRECTIONAL option",
+			Introduced: "25.1",
+		},
+		Feature{
+			Tag:        FeatureDoBlock,
+			Name:       "DO (anonymous PL/pgSQL block)",
+			Introduced: "25.1",
+		},
+		Feature{
+			Tag:        FeatureReturnsTable,
+			Name:       "RETURNS TABLE for user-defined functions",
+			Introduced: "25.1",
+		},
+		Feature{
+			Tag:        FeatureXATransactions,
+			Name:       "XA two-phase commit (PREPARE/COMMIT/ROLLBACK PREPARED)",
+			Introduced: "25.1",
 		},
 	)
 }
