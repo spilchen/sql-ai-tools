@@ -114,6 +114,12 @@ const (
 	FeatureCreatePolicyIfNotExists           = "create_policy_if_not_exists"
 	FeatureRefreshMaterializedViewAsOf       = "refresh_materialized_view_as_of_system_time"
 	FeatureAlterVirtualClusterReplicationSrc = "alter_virtual_cluster_replication_source"
+
+	// v25.3 features.
+	FeatureShowCreateAllTriggers  = "show_create_all_triggers"
+	FeatureShowCreateAllRoutines  = "show_create_all_routines"
+	FeatureAlterTableLoggedToggle = "alter_table_logged_unlogged"
+	FeatureGrantRevokeRoutines    = "grant_revoke_routines"
 )
 
 // Registry holds an immutable set of Feature entries, indexed by
@@ -260,6 +266,28 @@ func DefaultRegistry() *Registry {
 			Tag:        FeatureAlterVirtualClusterReplicationSrc,
 			Name:       "ALTER VIRTUAL CLUSTER ... SET REPLICATION SOURCE",
 			Introduced: "25.2",
+		},
+
+		// v25.3 features.
+		Feature{
+			Tag:        FeatureShowCreateAllTriggers,
+			Name:       "SHOW CREATE ALL TRIGGERS",
+			Introduced: "25.3",
+		},
+		Feature{
+			Tag:        FeatureShowCreateAllRoutines,
+			Name:       "SHOW CREATE ALL ROUTINES",
+			Introduced: "25.3",
+		},
+		Feature{
+			Tag:        FeatureAlterTableLoggedToggle,
+			Name:       "ALTER TABLE ... SET LOGGED/UNLOGGED",
+			Introduced: "25.3",
+		},
+		Feature{
+			Tag:        FeatureGrantRevokeRoutines,
+			Name:       "GRANT/REVOKE ON ALL ROUTINES IN SCHEMA",
+			Introduced: "25.3",
 		},
 	)
 }
