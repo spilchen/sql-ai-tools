@@ -109,6 +109,11 @@ const (
 	FeatureDoBlock                 = "do_block"
 	FeatureReturnsTable            = "returns_table"
 	FeatureXATransactions          = "xa_transactions"
+
+	// v25.2 features.
+	FeatureCreatePolicyIfNotExists           = "create_policy_if_not_exists"
+	FeatureRefreshMaterializedViewAsOf       = "refresh_materialized_view_as_of_system_time"
+	FeatureAlterVirtualClusterReplicationSrc = "alter_virtual_cluster_replication_source"
 )
 
 // Registry holds an immutable set of Feature entries, indexed by
@@ -238,6 +243,23 @@ func DefaultRegistry() *Registry {
 			Tag:        FeatureXATransactions,
 			Name:       "XA two-phase commit (PREPARE/COMMIT/ROLLBACK PREPARED)",
 			Introduced: "25.1",
+		},
+
+		// v25.2 features.
+		Feature{
+			Tag:        FeatureCreatePolicyIfNotExists,
+			Name:       "CREATE POLICY IF NOT EXISTS",
+			Introduced: "25.2",
+		},
+		Feature{
+			Tag:        FeatureRefreshMaterializedViewAsOf,
+			Name:       "REFRESH MATERIALIZED VIEW ... AS OF SYSTEM TIME",
+			Introduced: "25.2",
+		},
+		Feature{
+			Tag:        FeatureAlterVirtualClusterReplicationSrc,
+			Name:       "ALTER VIRTUAL CLUSTER ... SET REPLICATION SOURCE",
+			Introduced: "25.2",
 		},
 	)
 }
