@@ -314,3 +314,92 @@ func TestFormatCmdConflictingInput(t *testing.T) {
 	require.Error(t, err)
 	require.ErrorContains(t, err, "cannot use -e flag and file argument together")
 }
+
+// plpgsqlFormatWarningSQL is the PL/pgSQL fixture used by the format-side
+// version-warning tests, mirroring the parse-side fixture.
+const plpgsqlFormatWarningSQL = `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`
+
+// TestFormatCmdVersionWarning_PLpgSQL is the format mirror of
+// TestParseCmdVersionWarning_PLpgSQL: --target-version=23.2 with PL/pgSQL
+// emits a feature_not_yet_introduced warning while the data payload (the
+// formatted SQL) still populates.
+func TestFormatCmdVersionWarning_PLpgSQL(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"format",
+		"--target-version", "23.2",
+		"-e", plpgsqlFormatWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, "23.2", env.TargetVersion)
+
+	var got *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == output.CodeFeatureNotYetIntroduced {
+			got = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, got, "expected a feature_not_yet_introduced warning in %+v", env.Errors)
+	require.Equal(t, output.SeverityWarning, got.Severity)
+	require.Equal(t, "plpgsql_function_body", got.Context["feature_tag"])
+	require.Equal(t, "24.1", got.Context["introduced"])
+	require.Equal(t, "23.2", got.Context["target"])
+	require.NotEmpty(t, env.Data, "format must still succeed and emit a data payload")
+}
+
+// TestFormatCmdVersionWarning_NoneAtNewerTarget pins the negative case:
+// target at or after Introduced emits no feature warning.
+func TestFormatCmdVersionWarning_NoneAtNewerTarget(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"format",
+		"--target-version", "24.1",
+		"-e", plpgsqlFormatWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"target at Introduced must not warn, got %+v", e)
+	}
+}
+
+// TestFormatCmdVersionWarning_NoFlagSkips covers the documented short-
+// circuit: no --target-version means version.Inspect is skipped.
+func TestFormatCmdVersionWarning_NoFlagSkips(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"format",
+		"-e", plpgsqlFormatWarningSQL,
+		"--output", "json",
+	})
+
+	require.NoError(t, root.Execute())
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Empty(t, env.TargetVersion)
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"no --target-version must skip feature warnings, got %+v", e)
+	}
+}

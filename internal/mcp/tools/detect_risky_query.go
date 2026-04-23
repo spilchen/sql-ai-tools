@@ -10,12 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/spilchen/sql-ai-tools/internal/diag"
-	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/risk"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // DetectRiskyQueryTool returns the MCP tool definition for detect_risky_query.
@@ -46,11 +47,13 @@ func DetectRiskyQueryHandler(parserVersion, defaultTargetVersion string) server.
 
 		env := baseEnvelope(parserVersion, target)
 
-		findings, err := risk.Analyze(sql)
+		parsed, err := parser.Parse(sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
 			return envelopeResult(env)
 		}
+		env.Errors = append(env.Errors, version.Inspect(parsed, target, nil)...)
+		findings := risk.AnalyzeParsed(parsed, sql)
 
 		data, err := json.Marshal(findings)
 		if err != nil {

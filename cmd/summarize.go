@@ -13,11 +13,13 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
 	"github.com/spilchen/sql-ai-tools/internal/summarize"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // newSummarizeCmd builds the `crdb-sql summarize` subcommand. It reads
@@ -53,10 +55,13 @@ read from the -e flag, a positional file argument, or stdin.`,
 				return r.RenderError(baseEnv, err)
 			}
 
-			summaries, err := summarize.Summarize(sql)
-			if err != nil {
-				return renderParseError(r, baseEnv, err, sql)
+			parsed, parseErr := parser.Parse(sql)
+			if parseErr != nil {
+				return renderParseError(r, baseEnv, parseErr, sql)
 			}
+			baseEnv.Errors = append(baseEnv.Errors,
+				version.Inspect(parsed, state.targetVersion, nil)...)
+			summaries := summarize.Parsed(parsed, sql)
 
 			data, err := json.Marshal(summaries)
 			if err != nil {

@@ -10,12 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/spilchen/sql-ai-tools/internal/diag"
-	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/summarize"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // SummarizeSQLTool returns the MCP tool definition for summarize_sql.
@@ -29,7 +30,9 @@ func SummarizeSQLTool() mcp.Tool {
 }
 
 // SummarizeSQLHandler returns the handler for the summarize_sql tool.
-// It delegates to summarize.Summarize and wraps the result in the
+// It parses the SQL once, runs version.Inspect on the AST so a
+// per-call target_version emits feature warnings into the envelope,
+// then delegates to summarize.Parsed and wraps the result in the
 // standard output.Envelope used by all tools in this package.
 // defaultTargetVersion is the server-level default; per-call
 // target_version arguments override it.
@@ -46,11 +49,13 @@ func SummarizeSQLHandler(parserVersion, defaultTargetVersion string) server.Tool
 
 		env := baseEnvelope(parserVersion, target)
 
-		summaries, err := summarize.Summarize(sql)
+		parsed, err := parser.Parse(sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
 			return envelopeResult(env)
 		}
+		env.Errors = append(env.Errors, version.Inspect(parsed, target, nil)...)
+		summaries := summarize.Parsed(parsed, sql)
 
 		data, err := json.Marshal(summaries)
 		if err != nil {
