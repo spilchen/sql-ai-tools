@@ -44,6 +44,7 @@ var expectedTools = []string{
 	tools.SummarizeSQLToolName,
 	tools.ExplainSQLToolName,
 	tools.ExplainSchemaChangeToolName,
+	tools.SimulateSQLToolName,
 	tools.ListTablesToolName,
 	tools.DescribeTableToolName,
 }

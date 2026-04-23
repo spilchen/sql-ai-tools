@@ -106,7 +106,7 @@ func TestCheckReadOnlyExplainDDL(t *testing.T) {
 
 func TestCheckRejectsUnimplementedModes(t *testing.T) {
 	// safe_write and full_access parse successfully (per ParseMode)
-	// but Check rejects them until issues #28/#29. The rejection
+	// but Check rejects them until issue #29. The rejection
 	// reason names the mode so an agent can recognise the
 	// "not implemented" condition vs a real classification miss.
 	tests := []struct {
@@ -169,6 +169,101 @@ func TestCheckRejectsEmptyInput(t *testing.T) {
 			require.Contains(t, v.Reason, "no statements parsed")
 		})
 	}
+}
+
+func TestCheckReadOnlySimulate(t *testing.T) {
+	// OpSimulate dispatches to a non-executing EXPLAIN flavor for
+	// each supported statement class, so read_only mode admits SELECT,
+	// DML writes, and DDL alike. The rejections are scoped to shapes
+	// the dispatcher has no route for: TCL, DCL, and nested EXPLAIN.
+	tests := []struct {
+		name           string
+		sql            string
+		expectedReject bool
+		expectedReason string
+	}{
+		// Dispatchable shapes are admitted.
+		{name: "select", sql: "SELECT * FROM t"},
+		{name: "select with cte", sql: "WITH cte AS (SELECT 1) SELECT * FROM cte"},
+		{name: "values", sql: "VALUES (1), (2)"},
+		{name: "insert", sql: "INSERT INTO t VALUES (1)"},
+		{name: "update", sql: "UPDATE t SET x = 1 WHERE id = 1"},
+		{name: "delete", sql: "DELETE FROM t WHERE id = 1"},
+		{name: "upsert", sql: "UPSERT INTO t VALUES (1)"},
+		{name: "create table", sql: "CREATE TABLE x (id INT PRIMARY KEY)"},
+		{name: "alter table add column", sql: "ALTER TABLE x ADD COLUMN y INT"},
+		{name: "drop table", sql: "DROP TABLE x"},
+		{name: "create index", sql: "CREATE INDEX i ON t (c)"},
+
+		// TCL has no EXPLAIN form.
+		{
+			name:           "begin rejected",
+			sql:            "BEGIN",
+			expectedReject: true,
+			expectedReason: "no route",
+		},
+		{
+			name:           "commit rejected",
+			sql:            "COMMIT",
+			expectedReject: true,
+			expectedReason: "no route",
+		},
+
+		// DCL is out of scope for the dispatcher.
+		{
+			name:           "grant rejected",
+			sql:            "GRANT SELECT ON t TO bob",
+			expectedReject: true,
+			expectedReason: "no route",
+		},
+		{
+			name:           "revoke rejected",
+			sql:            "REVOKE SELECT ON t FROM bob",
+			expectedReject: true,
+			expectedReason: "no route",
+		},
+
+		// Nested EXPLAIN wrappers are rejected with the same reason
+		// OpExplain uses, so a caller migrating between operations
+		// gets a consistent message.
+		{
+			name:           "nested explain rejected",
+			sql:            "EXPLAIN SELECT 1",
+			expectedReject: true,
+			expectedReason: "nested EXPLAIN",
+		},
+		{
+			name:           "nested explain analyze rejected",
+			sql:            "EXPLAIN ANALYZE INSERT INTO t VALUES (1)",
+			expectedReject: true,
+			expectedReason: "nested EXPLAIN",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := safety.Check(safety.ModeReadOnly, safety.OpSimulate, tc.sql)
+			require.NoError(t, err)
+
+			if !tc.expectedReject {
+				require.Nil(t, v, "expected statement to be admitted under OpSimulate")
+				return
+			}
+			require.NotNil(t, v, "expected statement to be rejected")
+			require.Equal(t, safety.ModeReadOnly, v.Mode)
+			require.Equal(t, safety.OpSimulate, v.Op)
+			require.Contains(t, v.Reason, tc.expectedReason)
+		})
+	}
+}
+
+func TestOperationStringIncludesSimulate(t *testing.T) {
+	// Operation.String is the wire-stable token agents branch on.
+	// Pin every value so a future enum addition that forgets to
+	// extend the switch (returning "unknown") fails loudly.
+	require.Equal(t, "explain", safety.OpExplain.String())
+	require.Equal(t, "explain_ddl", safety.OpExplainDDL.String())
+	require.Equal(t, "simulate", safety.OpSimulate.String())
 }
 
 func TestCheckRejectsNestedExplain(t *testing.T) {

@@ -25,6 +25,7 @@ type Operation int
 const (
 	OpExplain Operation = iota + 1
 	OpExplainDDL
+	OpSimulate
 )
 
 // String returns the wire-stable token for op. Used in violation
@@ -35,6 +36,8 @@ func (op Operation) String() string {
 		return "explain"
 	case OpExplainDDL:
 		return "explain_ddl"
+	case OpSimulate:
+		return "simulate"
 	default:
 		return "unknown"
 	}
@@ -134,7 +137,7 @@ func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 	case ModeSafeWrite, ModeFullAccess:
 		// Modes are recognised at the flag layer (so the CLI accepts
 		// --mode=safe_write today without a "bad value" error), but
-		// no statement is admitted until issues #28/#29 wire the
+		// no statement is admitted until issue #29 wires the
 		// per-mode rules. Returning a violation here keeps the
 		// rejection path uniform with read_only.
 		return &Violation{
@@ -175,9 +178,19 @@ func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 //     user error. But because read_only mode is meant to forbid all
 //     schema modification, we reject DDL too — leaving OpExplainDDL
 //     effectively unusable in read_only mode. Users must escalate to
-//     safe_write or full_access (issues #28/#29) to use explain-ddl.
+//     safe_write or full_access (issue #29) to use explain-ddl.
 //     The reason text names the escalation path so the rejection is
 //     actionable.
+//
+//   - OpSimulate dispatches per-statement to a non-executing EXPLAIN
+//     flavor (EXPLAIN ANALYZE for SELECT, plain EXPLAIN for DML
+//     writes, EXPLAIN (DDL, SHAPE) for DDL). Because the dispatcher
+//     never executes the inner write or DDL at the cluster level,
+//     read_only mode admits every dispatched class — SELECT, DML
+//     writes, and DDL alike — and only rejects shapes the dispatcher
+//     has no route for: nested EXPLAIN (defense in depth, mirroring
+//     OpExplain), TCL (BEGIN/COMMIT/ROLLBACK have no EXPLAIN form),
+//     and DCL (GRANT/REVOKE, out of scope for the dispatcher).
 func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 	tag := stmt.StatementTag()
 	switch op {
@@ -234,6 +247,42 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 			Reason: "explain_ddl modifies schema; rerun with --mode=safe_write or --mode=full_access",
 			Mode:   ModeReadOnly,
 			Op:     op,
+		}
+	case OpSimulate:
+		// Reject nested EXPLAIN wrappers explicitly. The dispatcher
+		// classifies the inner statement to pick a route, but
+		// tree.CanWriteData/CanModifySchema do not descend into
+		// *Explain/*ExplainAnalyze AST nodes — so a wrapped write
+		// would otherwise be misclassified as a SELECT and dispatched
+		// to EXPLAIN ANALYZE, which executes. Reject the nested form
+		// before any cluster contact and tell the caller to unwrap.
+		switch stmt.(type) {
+		case *tree.Explain, *tree.ExplainAnalyze:
+			return &Violation{
+				Tag:    tag,
+				Reason: "nested EXPLAIN is not permitted; pass the inner statement directly",
+				Mode:   ModeReadOnly,
+				Op:     op,
+			}
+		}
+		switch stmt.StatementType() {
+		case tree.TypeDDL, tree.TypeDML:
+			// Dispatcher has a route: DDL → EXPLAIN (DDL, SHAPE),
+			// DML write → EXPLAIN, SELECT → EXPLAIN ANALYZE. None of
+			// these execute the inner write or DDL at the cluster
+			// level, so read_only mode admits them.
+			return nil
+		default:
+			// TCL (BEGIN/COMMIT/ROLLBACK/SAVEPOINT) has no EXPLAIN
+			// form. DCL (GRANT/REVOKE) is out of scope for the
+			// dispatcher today. Both surface the same actionable
+			// reason so callers can branch on Tag.
+			return &Violation{
+				Tag:    tag,
+				Reason: "simulate has no route for this statement type; only DDL, DML, and SELECT are supported",
+				Mode:   ModeReadOnly,
+				Op:     op,
+			}
 		}
 	default:
 		return &Violation{
