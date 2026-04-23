@@ -82,6 +82,18 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "xa txn at", tag: FeatureXATransactions, target: "25.1", expectedStatus: StatusSupported},
 		{name: "xa txn after", tag: FeatureXATransactions, target: "25.2", expectedStatus: StatusSupported},
 
+		{name: "create policy if not exists before", tag: FeatureCreatePolicyIfNotExists, target: "25.1", expectedStatus: StatusNotYetIntroduced},
+		{name: "create policy if not exists at", tag: FeatureCreatePolicyIfNotExists, target: "25.2", expectedStatus: StatusSupported},
+		{name: "create policy if not exists after", tag: FeatureCreatePolicyIfNotExists, target: "25.3", expectedStatus: StatusSupported},
+
+		{name: "refresh matview aost before", tag: FeatureRefreshMaterializedViewAsOf, target: "25.1", expectedStatus: StatusNotYetIntroduced},
+		{name: "refresh matview aost at", tag: FeatureRefreshMaterializedViewAsOf, target: "25.2", expectedStatus: StatusSupported},
+		{name: "refresh matview aost after", tag: FeatureRefreshMaterializedViewAsOf, target: "25.3", expectedStatus: StatusSupported},
+
+		{name: "alter vc repl source before", tag: FeatureAlterVirtualClusterReplicationSrc, target: "25.1", expectedStatus: StatusNotYetIntroduced},
+		{name: "alter vc repl source at", tag: FeatureAlterVirtualClusterReplicationSrc, target: "25.2", expectedStatus: StatusSupported},
+		{name: "alter vc repl source after", tag: FeatureAlterVirtualClusterReplicationSrc, target: "25.3", expectedStatus: StatusSupported},
+
 		{name: "cross-major: target predates oldest seed", tag: FeaturePLpgSQLFunctionBody, target: "19.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "cross-major: target newer than newest seed", tag: FeaturePLpgSQLFunctionBody, target: "26.2", expectedStatus: StatusSupported},
 	}
@@ -166,6 +178,9 @@ func TestExportedConstantsAreRegistered(t *testing.T) {
 		FeatureDoBlock,
 		FeatureReturnsTable,
 		FeatureXATransactions,
+		FeatureCreatePolicyIfNotExists,
+		FeatureRefreshMaterializedViewAsOf,
+		FeatureAlterVirtualClusterReplicationSrc,
 	} {
 		_, ok := reg.Lookup(tag)
 		require.Truef(t, ok, "constant %q is not registered in DefaultRegistry", tag)
