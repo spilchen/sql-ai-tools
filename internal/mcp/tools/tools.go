@@ -7,9 +7,9 @@
 // tools. The Tier 1 (zero-config) tools are parse_sql, validate_sql,
 // format_sql, detect_risky_query, and summarize_sql; the Tier 2
 // (schema_file) tools are list_tables and describe_table; the Tier 3
-// (connected) tools are explain_sql and explain_schema_change, which
-// require a per-call DSN since the MCP server holds no per-session
-// connection state.
+// (connected) tools are explain_sql, explain_schema_change, and
+// execute_sql, which require a per-call DSN since the MCP server
+// holds no per-session connection state.
 //
 // Each handler returns the same output.Envelope JSON shape that the CLI
 // emits under --output=json, so MCP clients get structured errors,
@@ -45,6 +45,7 @@ const (
 	ExplainSQLToolName          = "explain_sql"
 	ExplainSchemaChangeToolName = "explain_schema_change"
 	SimulateSQLToolName         = "simulate_sql"
+	ExecuteSQLToolName          = "execute_sql"
 	ListTablesToolName          = "list_tables"
 	DescribeTableToolName       = "describe_table"
 )
@@ -69,20 +70,28 @@ const ModeParamName = "mode"
 
 // ModeParamDescription is the shared MCP-schema description for the
 // mode parameter so every Tier 3 tool documents the argument
-// identically.
-const ModeParamDescription = `Optional safety mode applied before any cluster contact. Defaults to "read_only", which permits non-mutating statements only. "safe_write" and "full_access" are reserved for follow-up work and currently reject every statement.`
+// identically. The accepted set is the same across tools, but the
+// modes that any given tool actually admits depend on the tool:
+// today only execute_sql wires safe_write and full_access;
+// explain_sql and explain_schema_change still report "not yet
+// implemented" for those modes (follow-up work). The per-tool
+// wording stays accurate via the envelope's safety_violation Reason.
+const ModeParamDescription = `Optional safety mode applied before any cluster contact. Defaults to "read_only", which permits non-mutating statements only. "safe_write" additionally admits INSERT/UPDATE/DELETE; "full_access" admits any parsed statement. Today only execute_sql admits safe_write/full_access; explain_sql and explain_schema_change still report "not yet implemented" for those modes (follow-up work).`
 
 // StatementTimeoutParamName is the optional MCP tool parameter name
 // that lets a client override the per-call SET LOCAL statement_timeout
-// applied inside the read-only transaction wrapper. The value is in
-// milliseconds (numeric) so the wire format matches MCP's JSON
+// applied inside the cluster-side transaction wrapper. The value is
+// in milliseconds (numeric) so the wire format matches MCP's JSON
 // type-system without parsing duration strings.
 const StatementTimeoutParamName = "statement_timeout_ms"
 
 // StatementTimeoutParamDescription is the shared MCP-schema
 // description for the statement_timeout_ms parameter so every Tier 3
-// tool documents the argument identically.
-const StatementTimeoutParamDescription = "Optional statement_timeout (milliseconds) applied inside the read-only transaction wrapper. Default 30000 (30s). Non-positive values fall back to the default."
+// tool documents the argument identically. Wording is mode-agnostic
+// because execute_sql's txn is read-only only when mode=read_only;
+// safe_write/full_access use a read-write txn but the timeout still
+// applies.
+const StatementTimeoutParamDescription = "Optional statement_timeout (milliseconds) applied inside the cluster-side transaction wrapper. Default 30000 (30s). Non-positive values fall back to the default."
 
 // extractRequiredString validates and returns a required string
 // parameter from an MCP tool request. Leading and trailing whitespace
@@ -250,6 +259,39 @@ func resolveSafetyMode(req mcp.CallToolRequest) (safety.Mode, *mcp.CallToolResul
 			"%s parameter: %v", ModeParamName, err))
 	}
 	return m, nil
+}
+
+// MaxRowsParamName is the optional MCP tool parameter name for the
+// row cap applied to execute_sql results. The cap drives both the
+// AST-level LIMIT injection on read_only SELECTs and the runtime
+// row-scan truncation in conn.Manager.Execute.
+const MaxRowsParamName = "max_rows"
+
+// MaxRowsParamDescription is the shared MCP-schema description for
+// the max_rows parameter. Default mirrors the CLI's --max-rows.
+const MaxRowsParamDescription = "Optional row cap for execute_sql (default 1000). Bounds rows returned in any mode; additionally drives AST-level LIMIT injection on read_only SELECTs. 0 disables both."
+
+// resolveMaxRows picks the row cap for an execute_sql tool call.
+// Missing arguments fall back to the supplied default. A non-numeric
+// value is a tool-level error so the agent gets a precise diagnostic
+// rather than silent fallback. Negative values are clamped to 0
+// ("unlimited") rather than errored — clients that send -1 most
+// likely mean "no cap" and the alternative would punish a typo more
+// than necessary.
+func resolveMaxRows(req mcp.CallToolRequest, defaultMax int) (int, *mcp.CallToolResult) {
+	raw, exists := req.GetArguments()[MaxRowsParamName]
+	if !exists {
+		return defaultMax, nil
+	}
+	n, ok := raw.(float64)
+	if !ok {
+		return 0, mcp.NewToolResultError(fmt.Sprintf(
+			"%s parameter must be a number, got %T", MaxRowsParamName, raw))
+	}
+	if n < 0 {
+		return 0, nil
+	}
+	return int(n), nil
 }
 
 // resolveStatementTimeout picks the statement_timeout for a single

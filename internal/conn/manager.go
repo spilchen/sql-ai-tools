@@ -25,11 +25,13 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// DefaultStatementTimeout is the per-EXPLAIN statement_timeout applied
-// inside the read-only transaction wrapper when the caller does not
-// override it via WithStatementTimeout. 30s is generous enough for
-// EXPLAIN and EXPLAIN (DDL, SHAPE) on large schemas while still
-// preventing a runaway plan from hanging an agent indefinitely.
+// DefaultStatementTimeout is the per-call statement_timeout applied
+// inside the transaction wrapper used by Explain, ExplainDDL, and
+// Execute when the caller does not override it via
+// WithStatementTimeout. 30s is generous enough for EXPLAIN and
+// EXPLAIN (DDL, SHAPE) on large schemas, and for typical interactive
+// queries via exec, while still preventing a runaway statement from
+// hanging an agent indefinitely.
 const DefaultStatementTimeout = 30 * time.Second
 
 // dsnCredentialPattern matches the userinfo portion of a postgres URI
@@ -70,8 +72,8 @@ type ExplainResult struct {
 // %v or %+v cannot leak credentials.
 //
 // The stmtTimeout field is the SET LOCAL statement_timeout applied
-// inside the read-only transaction that wraps every Explain /
-// ExplainDDL call. It is set once at construction (default
+// inside the transaction wrapper used by every Explain / ExplainDDL
+// / Execute call. It is set once at construction (default
 // DefaultStatementTimeout) via WithStatementTimeout; the Manager is
 // not safe for concurrent use, so the field never needs synchronisation.
 type Manager struct {
@@ -85,10 +87,11 @@ type Manager struct {
 // retry budget) extend the API without breaking call sites.
 type Option func(*Manager)
 
-// WithStatementTimeout overrides the per-EXPLAIN statement_timeout
-// applied inside the read-only transaction wrapper. A non-positive
-// value falls back to DefaultStatementTimeout so callers cannot
-// accidentally disable the guardrail by passing a zero duration.
+// WithStatementTimeout overrides the per-call statement_timeout
+// applied inside the transaction wrapper used by Explain, ExplainDDL,
+// and Execute. A non-positive value falls back to
+// DefaultStatementTimeout so callers cannot accidentally disable the
+// guardrail by passing a zero duration.
 func WithStatementTimeout(d time.Duration) Option {
 	return func(m *Manager) {
 		if d <= 0 {
@@ -105,7 +108,7 @@ func WithStatementTimeout(d time.Duration) Option {
 //
 // Options are applied in order; later options override earlier ones.
 // Callers that pass no options get DefaultStatementTimeout for the
-// EXPLAIN-wrapper guardrail.
+// txn-wrapper guardrail used by Explain, ExplainDDL, and Execute.
 func NewManager(dsn string, opts ...Option) *Manager {
 	m := &Manager{
 		dsn:         dsn,

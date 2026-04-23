@@ -105,25 +105,206 @@ func TestCheckReadOnlyExplainDDL(t *testing.T) {
 }
 
 func TestCheckRejectsUnimplementedModes(t *testing.T) {
-	// safe_write and full_access parse successfully (per ParseMode)
-	// but Check rejects them until issue #29. The rejection
-	// reason names the mode so an agent can recognise the
-	// "not implemented" condition vs a real classification miss.
+	// safe_write and full_access for the non-execute surfaces still
+	// report "not yet implemented" — only OpExecute (issue #29)
+	// wires those modes today; OpExplain/OpExplainDDL/OpSimulate are
+	// tracked separately as follow-up work.
 	tests := []struct {
 		name string
 		mode safety.Mode
+		op   safety.Operation
 	}{
-		{name: "safe_write not yet implemented", mode: safety.ModeSafeWrite},
-		{name: "full_access not yet implemented", mode: safety.ModeFullAccess},
+		{name: "safe_write OpExplain not yet implemented", mode: safety.ModeSafeWrite, op: safety.OpExplain},
+		{name: "full_access OpExplain not yet implemented", mode: safety.ModeFullAccess, op: safety.OpExplain},
+		{name: "safe_write OpExplainDDL not yet implemented", mode: safety.ModeSafeWrite, op: safety.OpExplainDDL},
+		{name: "full_access OpExplainDDL not yet implemented", mode: safety.ModeFullAccess, op: safety.OpExplainDDL},
+		{name: "safe_write OpSimulate not yet implemented", mode: safety.ModeSafeWrite, op: safety.OpSimulate},
+		{name: "full_access OpSimulate not yet implemented", mode: safety.ModeFullAccess, op: safety.OpSimulate},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			v, err := safety.Check(tc.mode, safety.OpExplain, "SELECT 1")
+			v, err := safety.Check(tc.mode, tc.op, "SELECT 1")
 			require.NoError(t, err)
-			require.NotNil(t, v, "non-read_only modes are not admitted yet")
+			require.NotNil(t, v, "non-read_only modes are not admitted yet for explain ops")
 			require.Contains(t, v.Reason, "not yet implemented")
 			require.Equal(t, tc.mode, v.Mode)
+		})
+	}
+}
+
+func TestCheckReadOnlyExecute(t *testing.T) {
+	// OpExecute under read_only mirrors OpExplain's read-only set:
+	// SELECT/SHOW/etc. pass; writes, DDL, and DCL are rejected before
+	// any cluster contact. Differs from TestCheckReadOnlyExplain in
+	// the Op assertion AND in pinning the structural Kind on each
+	// rejection so escalation logic in envelope.suggestionsFor stays
+	// correct.
+	tests := []struct {
+		name           string
+		sql            string
+		expectedReject bool
+		expectedTag    string
+		expectedKind   safety.ViolationKind
+	}{
+		{name: "select", sql: "SELECT * FROM t"},
+		{name: "show", sql: "SHOW TABLES"},
+		{name: "values", sql: "VALUES (1), (2)"},
+		{name: "with cte", sql: "WITH cte AS (SELECT 1) SELECT * FROM cte"},
+
+		{name: "insert rejected", sql: "INSERT INTO t VALUES (1)", expectedReject: true, expectedTag: "INSERT", expectedKind: safety.KindWrite},
+		{name: "update rejected", sql: "UPDATE t SET x = 1 WHERE id = 1", expectedReject: true, expectedTag: "UPDATE", expectedKind: safety.KindWrite},
+		{name: "delete rejected", sql: "DELETE FROM t WHERE id = 1", expectedReject: true, expectedTag: "DELETE", expectedKind: safety.KindWrite},
+		{name: "truncate rejected", sql: "TRUNCATE TABLE t", expectedReject: true, expectedTag: "TRUNCATE", expectedKind: safety.KindSchema},
+
+		{name: "drop table rejected", sql: "DROP TABLE users", expectedReject: true, expectedTag: "DROP TABLE", expectedKind: safety.KindSchema},
+		{name: "create table rejected", sql: "CREATE TABLE x (id INT PRIMARY KEY)", expectedReject: true, expectedTag: "CREATE TABLE", expectedKind: safety.KindSchema},
+
+		// GRANT under read_only must be tagged KindPrivilege even
+		// though the parser also reports it as schema-modifying. If
+		// it landed as KindWrite or KindSchema the escalation hint
+		// would suggest safe_write — which itself rejects privilege
+		// changes — and the agent would loop. Pinning Kind here
+		// closes that loop.
+		{name: "grant rejected", sql: "GRANT SELECT ON t TO bob", expectedReject: true, expectedTag: "GRANT", expectedKind: safety.KindPrivilege},
+		{name: "revoke rejected", sql: "REVOKE SELECT ON t FROM bob", expectedReject: true, expectedTag: "REVOKE", expectedKind: safety.KindPrivilege},
+		{name: "create role rejected", sql: "CREATE ROLE alice", expectedReject: true, expectedTag: "CREATE ROLE", expectedKind: safety.KindPrivilege},
+
+		// CRDB tags several non-privilege statements as TypeDCL
+		// (cluster config, tracing, zone config, tenant lifecycle).
+		// These get KindClusterAdmin and a domain-specific Reason
+		// rather than the misleading "privilege/role changes" message
+		// the SQL-standard reading of DCL would imply.
+		{name: "set cluster setting tagged as cluster admin",
+			sql:            "SET CLUSTER SETTING sql.defaults.distsql = 'on'",
+			expectedReject: true, expectedTag: "SET CLUSTER SETTING", expectedKind: safety.KindClusterAdmin},
+		{name: "set tracing tagged as cluster admin",
+			sql:            "SET TRACING = on",
+			expectedReject: true, expectedTag: "SET TRACING", expectedKind: safety.KindClusterAdmin},
+		{name: "configure zone tagged as cluster admin",
+			sql:            "ALTER TABLE t CONFIGURE ZONE USING num_replicas = 5",
+			expectedReject: true, expectedTag: "CONFIGURE ZONE", expectedKind: safety.KindClusterAdmin},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := safety.Check(safety.ModeReadOnly, safety.OpExecute, tc.sql)
+			require.NoError(t, err)
+
+			if !tc.expectedReject {
+				require.Nil(t, v, "expected statement to be admitted")
+				return
+			}
+			require.NotNil(t, v, "expected statement to be rejected")
+			require.Equal(t, tc.expectedTag, v.Tag)
+			require.Equal(t, safety.ModeReadOnly, v.Mode)
+			require.Equal(t, safety.OpExecute, v.Op)
+			require.Equal(t, tc.expectedKind, v.Kind)
+		})
+	}
+}
+
+func TestCheckReadOnlyExecuteNestedExplain(t *testing.T) {
+	// The nested-EXPLAIN guard is shared between OpExplain and
+	// OpExecute (same case arm in classifyReadOnly). A future
+	// refactor that splits the case must not silently drop OpExecute
+	// coverage; this test pins it.
+	v, err := safety.Check(safety.ModeReadOnly, safety.OpExecute,
+		"EXPLAIN ANALYZE INSERT INTO t VALUES (1)")
+	require.NoError(t, err)
+	require.NotNil(t, v)
+	require.Contains(t, v.Reason, "nested EXPLAIN")
+	require.Equal(t, safety.KindNestedExplain, v.Kind)
+}
+
+func TestCheckSafeWriteExecute(t *testing.T) {
+	// safe_write admits the read-only set plus DML, but still rejects
+	// DDL (with a full_access escalation hint) and DCL. The cluster's
+	// sql_safe_updates session var is the runtime guard against
+	// unqualified UPDATE/DELETE — that's wired in conn.Manager.Execute,
+	// not in Check, so even bare-WHERE-less UPDATEs pass the AST gate.
+	tests := []struct {
+		name           string
+		sql            string
+		expectedReject bool
+		expectedReason string
+	}{
+		{name: "select admitted", sql: "SELECT 1"},
+		{name: "insert admitted", sql: "INSERT INTO t VALUES (1)"},
+		{name: "update admitted", sql: "UPDATE t SET x = 1 WHERE id = 1"},
+		{name: "delete admitted", sql: "DELETE FROM t WHERE id = 1"},
+		{name: "upsert admitted", sql: "UPSERT INTO t VALUES (1)"},
+		{name: "unqualified update admitted at AST layer",
+			sql: "UPDATE t SET x = 1"},
+
+		{name: "create table rejected with full_access hint",
+			sql:            "CREATE TABLE x (id INT PRIMARY KEY)",
+			expectedReject: true,
+			expectedReason: "rerun with --mode=full_access"},
+		{name: "drop table rejected",
+			sql:            "DROP TABLE users",
+			expectedReject: true,
+			expectedReason: "rerun with --mode=full_access"},
+		{name: "grant rejected as privilege change",
+			sql:            "GRANT SELECT ON t TO bob",
+			expectedReject: true,
+			expectedReason: "privilege/role changes require --mode=full_access"},
+		{name: "configure zone rejected as cluster admin",
+			sql:            "ALTER TABLE t CONFIGURE ZONE USING num_replicas = 5",
+			expectedReject: true,
+			expectedReason: "zone configuration changes require full_access"},
+		{name: "set cluster setting rejected as cluster admin",
+			sql:            "SET CLUSTER SETTING sql.defaults.distsql = 'on'",
+			expectedReject: true,
+			expectedReason: "cluster setting changes require full_access"},
+		{name: "set tracing rejected as cluster admin",
+			sql:            "SET TRACING = on",
+			expectedReject: true,
+			expectedReason: "tracing changes require full_access"},
+		{name: "explain analyze ddl rejected as nested",
+			sql:            "EXPLAIN ANALYZE ALTER TABLE t ADD COLUMN x INT",
+			expectedReject: true,
+			expectedReason: "nested EXPLAIN"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := safety.Check(safety.ModeSafeWrite, safety.OpExecute, tc.sql)
+			require.NoError(t, err)
+			if !tc.expectedReject {
+				require.Nil(t, v, "expected statement to be admitted")
+				return
+			}
+			require.NotNil(t, v)
+			require.Equal(t, safety.ModeSafeWrite, v.Mode)
+			require.Equal(t, safety.OpExecute, v.Op)
+			require.Contains(t, v.Reason, tc.expectedReason)
+		})
+	}
+}
+
+func TestCheckFullAccessExecute(t *testing.T) {
+	// full_access admits anything that parses; defense-in-depth comes
+	// from the statement timeout (and eventually an audit log), not
+	// from the AST allowlist. Empty input is still rejected by Check's
+	// defensive guard — that's covered by TestCheckRejectsEmptyInput.
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{name: "select", sql: "SELECT 1"},
+		{name: "insert", sql: "INSERT INTO t VALUES (1)"},
+		{name: "drop table", sql: "DROP TABLE users"},
+		{name: "create table", sql: "CREATE TABLE x (id INT PRIMARY KEY)"},
+		{name: "grant", sql: "GRANT SELECT ON t TO bob"},
+		{name: "multi statement", sql: "SELECT 1; INSERT INTO t VALUES (1)"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := safety.Check(safety.ModeFullAccess, safety.OpExecute, tc.sql)
+			require.NoError(t, err)
+			require.Nil(t, v, "full_access admits any parsed statement")
 		})
 	}
 }
@@ -151,22 +332,36 @@ func TestCheckParseErrorPropagates(t *testing.T) {
 func TestCheckRejectsEmptyInput(t *testing.T) {
 	// parser.Parse("") returns zero stmts and no error, which without
 	// an explicit empty-batch guard would be (nil, nil) — i.e.
-	// "permitted". Pin the defensive rejection so a regression that
-	// removes the guard is loud.
+	// "permitted". Pin the defensive rejection across every Op so a
+	// regression that removes the guard is loud, and pin the Tag
+	// sentinel so the rendered Message doesn't contain a stray empty
+	// parens cell ("(, mode=…, op=…)").
 	tests := []struct {
 		name string
 		sql  string
+		op   safety.Operation
 	}{
-		{name: "empty string", sql: ""},
-		{name: "whitespace only", sql: "   \n\t  "},
-		{name: "comment only", sql: "-- nothing here"},
+		{name: "explain empty string", sql: "", op: safety.OpExplain},
+		{name: "explain whitespace only", sql: "   \n\t  ", op: safety.OpExplain},
+		{name: "explain comment only", sql: "-- nothing here", op: safety.OpExplain},
+		{name: "execute empty string", sql: "", op: safety.OpExecute},
+		{name: "execute whitespace only", sql: "   \n\t  ", op: safety.OpExecute},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			v, err := safety.Check(safety.ModeReadOnly, safety.OpExplain, tc.sql)
+			v, err := safety.Check(safety.ModeReadOnly, tc.op, tc.sql)
 			require.NoError(t, err)
 			require.NotNil(t, v, "empty input must not bypass the gate")
 			require.Contains(t, v.Reason, "no statements parsed")
+			require.Equal(t, "EMPTY", v.Tag, "empty-input Tag must use the EMPTY sentinel")
+			require.Equal(t, safety.KindOther, v.Kind)
+
+			// No escalation hint helps an empty input; pin that no
+			// suggestion leaks out via Envelope.
+			env := safety.Envelope(v)
+			require.Empty(t, env.Suggestions,
+				"empty input must not produce a mode-escalation hint")
+			require.NotContains(t, env.Message, "(,", "Message must not contain an empty parens cell")
 		})
 	}
 }

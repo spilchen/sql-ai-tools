@@ -152,6 +152,7 @@ round-tripping through a live cluster.`,
 	root.AddCommand(newExplainCmd(state))
 	root.AddCommand(newExplainDDLCmd(state))
 	root.AddCommand(newSimulateCmd(state))
+	root.AddCommand(newExecCmd(state))
 	root.AddCommand(newMCPCmd(state))
 	return root
 }

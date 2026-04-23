@@ -24,9 +24,11 @@
 // envelope. envelope.go is the single bridge between the two.
 //
 // Design doc reference: §Safety Model (read_only is the default,
-// safe_write and full_access are opt-in escalations). Issue #21 wires
-// read_only end-to-end; safe_write and full_access enforcement land in
-// follow-up issue #29.
+// safe_write and full_access are opt-in escalations). Issue #21
+// wired read_only end-to-end; issue #29 wired safe_write and
+// full_access for OpExecute. The explain surfaces still report
+// "not yet implemented" for safe_write/full_access — wiring them is
+// follow-up work.
 package safety
 
 import "fmt"
@@ -37,8 +39,9 @@ import "fmt"
 type Mode string
 
 // Mode values. ModeReadOnly is the default for every Tier 3 command;
-// the other two are recognised by ParseMode but rejected by Check
-// until issue #29 lands.
+// the other two are recognised by ParseMode and admitted by Check
+// for OpExecute (issue #29). For OpExplain/OpExplainDDL/OpSimulate,
+// safe_write and full_access still report "not yet implemented".
 const (
 	ModeReadOnly   Mode = "read_only"
 	ModeSafeWrite  Mode = "safe_write"
@@ -58,10 +61,10 @@ const DefaultMode = ModeReadOnly
 // that names the valid choices, so the message a user sees on a typo
 // is actionable on its own.
 //
-// safe_write and full_access parse successfully even though Check
-// currently rejects them — the split keeps the flag-parsing layer
-// stable across issue #29 so the only churn when those modes land
-// is inside Check.
+// safe_write and full_access parse successfully for every Op even
+// though Check rejects them for OpExplain/OpExplainDDL/OpSimulate
+// today — the split keeps the flag-parsing layer stable so the only
+// churn when those modes land for the other surfaces is inside Check.
 func ParseMode(s string) (Mode, error) {
 	switch Mode(s) {
 	case "":

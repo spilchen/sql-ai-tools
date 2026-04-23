@@ -59,21 +59,68 @@ func contextMap(v *Violation) map[string]any {
 }
 
 // suggestionsFor proposes the higher-mode escape hatch when the
-// violation is mode-driven. We always suggest the lowest-privilege
-// mode that would admit the call — safe_write per design doc §Safety
-// Model — rather than jumping straight to full_access, so agents
-// follow the principle of least privilege.
+// violation can be unblocked by mode escalation. The decision uses
+// Violation.Kind (the structural reason) rather than scanning the
+// human-readable Reason string — that keeps the escalation logic
+// independent of wording tweaks in classifyReadOnly /
+// classifySafeWriteExecute.
+//
+// Principle: pick the smallest mode bump that would admit the call.
+// Schema and DCL skip safe_write (which also rejects them) and go
+// straight to full_access. Writes go to safe_write. Rejections that
+// no escalation can fix (KindNestedExplain, KindUnimplemented,
+// KindBadOpInput, KindOther) get no suggestion.
 func suggestionsFor(v *Violation) []output.Suggestion {
-	if v.Mode != ModeReadOnly {
+	target, ok := escalationTargetFor(v)
+	if !ok {
 		return nil
 	}
-	switch v.Op {
-	case OpExplain, OpExplainDDL:
-		return []output.Suggestion{{
-			Replacement: string(ModeSafeWrite),
-			Reason:      "safety_mode_escalation",
-		}}
-	default:
-		return nil
+	return []output.Suggestion{{
+		Replacement: string(target),
+		Reason:      "safety_mode_escalation",
+	}}
+}
+
+// escalationTargetFor returns the mode an agent should retry with
+// when v is unblockable by escalation, and false otherwise. Lifted
+// out of suggestionsFor so the escalation matrix is a single
+// (Mode, Op, Kind) → Mode table that's easy to scan and update.
+//
+// Unactionable Kinds short-circuit at the top: nested-EXPLAIN
+// wrappers, the empty-input defensive case, unimplemented (mode, op)
+// pairs, and explain-DDL wrong-input-shape rejections all need the
+// caller to fix the input or wait for upstream work, not to bump the
+// mode. Producing a hint anyway would burn an agent's retry on a
+// path that cannot succeed.
+func escalationTargetFor(v *Violation) (Mode, bool) {
+	switch v.Kind {
+	case KindNestedExplain, KindUnimplemented, KindBadOpInput, KindOther:
+		return "", false
 	}
+	switch v.Mode {
+	case ModeReadOnly:
+		switch v.Op {
+		case OpExplain, OpExplainDDL:
+			// The explain surfaces don't yet wire safe_write /
+			// full_access, but for read_only rejections the path
+			// forward when those land will be safe_write — keep the
+			// hint in place so agents can already discover the lever.
+			return ModeSafeWrite, true
+		case OpExecute:
+			switch v.Kind {
+			case KindWrite:
+				return ModeSafeWrite, true
+			case KindSchema, KindPrivilege, KindClusterAdmin:
+				return ModeFullAccess, true
+			}
+		}
+	case ModeSafeWrite:
+		if v.Op == OpExecute {
+			switch v.Kind {
+			case KindSchema, KindPrivilege, KindClusterAdmin:
+				return ModeFullAccess, true
+			}
+		}
+	}
+	return "", false
 }
