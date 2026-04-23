@@ -120,6 +120,13 @@ const (
 	FeatureShowCreateAllRoutines  = "show_create_all_routines"
 	FeatureAlterTableLoggedToggle = "alter_table_logged_unlogged"
 	FeatureGrantRevokeRoutines    = "grant_revoke_routines"
+
+	// v25.4 features.
+	FeatureInspectCommand          = "inspect_command"
+	FeatureShowInspectErrors       = "show_inspect_errors"
+	FeatureLTreeType               = "ltree_type"
+	FeatureChangefeedDatabaseLevel = "changefeed_database_level"
+	FeatureAlterExternalConnection = "alter_external_connection"
 )
 
 // Registry holds an immutable set of Feature entries, indexed by
@@ -288,6 +295,33 @@ func DefaultRegistry() *Registry {
 			Tag:        FeatureGrantRevokeRoutines,
 			Name:       "GRANT/REVOKE ON ALL ROUTINES IN SCHEMA",
 			Introduced: "25.3",
+		},
+
+		// v25.4 features.
+		Feature{
+			Tag:        FeatureInspectCommand,
+			Name:       "INSPECT (table/database consistency check)",
+			Introduced: "25.4",
+		},
+		Feature{
+			Tag:        FeatureShowInspectErrors,
+			Name:       "SHOW INSPECT ERRORS",
+			Introduced: "25.4",
+		},
+		Feature{
+			Tag:        FeatureLTreeType,
+			Name:       "LTREE type",
+			Introduced: "25.4",
+		},
+		Feature{
+			Tag:        FeatureChangefeedDatabaseLevel,
+			Name:       "CREATE DATABASE CHANGEFEED",
+			Introduced: "25.4",
+		},
+		Feature{
+			Tag:        FeatureAlterExternalConnection,
+			Name:       "ALTER EXTERNAL CONNECTION",
+			Introduced: "25.4",
 		},
 	)
 }
