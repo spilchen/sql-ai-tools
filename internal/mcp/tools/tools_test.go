@@ -13,12 +13,25 @@ import (
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 	"github.com/stretchr/testify/require"
 
+	"github.com/spilchen/sql-ai-tools/internal/builtinstubs"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/risk"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
 	"github.com/spilchen/sql-ai-tools/internal/summarize"
 	"github.com/spilchen/sql-ai-tools/internal/validateresult"
 )
+
+// init populates the builtin function registry that
+// semcheck.CheckFunctionNames consults. Production binaries (the CLI
+// and the MCP server) call builtinstubs.Init from their main; tests
+// in this package previously did not exercise the function-name path
+// so the registry could be empty without consequence. Issue #107
+// changed that — without this init, the unknown-function check would
+// flag every name (including legitimate builtins like "length") as
+// unknown.
+func init() {
+	builtinstubs.Init("")
+}
 
 const testParserVersion = "v0.26.2"
 
@@ -354,25 +367,28 @@ func TestValidateSQLHandlerFailurePayloadShapes(t *testing.T) {
 	const usersDDL = "CREATE TABLE users (id INT PRIMARY KEY)"
 
 	tests := []struct {
-		name                   string
-		args                   map[string]any
-		expectedSyntax         validateresult.CheckStatus
-		expectedTypeCheck      validateresult.CheckStatus
-		expectedNameResolution validateresult.CheckStatus
+		name                       string
+		args                       map[string]any
+		expectedSyntax             validateresult.CheckStatus
+		expectedFunctionResolution validateresult.CheckStatus
+		expectedTypeCheck          validateresult.CheckStatus
+		expectedNameResolution     validateresult.CheckStatus
 	}{
 		{
-			name:                   "parse error skips downstream phases",
-			args:                   map[string]any{"sql": "SELECT FROM"},
-			expectedSyntax:         validateresult.CheckFailed,
-			expectedTypeCheck:      validateresult.CheckSkipped,
-			expectedNameResolution: validateresult.CheckSkipped,
+			name:                       "parse error skips downstream phases",
+			args:                       map[string]any{"sql": "SELECT FROM"},
+			expectedSyntax:             validateresult.CheckFailed,
+			expectedFunctionResolution: validateresult.CheckSkipped,
+			expectedTypeCheck:          validateresult.CheckSkipped,
+			expectedNameResolution:     validateresult.CheckSkipped,
 		},
 		{
-			name:                   "type error without schemas leaves name resolution skipped",
-			args:                   map[string]any{"sql": "SELECT 1 + 'x'"},
-			expectedSyntax:         validateresult.CheckOK,
-			expectedTypeCheck:      validateresult.CheckFailed,
-			expectedNameResolution: validateresult.CheckSkipped,
+			name:                       "type error without schemas leaves name resolution skipped",
+			args:                       map[string]any{"sql": "SELECT 1 + 'x'"},
+			expectedSyntax:             validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckOK,
+			expectedTypeCheck:          validateresult.CheckFailed,
+			expectedNameResolution:     validateresult.CheckSkipped,
 		},
 		{
 			name: "unknown table marks name resolution failed",
@@ -380,9 +396,18 @@ func TestValidateSQLHandlerFailurePayloadShapes(t *testing.T) {
 				"sql":     "SELECT * FROM nope",
 				"schemas": []any{map[string]any{"sql": usersDDL}},
 			},
-			expectedSyntax:         validateresult.CheckOK,
-			expectedTypeCheck:      validateresult.CheckOK,
-			expectedNameResolution: validateresult.CheckFailed,
+			expectedSyntax:             validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckOK,
+			expectedTypeCheck:          validateresult.CheckOK,
+			expectedNameResolution:     validateresult.CheckFailed,
+		},
+		{
+			name:                       "unknown function flips function_resolution to failed",
+			args:                       map[string]any{"sql": "SELECT now_()"},
+			expectedSyntax:             validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckFailed,
+			expectedTypeCheck:          validateresult.CheckOK,
+			expectedNameResolution:     validateresult.CheckSkipped,
 		},
 	}
 
@@ -401,10 +426,48 @@ func TestValidateSQLHandlerFailurePayloadShapes(t *testing.T) {
 			require.NoError(t, json.Unmarshal(env.Data, &result))
 			require.False(t, result.Valid)
 			require.Equal(t, tc.expectedSyntax, result.Checks.Syntax)
+			require.Equal(t, tc.expectedFunctionResolution, result.Checks.FunctionResolution)
 			require.Equal(t, tc.expectedTypeCheck, result.Checks.TypeCheck)
 			require.Equal(t, tc.expectedNameResolution, result.Checks.NameResolution)
 		})
 	}
+}
+
+// TestValidateSQLHandlerUnknownFunctionShape pins the end-to-end MCP
+// envelope shape for issue #107: an unknown bare function name produces
+// a 42883 error with did-you-mean suggestions and an
+// available_functions sample, in addition to the failed
+// function_resolution check status.
+func TestValidateSQLHandlerUnknownFunctionShape(t *testing.T) {
+	handler := ValidateSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"sql": "SELECT now_()"}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+
+	var funcErr *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == "42883" {
+			funcErr = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNil(t, funcErr, "expected a 42883 diagnostic in MCP envelope")
+	require.Equal(t, "unknown_function", funcErr.Category)
+	require.Contains(t, funcErr.Message, "now_")
+	require.NotNil(t, funcErr.Position)
+	avail, ok := funcErr.Context["available_functions"].([]any)
+	require.True(t, ok, "available_functions must be a JSON array")
+	require.NotEmpty(t, avail)
+	require.NotEmpty(t, funcErr.Suggestions)
+	require.Equal(t, "now", funcErr.Suggestions[0].Replacement)
+
+	var result validateresult.Result
+	require.NoError(t, json.Unmarshal(env.Data, &result))
+	require.False(t, result.Valid)
+	require.Equal(t, validateresult.CheckFailed, result.Checks.FunctionResolution)
 }
 
 func TestValidateSQLHandler(t *testing.T) {

@@ -18,25 +18,28 @@ import (
 
 func TestRun(t *testing.T) {
 	tests := []struct {
-		name                   string
-		sql                    string
-		withCatalog            bool
-		expectedCategories     []string
-		expectedTypeCheck      validateresult.CheckStatus
-		expectedNameResolution validateresult.CheckStatus
+		name                       string
+		sql                        string
+		withCatalog                bool
+		expectedCategories         []string
+		expectedTypeCheck          validateresult.CheckStatus
+		expectedFunctionResolution validateresult.CheckStatus
+		expectedNameResolution     validateresult.CheckStatus
 	}{
 		{
-			name:                   "all clean",
-			sql:                    "SELECT 1; SELECT * FROM users",
-			withCatalog:            true,
-			expectedTypeCheck:      validateresult.CheckOK,
-			expectedNameResolution: validateresult.CheckOK,
+			name:                       "all clean",
+			sql:                        "SELECT 1; SELECT * FROM users",
+			withCatalog:                true,
+			expectedTypeCheck:          validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckOK,
+			expectedNameResolution:     validateresult.CheckOK,
 		},
 		{
-			name:                   "name resolution skipped without catalog",
-			sql:                    "SELECT * FROM usrs",
-			expectedTypeCheck:      validateresult.CheckOK,
-			expectedNameResolution: validateresult.CheckSkipped,
+			name:                       "name resolution skipped without catalog",
+			sql:                        "SELECT * FROM usrs",
+			expectedTypeCheck:          validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckOK,
+			expectedNameResolution:     validateresult.CheckSkipped,
 		},
 		{
 			name:        "two distinct typos in one envelope",
@@ -46,8 +49,9 @@ func TestRun(t *testing.T) {
 				diag.CategoryUnknownTable,
 				diag.CategoryUnknownColumn,
 			},
-			expectedTypeCheck:      validateresult.CheckOK,
-			expectedNameResolution: validateresult.CheckFailed,
+			expectedTypeCheck:          validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckOK,
+			expectedNameResolution:     validateresult.CheckFailed,
 		},
 		{
 			name:        "type error in stmt 1 does not hide name error in stmt 2",
@@ -57,8 +61,9 @@ func TestRun(t *testing.T) {
 				diag.CategoryTypeMismatch,
 				diag.CategoryUnknownTable,
 			},
-			expectedTypeCheck:      validateresult.CheckFailed,
-			expectedNameResolution: validateresult.CheckFailed,
+			expectedTypeCheck:          validateresult.CheckFailed,
+			expectedFunctionResolution: validateresult.CheckOK,
+			expectedNameResolution:     validateresult.CheckFailed,
 		},
 		{
 			name:        "unknown table suppresses cascaded column error",
@@ -67,8 +72,31 @@ func TestRun(t *testing.T) {
 			expectedCategories: []string{
 				diag.CategoryUnknownTable,
 			},
-			expectedTypeCheck:      validateresult.CheckOK,
-			expectedNameResolution: validateresult.CheckFailed,
+			expectedTypeCheck:          validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckOK,
+			expectedNameResolution:     validateresult.CheckFailed,
+		},
+		{
+			name: "unknown function flagged without catalog",
+			sql:  "SELECT now_()",
+			expectedCategories: []string{
+				diag.CategoryUnknownFunction,
+			},
+			expectedTypeCheck:          validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckFailed,
+			expectedNameResolution:     validateresult.CheckSkipped,
+		},
+		{
+			name:        "unknown function and unknown table reported together",
+			sql:         "SELECT now_() FROM usrs",
+			withCatalog: true,
+			expectedCategories: []string{
+				diag.CategoryUnknownFunction,
+				diag.CategoryUnknownTable,
+			},
+			expectedTypeCheck:          validateresult.CheckOK,
+			expectedFunctionResolution: validateresult.CheckFailed,
+			expectedNameResolution:     validateresult.CheckFailed,
 		},
 	}
 
@@ -85,6 +113,7 @@ func TestRun(t *testing.T) {
 			res, errs := Run(stmts, tc.sql, cat)
 
 			require.Equal(t, tc.expectedTypeCheck, res.TypeCheck)
+			require.Equal(t, tc.expectedFunctionResolution, res.FunctionResolution)
 			require.Equal(t, tc.expectedNameResolution, res.NameResolution)
 			require.Len(t, errs, len(tc.expectedCategories))
 			for i, want := range tc.expectedCategories {
@@ -106,21 +135,24 @@ func TestRun(t *testing.T) {
 }
 
 // TestRunPhaseOrdering pins the phase order so consumers (and the
-// validate command's text renderer) can rely on it. Type-check errors
-// always come before table-name errors, which always come before
-// column-name errors.
+// validate command's text renderer) can rely on it. Function-name
+// errors come first (they carry the most actionable did-you-mean
+// suggestions), then type-check errors, then table-name, then
+// column-name.
 func TestRunPhaseOrdering(t *testing.T) {
-	const sql = "SELECT 1 + 'x'; SELECT * FROM usrs; SELECT u.nme FROM users u"
+	const sql = "SELECT now_(); SELECT 1 + 'x'; SELECT * FROM usrs; SELECT u.nme FROM users u"
 	stmts, err := parser.Parse(sql)
 	require.NoError(t, err)
 
 	res, errs := Run(stmts, sql, usersOnlyCatalog(t))
 
+	require.Equal(t, validateresult.CheckFailed, res.FunctionResolution)
 	require.Equal(t, validateresult.CheckFailed, res.TypeCheck)
 	require.Equal(t, validateresult.CheckFailed, res.NameResolution)
-	require.Len(t, errs, 3)
+	require.Len(t, errs, 4)
 
-	require.Equal(t, diag.CategoryTypeMismatch, diag.CategoryForCode(errs[0].Code))
-	require.Equal(t, diag.CategoryUnknownTable, errs[1].Category)
-	require.Equal(t, diag.CategoryUnknownColumn, errs[2].Category)
+	require.Equal(t, diag.CategoryUnknownFunction, errs[0].Category)
+	require.Equal(t, diag.CategoryTypeMismatch, diag.CategoryForCode(errs[1].Code))
+	require.Equal(t, diag.CategoryUnknownTable, errs[2].Category)
+	require.Equal(t, diag.CategoryUnknownColumn, errs[3].Category)
 }

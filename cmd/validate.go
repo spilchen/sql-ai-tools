@@ -100,9 +100,10 @@ matched by the config and reports per-file results in one envelope.`,
 				// and the rest as Skipped. Consumers can branch on
 				// the Checks payload without inspecting error codes.
 				parseChecks := validateresult.Checks{
-					Syntax:         validateresult.CheckFailed,
-					TypeCheck:      validateresult.CheckSkipped,
-					NameResolution: validateresult.CheckSkipped,
+					Syntax:             validateresult.CheckFailed,
+					TypeCheck:          validateresult.CheckSkipped,
+					FunctionResolution: validateresult.CheckSkipped,
+					NameResolution:     validateresult.CheckSkipped,
 				}
 				return renderValidateFailure(r, baseEnv,
 					[]output.Error{diag.FromParseError(parseErr, sql)}, parseChecks)
@@ -136,6 +137,7 @@ matched by the config and reports per-file results in one envelope.`,
 
 			semRes, semErrs := semcheck.Run(stmts, sql, cat)
 			checks.TypeCheck = semRes.TypeCheck
+			checks.FunctionResolution = semRes.FunctionResolution
 			checks.NameResolution = semRes.NameResolution
 
 			if len(semErrs) > 0 {
