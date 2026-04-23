@@ -23,13 +23,17 @@ import "github.com/spilchen/sql-ai-tools/internal/output"
 // "okay" reach the wire. JSON marshaling is unchanged.
 type CheckStatus string
 
-// CheckStatus values. A phase is either CheckOK (ran and passed) or
-// CheckSkipped (its prerequisite — typically --schema or the schemas
-// MCP argument — was missing). A failing phase aborts the request via
-// an envelope error, so a "fail" status never appears here.
+// CheckStatus values. CheckOK means the phase ran and produced no
+// errors; CheckSkipped means its prerequisite (typically --schema or
+// the schemas MCP argument) was missing; CheckFailed means the phase
+// ran but produced one or more errors. The failure path emits Checks
+// alongside Errors so consumers can attribute errors to phases and
+// see which downstream phases (if any) were skipped because an
+// upstream phase could not produce usable input.
 const (
 	CheckOK      CheckStatus = "ok"
 	CheckSkipped CheckStatus = "skipped"
+	CheckFailed  CheckStatus = "failed"
 )
 
 // CapabilityRequiredCode is the envelope error Code (and Category) for
@@ -43,19 +47,23 @@ const CapabilityRequiredCode = "capability_required"
 // and in the Checks field name so the two cannot drift.
 const CapabilityNameResolution = "name_resolution"
 
-// Checks records which validation phases ran on the success path.
-// Each field is one of CheckOK or CheckSkipped. Adding a phase means
-// adding a field here and updating both surfaces' rendering paths.
+// Checks records the per-phase outcome for a validation run. Each
+// field is CheckOK, CheckSkipped, or CheckFailed. Both the success
+// and failure paths populate this struct so agents always learn which
+// phases ran. Adding a phase means adding a field here and updating
+// both surfaces (CLI and MCP) on each path (success and failure) — four
+// rendering sites total.
 type Checks struct {
 	Syntax         CheckStatus `json:"syntax"`
 	TypeCheck      CheckStatus `json:"type_check"`
 	NameResolution CheckStatus `json:"name_resolution"`
 }
 
-// Result is the success-path JSON payload for SQL validation. The
-// expanded shape (vs. a bare {valid: true}) exposes which phases ran,
-// so agents can tell whether name resolution was skipped due to a
-// missing schema.
+// Result is the JSON payload for SQL validation. Valid is true on
+// the success path (no errors emitted) and false when one or more
+// phases produced errors. Checks reports the per-phase outcome in
+// either case so agents can tell whether name resolution was
+// skipped, ran cleanly, or failed.
 type Result struct {
 	Valid  bool   `json:"valid"`
 	Checks Checks `json:"checks"`

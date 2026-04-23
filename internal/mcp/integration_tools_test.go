@@ -191,12 +191,21 @@ func TestIntegrationValidateSQL(t *testing.T) {
 		res := callTool(t, c, tools.ValidateSQLToolName, map[string]any{"sql": "SELECT 1 + 'abc'"})
 		env := decodeEnvelope(t, res)
 		require.Equal(t, output.TierZeroConfig, env.Tier)
-		require.NotEmpty(t, env.Errors, "type-check failure must populate envelope errors")
+		// The Tier 0 path also emits a capability_required warning
+		// when schemas are absent, so the type error is no longer
+		// guaranteed to be at index 0. Find it by severity.
+		var typeErr *output.Error
+		for i := range env.Errors {
+			if env.Errors[i].Severity == output.SeverityError {
+				typeErr = &env.Errors[i]
+				break
+			}
+		}
+		require.NotNil(t, typeErr, "type-check failure must populate envelope errors")
 		// Type errors carry a SQLSTATE from the parser/type checker;
 		// avoid pinning the exact code so a parser bump that refines
 		// the diagnosis (e.g. 42883 → 42804) does not break the test.
-		require.NotEmpty(t, env.Errors[0].Code)
-		require.Equal(t, output.SeverityError, env.Errors[0].Severity)
+		require.NotEmpty(t, typeErr.Code)
 	})
 
 	t.Run("missing sql parameter is tool error", func(t *testing.T) {
