@@ -53,10 +53,18 @@ const CapabilityNameResolution = "name_resolution"
 // phases ran. Adding a phase means adding a field here and updating
 // both surfaces (CLI and MCP) on each path (success and failure) — four
 // rendering sites total.
+// Field declaration order matches the phase-execution order in
+// semcheck.Run (and the prose order in its doc comment): syntax,
+// then function-name resolution, then expression type-checking, then
+// table/column name resolution. Keeping the two in lockstep means a
+// reader can use either source as the authoritative ordering and the
+// JSON envelope renders fields in execution order, which makes
+// failure paths easier to scan.
 type Checks struct {
-	Syntax         CheckStatus `json:"syntax"`
-	TypeCheck      CheckStatus `json:"type_check"`
-	NameResolution CheckStatus `json:"name_resolution"`
+	Syntax             CheckStatus `json:"syntax"`
+	FunctionResolution CheckStatus `json:"function_resolution"`
+	TypeCheck          CheckStatus `json:"type_check"`
+	NameResolution     CheckStatus `json:"name_resolution"`
 }
 
 // Result is the JSON payload for SQL validation. Valid is true on

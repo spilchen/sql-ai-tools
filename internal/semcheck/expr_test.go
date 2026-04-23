@@ -58,10 +58,14 @@ func TestCheckExprTypes(t *testing.T) {
 			expectedMsg:   "unknown signature",
 		},
 		{
-			name:          "unknown function detected",
+			// Unknown bare function names are owned by
+			// CheckFunctionNames, which emits the structured
+			// 42883 with suggestions. CheckExprTypes deliberately
+			// skips the FuncExpr (see containsUnknownFunc) so the
+			// user sees exactly one diagnostic per typo.
+			name:          "unknown function skipped by type check",
 			sql:           "SELECT now_()",
-			expectedCount: 1,
-			expectedMsg:   "unknown function",
+			expectedCount: 0,
 		},
 		{
 			name:          "subquery skipped",
@@ -130,4 +134,47 @@ func TestCheckExprTypesPosition(t *testing.T) {
 func TestCheckExprTypesEmptyStatements(t *testing.T) {
 	errs := CheckExprTypes(nil, "")
 	require.Empty(t, errs)
+}
+
+// TestCheckExprTypesUnknownFuncCrossTalk pins the contract documented
+// on containsUnknownFunc: skipping a FuncExpr whose bare name is
+// unresolved must not silence type errors in sibling sub-expressions.
+// Without this guarantee, a single typo would suppress every
+// type-mismatch in the same statement and the user would see a new
+// error after each fix-and-retry.
+func TestCheckExprTypesUnknownFuncCrossTalk(t *testing.T) {
+	tests := []struct {
+		name          string
+		sql           string
+		expectedCount int
+		expectedMsg   string
+	}{
+		{
+			name:          "type error in sibling of unknown call",
+			sql:           "SELECT 1 + 'x', bogus_fn()",
+			expectedCount: 1,
+			expectedMsg:   "unsupported binary operator",
+		},
+		{
+			name:          "type error nested in arg list of known call wrapping unknown",
+			sql:           "SELECT length(bogus_fn(), 1+'x')",
+			expectedCount: 1,
+			expectedMsg:   "unsupported binary operator",
+		},
+		{
+			name:          "type error in same binary expression as unknown call",
+			sql:           "SELECT 1 + 'x' + bogus_fn()",
+			expectedCount: 1,
+			expectedMsg:   "unsupported binary operator",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stmts, err := parser.Parse(tc.sql)
+			require.NoError(t, err)
+			errs := CheckExprTypes(stmts, tc.sql)
+			require.Len(t, errs, tc.expectedCount)
+			require.Contains(t, errs[0].Message, tc.expectedMsg)
+		})
+	}
 }

@@ -79,9 +79,10 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 		if parseErr != nil {
 			env.Errors = append(env.Errors, diag.FromParseError(parseErr, sql))
 			return failureEnvelope(env, validateresult.Checks{
-				Syntax:         validateresult.CheckFailed,
-				TypeCheck:      validateresult.CheckSkipped,
-				NameResolution: validateresult.CheckSkipped,
+				Syntax:             validateresult.CheckFailed,
+				TypeCheck:          validateresult.CheckSkipped,
+				FunctionResolution: validateresult.CheckSkipped,
+				NameResolution:     validateresult.CheckSkipped,
 			})
 		}
 
@@ -111,6 +112,7 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 
 		semRes, semErrs := semcheck.Run(stmts, sql, cat)
 		checks.TypeCheck = semRes.TypeCheck
+		checks.FunctionResolution = semRes.FunctionResolution
 		checks.NameResolution = semRes.NameResolution
 
 		if len(semErrs) > 0 {

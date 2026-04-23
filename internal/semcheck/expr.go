@@ -5,21 +5,28 @@
 
 // Package semcheck provides Tier 1 (zero-config) semantic checks that
 // operate on parsed ASTs without a schema catalog or cluster
-// connection. Currently the only check is expression type checking,
-// which detects type mismatches in literal expressions (e.g. 1 +
-// 'hello') and builtin function calls (e.g. upper(123)) using
-// MakeSemaContext(nil). Builtin function metadata is registered at
-// startup via internal/builtinstubs, enabling function-name validation
-// and overload resolution without a live database.
+// connection. Today there are two zero-config phases: function-name
+// resolution (CheckFunctionNames, which surfaces 42883 typos with
+// "did you mean?" suggestions) and expression type checking
+// (CheckExprTypes, which detects type mismatches in literal
+// expressions and builtin function calls using MakeSemaContext(nil)).
+// Builtin function metadata is registered at startup via
+// internal/builtinstubs, enabling both phases to operate without a
+// live database.
 //
-// Expressions that reference columns, subqueries, or placeholders are
-// silently skipped because resolving those names requires a catalog
-// (Tier 2) or connection (Tier 3).
+// Expressions that reference columns, subqueries, placeholders, or
+// FuncExprs whose bare names are unknown to the builtin registry are
+// silently skipped by CheckExprTypes. Columns/subqueries/placeholders
+// are skipped because resolving them requires a catalog (Tier 2) or
+// connection (Tier 3); unknown function names are skipped to avoid
+// double-reporting the structured 42883 already produced by
+// CheckFunctionNames.
 package semcheck
 
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
@@ -51,6 +58,14 @@ func CheckExprTypes(stmts statements.Statements, fullSQL string) []output.Error 
 				return false, expr, nil
 			}
 			if containsVariable(expr) {
+				return true, expr, nil
+			}
+			// CheckFunctionNames already owns the 42883 diagnostic
+			// for bare-unknown calls; type-checking the same node
+			// would emit a second error pointing at the same span.
+			// Recurse without checking so any well-formed sibling
+			// expressions still get type-checked.
+			if containsUnknownFunc(expr) {
 				return true, expr, nil
 			}
 
@@ -108,6 +123,52 @@ func (d *variableDetector) VisitPre(expr tree.Expr) (bool, tree.Expr) {
 }
 
 func (d *variableDetector) VisitPost(expr tree.Expr) tree.Expr { return expr }
+
+// containsUnknownFunc walks expr and returns true if any descendant is
+// a *tree.FuncExpr whose bare name (the rightmost UnresolvedName Part)
+// is not registered in tree.FunDefs. Schema-qualified calls and
+// pre-resolved references (FunctionDefinition / ResolvedFunction-
+// Definition / FunctionOID — produced by grammar rules like
+// WrapFunction for keywords) are not counted because CheckFunctionNames
+// also skips them.
+func containsUnknownFunc(expr tree.Expr) bool {
+	var found bool
+	v := unknownFuncDetector{found: &found}
+	tree.WalkExprConst(&v, expr)
+	return found
+}
+
+type unknownFuncDetector struct {
+	found *bool
+}
+
+func (d *unknownFuncDetector) VisitPre(expr tree.Expr) (bool, tree.Expr) {
+	if *d.found {
+		return false, expr
+	}
+	fn, ok := expr.(*tree.FuncExpr)
+	if !ok {
+		return true, expr
+	}
+	un, ok := fn.Func.FunctionReference.(*tree.UnresolvedName)
+	if !ok {
+		return true, expr
+	}
+	if un.NumParts != 1 {
+		return true, expr
+	}
+	name := strings.ToLower(un.Parts[0])
+	if name == "" {
+		return true, expr
+	}
+	if _, known := tree.FunDefs[name]; !known {
+		*d.found = true
+		return false, expr
+	}
+	return true, expr
+}
+
+func (d *unknownFuncDetector) VisitPost(expr tree.Expr) tree.Expr { return expr }
 
 // safeTypeCheck type-checks expr, recovering from panics that the
 // type-checker may trigger for certain expression types (e.g.

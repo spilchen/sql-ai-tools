@@ -80,14 +80,16 @@ func TestValidateCmdJSONSuccess(t *testing.T) {
 	var payload struct {
 		Valid  bool `json:"valid"`
 		Checks struct {
-			Syntax         string `json:"syntax"`
-			TypeCheck      string `json:"type_check"`
-			NameResolution string `json:"name_resolution"`
+			Syntax             string `json:"syntax"`
+			FunctionResolution string `json:"function_resolution"`
+			TypeCheck          string `json:"type_check"`
+			NameResolution     string `json:"name_resolution"`
 		} `json:"checks"`
 	}
 	require.NoError(t, json.Unmarshal(env.Data, &payload))
 	require.True(t, payload.Valid)
 	require.Equal(t, "ok", payload.Checks.Syntax)
+	require.Equal(t, "ok", payload.Checks.FunctionResolution)
 	require.Equal(t, "ok", payload.Checks.TypeCheck)
 	require.Equal(t, "skipped", payload.Checks.NameResolution)
 }
@@ -143,14 +145,16 @@ func TestValidateCmdJSONError(t *testing.T) {
 	var payload struct {
 		Valid  bool `json:"valid"`
 		Checks struct {
-			Syntax         string `json:"syntax"`
-			TypeCheck      string `json:"type_check"`
-			NameResolution string `json:"name_resolution"`
+			Syntax             string `json:"syntax"`
+			FunctionResolution string `json:"function_resolution"`
+			TypeCheck          string `json:"type_check"`
+			NameResolution     string `json:"name_resolution"`
 		} `json:"checks"`
 	}
 	require.NoError(t, json.Unmarshal(env.Data, &payload))
 	require.False(t, payload.Valid)
 	require.Equal(t, "failed", payload.Checks.Syntax)
+	require.Equal(t, "skipped", payload.Checks.FunctionResolution)
 	require.Equal(t, "skipped", payload.Checks.TypeCheck)
 	require.Equal(t, "skipped", payload.Checks.NameResolution)
 }
@@ -331,15 +335,76 @@ func TestValidateCmdTypeErrorJSON(t *testing.T) {
 	var payload struct {
 		Valid  bool `json:"valid"`
 		Checks struct {
-			Syntax         string `json:"syntax"`
-			TypeCheck      string `json:"type_check"`
-			NameResolution string `json:"name_resolution"`
+			Syntax             string `json:"syntax"`
+			FunctionResolution string `json:"function_resolution"`
+			TypeCheck          string `json:"type_check"`
+			NameResolution     string `json:"name_resolution"`
 		} `json:"checks"`
 	}
 	require.NoError(t, json.Unmarshal(env.Data, &payload))
 	require.False(t, payload.Valid)
 	require.Equal(t, "ok", payload.Checks.Syntax)
+	require.Equal(t, "ok", payload.Checks.FunctionResolution)
 	require.Equal(t, "failed", payload.Checks.TypeCheck)
+	require.Equal(t, "skipped", payload.Checks.NameResolution)
+}
+
+// TestValidateCmdUnknownFunction is the end-to-end demo from issue
+// #107: a typo'd function name surfaces a structured 42883 with
+// did-you-mean suggestions and an available_functions sample, and
+// the envelope's checks payload reports function_resolution=failed
+// while everything else either ran cleanly or was skipped.
+func TestValidateCmdUnknownFunction(t *testing.T) {
+	root := newRootCmd()
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"validate", "--output", "json", "-e", "SELECT now_()"})
+
+	err := root.Execute()
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+
+	// Find the 42883 diagnostic; the envelope also carries the
+	// capability_required warning for the missing --schema, which
+	// is not what we're asserting here.
+	var funcErr *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == "42883" {
+			funcErr = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNil(t, funcErr, "expected a 42883 diagnostic in envelope")
+	require.Equal(t, "unknown_function", funcErr.Category)
+	require.Contains(t, funcErr.Message, "now_")
+	require.NotNil(t, funcErr.Position)
+	require.Equal(t, 1, funcErr.Position.Line)
+	require.Equal(t, 8, funcErr.Position.Column)
+
+	avail, ok := funcErr.Context["available_functions"].([]any)
+	require.True(t, ok, "available_functions must be a JSON array")
+	require.NotEmpty(t, avail)
+
+	require.NotEmpty(t, funcErr.Suggestions)
+	require.Equal(t, "now", funcErr.Suggestions[0].Replacement)
+
+	var payload struct {
+		Valid  bool `json:"valid"`
+		Checks struct {
+			Syntax             string `json:"syntax"`
+			FunctionResolution string `json:"function_resolution"`
+			TypeCheck          string `json:"type_check"`
+			NameResolution     string `json:"name_resolution"`
+		} `json:"checks"`
+	}
+	require.NoError(t, json.Unmarshal(env.Data, &payload))
+	require.False(t, payload.Valid)
+	require.Equal(t, "ok", payload.Checks.Syntax)
+	require.Equal(t, "failed", payload.Checks.FunctionResolution)
+	require.Equal(t, "ok", payload.Checks.TypeCheck)
 	require.Equal(t, "skipped", payload.Checks.NameResolution)
 }
 
