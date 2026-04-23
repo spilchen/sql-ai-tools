@@ -42,6 +42,7 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "alter changefeed at", tag: FeatureAlterChangefeed, target: "22.1", expectedStatus: StatusSupported},
 		{name: "alter changefeed after", tag: FeatureAlterChangefeed, target: "22.2", expectedStatus: StatusSupported},
 
+		// v24.3 features.
 		{name: "triggers before", tag: FeatureTriggers, target: "24.2", expectedStatus: StatusNotYetIntroduced},
 		{name: "triggers at", tag: FeatureTriggers, target: "24.3", expectedStatus: StatusSupported},
 		{name: "triggers after", tag: FeatureTriggers, target: "25.1", expectedStatus: StatusSupported},
@@ -54,6 +55,7 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "ldr skip schema check at", tag: FeatureLDRSkipSchemaCheck, target: "24.3", expectedStatus: StatusSupported},
 		{name: "ldr skip schema check after", tag: FeatureLDRSkipSchemaCheck, target: "25.1", expectedStatus: StatusSupported},
 
+		// v25.1 features.
 		{name: "vector index before", tag: FeatureVectorIndex, target: "24.3", expectedStatus: StatusNotYetIntroduced},
 		{name: "vector index at", tag: FeatureVectorIndex, target: "25.1", expectedStatus: StatusSupported},
 		{name: "vector index after", tag: FeatureVectorIndex, target: "25.2", expectedStatus: StatusSupported},
@@ -82,6 +84,7 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "xa txn at", tag: FeatureXATransactions, target: "25.1", expectedStatus: StatusSupported},
 		{name: "xa txn after", tag: FeatureXATransactions, target: "25.2", expectedStatus: StatusSupported},
 
+		// v25.2 features.
 		{name: "create policy if not exists before", tag: FeatureCreatePolicyIfNotExists, target: "25.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "create policy if not exists at", tag: FeatureCreatePolicyIfNotExists, target: "25.2", expectedStatus: StatusSupported},
 		{name: "create policy if not exists after", tag: FeatureCreatePolicyIfNotExists, target: "25.3", expectedStatus: StatusSupported},
@@ -94,6 +97,7 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "alter vc repl source at", tag: FeatureAlterVirtualClusterReplicationSrc, target: "25.2", expectedStatus: StatusSupported},
 		{name: "alter vc repl source after", tag: FeatureAlterVirtualClusterReplicationSrc, target: "25.3", expectedStatus: StatusSupported},
 
+		// v25.3 features.
 		{name: "show create all triggers before", tag: FeatureShowCreateAllTriggers, target: "25.2", expectedStatus: StatusNotYetIntroduced},
 		{name: "show create all triggers at", tag: FeatureShowCreateAllTriggers, target: "25.3", expectedStatus: StatusSupported},
 		{name: "show create all triggers after", tag: FeatureShowCreateAllTriggers, target: "25.4", expectedStatus: StatusSupported},
@@ -102,14 +106,15 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "show create all routines at", tag: FeatureShowCreateAllRoutines, target: "25.3", expectedStatus: StatusSupported},
 		{name: "show create all routines after", tag: FeatureShowCreateAllRoutines, target: "25.4", expectedStatus: StatusSupported},
 
-		{name: "alter table logged toggle before", tag: FeatureAlterTableLoggedToggle, target: "25.2", expectedStatus: StatusNotYetIntroduced},
-		{name: "alter table logged toggle at", tag: FeatureAlterTableLoggedToggle, target: "25.3", expectedStatus: StatusSupported},
-		{name: "alter table logged toggle after", tag: FeatureAlterTableLoggedToggle, target: "25.4", expectedStatus: StatusSupported},
+		{name: "alter table logged toggle before", tag: FeatureAlterTableLoggedUnlogged, target: "25.2", expectedStatus: StatusNotYetIntroduced},
+		{name: "alter table logged toggle at", tag: FeatureAlterTableLoggedUnlogged, target: "25.3", expectedStatus: StatusSupported},
+		{name: "alter table logged toggle after", tag: FeatureAlterTableLoggedUnlogged, target: "25.4", expectedStatus: StatusSupported},
 
 		{name: "grant revoke routines before", tag: FeatureGrantRevokeRoutines, target: "25.2", expectedStatus: StatusNotYetIntroduced},
 		{name: "grant revoke routines at", tag: FeatureGrantRevokeRoutines, target: "25.3", expectedStatus: StatusSupported},
 		{name: "grant revoke routines after", tag: FeatureGrantRevokeRoutines, target: "25.4", expectedStatus: StatusSupported},
 
+		// v25.4 features.
 		{name: "inspect before", tag: FeatureInspectCommand, target: "25.3", expectedStatus: StatusNotYetIntroduced},
 		{name: "inspect at", tag: FeatureInspectCommand, target: "25.4", expectedStatus: StatusSupported},
 		{name: "inspect after", tag: FeatureInspectCommand, target: "26.1", expectedStatus: StatusSupported},
@@ -130,6 +135,7 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "alter external conn at", tag: FeatureAlterExternalConnection, target: "25.4", expectedStatus: StatusSupported},
 		{name: "alter external conn after", tag: FeatureAlterExternalConnection, target: "26.1", expectedStatus: StatusSupported},
 
+		// v26.1 features.
 		{name: "show jobs resolved ts before", tag: FeatureShowJobsResolvedTimestamp, target: "25.4", expectedStatus: StatusNotYetIntroduced},
 		{name: "show jobs resolved ts at", tag: FeatureShowJobsResolvedTimestamp, target: "26.1", expectedStatus: StatusSupported},
 		{name: "show jobs resolved ts after", tag: FeatureShowJobsResolvedTimestamp, target: "26.2", expectedStatus: StatusSupported},
@@ -146,20 +152,28 @@ func TestSupports_BoundaryVersions(t *testing.T) {
 		{name: "composite array fields at", tag: FeatureCompositeTypeArrayFields, target: "26.1", expectedStatus: StatusSupported},
 		{name: "composite array fields after", tag: FeatureCompositeTypeArrayFields, target: "26.2", expectedStatus: StatusSupported},
 
+		// v26.2 features. The "after" target is a synthetic future minor
+		// (27.1) so that strict-greater-than comparison is exercised even
+		// for the newest registered features. Update this when 26.3 lands.
 		{name: "commit and chain before", tag: FeatureCommitAndChain, target: "26.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "commit and chain at", tag: FeatureCommitAndChain, target: "26.2", expectedStatus: StatusSupported},
+		{name: "commit and chain after", tag: FeatureCommitAndChain, target: "27.1", expectedStatus: StatusSupported},
 
 		{name: "enable disable trigger before", tag: FeatureAlterTableEnableDisableTrigger, target: "26.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "enable disable trigger at", tag: FeatureAlterTableEnableDisableTrigger, target: "26.2", expectedStatus: StatusSupported},
+		{name: "enable disable trigger after", tag: FeatureAlterTableEnableDisableTrigger, target: "27.1", expectedStatus: StatusSupported},
 
 		{name: "alter index storage params before", tag: FeatureAlterIndexStorageParams, target: "26.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "alter index storage params at", tag: FeatureAlterIndexStorageParams, target: "26.2", expectedStatus: StatusSupported},
+		{name: "alter index storage params after", tag: FeatureAlterIndexStorageParams, target: "27.1", expectedStatus: StatusSupported},
 
 		{name: "show statement hints before", tag: FeatureShowStatementHints, target: "26.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "show statement hints at", tag: FeatureShowStatementHints, target: "26.2", expectedStatus: StatusSupported},
+		{name: "show statement hints after", tag: FeatureShowStatementHints, target: "27.1", expectedStatus: StatusSupported},
 
 		{name: "push statistics before", tag: FeatureAlterTablePushStatistics, target: "26.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "push statistics at", tag: FeatureAlterTablePushStatistics, target: "26.2", expectedStatus: StatusSupported},
+		{name: "push statistics after", tag: FeatureAlterTablePushStatistics, target: "27.1", expectedStatus: StatusSupported},
 
 		{name: "cross-major: target predates oldest seed", tag: FeaturePLpgSQLFunctionBody, target: "19.1", expectedStatus: StatusNotYetIntroduced},
 		{name: "cross-major: target newer than newest seed", tag: FeaturePLpgSQLFunctionBody, target: "26.2", expectedStatus: StatusSupported},
@@ -250,7 +264,7 @@ func TestExportedConstantsAreRegistered(t *testing.T) {
 		FeatureAlterVirtualClusterReplicationSrc,
 		FeatureShowCreateAllTriggers,
 		FeatureShowCreateAllRoutines,
-		FeatureAlterTableLoggedToggle,
+		FeatureAlterTableLoggedUnlogged,
 		FeatureGrantRevokeRoutines,
 		FeatureInspectCommand,
 		FeatureShowInspectErrors,
