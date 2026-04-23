@@ -286,11 +286,16 @@ func withClause(stmt tree.Statement) *tree.With {
 //
 //   - a catalog table — its columns are known and refs against it are
 //     checked;
-//   - an unresolved table (CheckTableNames already flagged it), CTE
-//     name, subquery in FROM, or numeric TableRef — recorded with
-//     columns=nil so refs against it are silently skipped, avoiding a
-//     cascade of false-positive unknown_column errors. CTE/subquery
-//     column inference is deferred to issue #98.
+//   - a derived source (CTE body or subquery in FROM) — columns are
+//     inferred from the body's projection list (or taken from an
+//     explicit `AS x(a, b)` alias list when present) and refs are
+//     checked against that. When inference is defeated (SELECT *,
+//     VALUES, an opaque expression shape) the source is recorded
+//     with columns=nil and refs are silently skipped;
+//   - an unresolved table (CheckTableNames already flagged it),
+//     numeric TableRef, ROWS FROM, or other opaque shape — recorded
+//     with columns=nil so refs against it are silently skipped,
+//     avoiding a cascade of false-positive unknown_column errors.
 //
 // Subqueries appearing in expressions (WHERE, SELECT-list, HAVING,
 // ...) push a child scope so correlated refs to the outer scope still
@@ -361,9 +366,22 @@ type columnChecker struct {
 // SELECT/INSERT/UPDATE/DELETE creates a new scope linked to its
 // enclosing scope via parent so correlated refs walk the chain.
 //
-// sources holds the FROM/JOIN/CTE entries visible in this scope. The
-// list preserves source order so available_columns lists in error
-// payloads appear in the order the user wrote them.
+// sources holds the FROM/JOIN entries visible in this scope. The list
+// preserves source order so available_columns lists in error payloads
+// appear in the order the user wrote them.
+//
+// ctes holds the projected column lists of CTEs declared by the
+// enclosing WITH clause, keyed lower-case. Populated by pushCTEs and
+// read by lookupCTE; never mutated thereafter. Stored separately from
+// sources because a CTE only contributes columns once it is referenced
+// in FROM — counting it on both the WITH-frame and the FROM-frame
+// would mis-flag unqualified refs as ambiguous. sourceForName consults
+// lookupCTE before the catalog so a FROM-clause name that matches a
+// CTE is wired to the CTE's columns instead of becoming an unknown
+// catalog source. Map values may be nil — that means the CTE is in
+// scope but its body defeated inference (SELECT *, VALUES, opaque
+// expression) and a downstream FROM-clause reference will record an
+// unknownSource so refs against the alias are silently skipped.
 //
 // selectAliases is populated by SELECT-list parsing for use by GROUP
 // BY / HAVING / ORDER BY: an unqualified ref that matches an alias is
@@ -372,6 +390,7 @@ type columnChecker struct {
 type scope struct {
 	parent        *scope
 	sources       []source
+	ctes          map[string][]string
 	selectAliases map[string]struct{}
 }
 
@@ -381,11 +400,14 @@ type scope struct {
 // only to cascade suppression (no qualified ref can match it).
 //
 // Invariant: columns == nil means "columns unknown — skip refs against
-// this source". An empty-but-non-nil slice would mean "the catalog says
-// this table has no columns", which is a different (and currently
-// impossible) state. Callers MUST use columnsKnown() to test, never
-// len(columns) == 0 — the project-wide convention to prefer len-checks
-// over nil-checks does not apply to this field.
+// this source". A non-nil slice is the authoritative column list, and
+// every construction path (catalog tables, inferred derived-source
+// projections, explicit AS x(a, b) alias lists) populates at least
+// one entry — projection inference is all-or-nothing, so a partial
+// projection collapses to nil instead of producing an empty slice.
+// Callers MUST use columnsKnown() to test, never len(columns) == 0 —
+// the project-wide convention to prefer len-checks over nil-checks
+// does not apply to this field.
 type source struct {
 	alias   string
 	columns []string
@@ -435,18 +457,21 @@ func (c *columnChecker) checkStatement(stmt tree.Statement) {
 }
 
 // checkSelect handles a top-level Select node. CTE names from the
-// WITH clause are pushed onto a dedicated parent frame so they are
-// visible both to the inner SelectStatement and to any FROM-subquery
-// inside it (CTEs and FROM-sibling sources live in different layers).
-// Refs against CTE aliases are silently skipped because their columns
-// are unknown — deferred to #98. ORDER BY and LIMIT walk in the same
-// scope as the inner SelectClause so they see SELECT-list aliases.
+// WITH clause are recorded on a dedicated parent frame's ctes map so
+// they are visible (via lookupCTE) to both the inner SelectStatement
+// and any FROM-subquery inside it. A FROM-clause reference to a CTE
+// alias resolves against the CTE's inferred projection; refs to an
+// alias whose body defeated inference (SELECT *, VALUES, ...) are
+// silently skipped. ORDER BY and LIMIT walk in the same scope as the
+// inner SelectClause so they see SELECT-list aliases.
 //
 // Set-op and ParenSelect results are recorded as unknown placeholder
 // sources by checkSelectStatement so ORDER BY refs against the
 // combined columns are silently skipped rather than false-positived;
 // VALUES blocks have no projection labels and do not get a
-// placeholder.
+// placeholder. Hoisting the union/paren projection into the
+// surrounding ORDER BY scope is deliberately out of scope for the
+// derived-source inference that pushCTEs and addTableExpr perform.
 func (c *columnChecker) checkSelect(sel *tree.Select, parent *scope) {
 	parent = c.pushCTEs(parent, sel.With)
 	sc := &scope{parent: parent}
@@ -466,9 +491,11 @@ func (c *columnChecker) checkSelect(sel *tree.Select, parent *scope) {
 // FROM scope but do share the enclosing CTE/correlation scope.
 //
 // For set ops and ParenSelect, the result has columns the caller's
-// ORDER BY/LIMIT may reference. Inferring those columns requires #98,
-// so we append an unknown placeholder to sc — that suppresses
-// unknown_column for unmatched refs without falsely accepting them.
+// ORDER BY/LIMIT may reference, but we deliberately do NOT hoist the
+// union/paren projection into sc here — that scope-crossing inference
+// is not implemented for top-level set ops. Instead an unknown
+// placeholder is appended to sc, which suppresses unknown_column for
+// unmatched refs without falsely accepting them.
 func (c *columnChecker) checkSelectStatement(s tree.SelectStatement, sc *scope) {
 	switch t := s.(type) {
 	case *tree.SelectClause:
@@ -529,7 +556,7 @@ func (c *columnChecker) checkInsert(ins *tree.Insert, parent *scope) {
 	parent = c.pushCTEs(parent, ins.With)
 	sc := &scope{parent: parent}
 
-	target := c.targetSource(ins.Table)
+	target := c.targetSource(ins.Table, sc)
 	sc.sources = append(sc.sources, target)
 	if target.columnsKnown() {
 		for _, name := range ins.Columns {
@@ -562,7 +589,7 @@ func (c *columnChecker) checkInsert(ins *tree.Insert, parent *scope) {
 func (c *columnChecker) checkUpdate(upd *tree.Update, parent *scope) {
 	parent = c.pushCTEs(parent, upd.With)
 	sc := &scope{parent: parent}
-	sc.sources = append(sc.sources, c.targetSource(upd.Table))
+	sc.sources = append(sc.sources, c.targetSource(upd.Table, sc))
 	for _, te := range upd.From {
 		c.addTableExpr(sc, te)
 	}
@@ -584,7 +611,7 @@ func (c *columnChecker) checkUpdate(upd *tree.Update, parent *scope) {
 func (c *columnChecker) checkDelete(del *tree.Delete, parent *scope) {
 	parent = c.pushCTEs(parent, del.With)
 	sc := &scope{parent: parent}
-	sc.sources = append(sc.sources, c.targetSource(del.Table))
+	sc.sources = append(sc.sources, c.targetSource(del.Table, sc))
 	for _, te := range del.Using {
 		c.addTableExpr(sc, te)
 	}
@@ -649,11 +676,16 @@ func (c *columnChecker) walkReturning(ret tree.ReturningClause, sc *scope) {
 }
 
 // pushCTEs returns parent unchanged when with is nil; otherwise it
-// returns a new frame whose parent is the original parent and whose
-// sources are one unknownSource per CTE alias. The CTE frame sits
-// above the per-statement scope so that both the SELECT body and any
-// FROM-subquery within it can resolve refs against the CTE alias via
-// the parent chain.
+// returns a new frame whose ctes map records each CTE's projected
+// column list (or nil when inference was defeated). The frame sits
+// above the per-statement scope so that lookupCTE can find each CTE
+// by name from any descendant — including FROM-subqueries and
+// correlated subqueries.
+//
+// CTEs are NOT added to frame.sources: a CTE only contributes
+// columns when it is actually referenced in a FROM clause, where
+// addTableExpr promotes it via lookupCTE. Adding it to sources here
+// would double-count under unqualified-ambiguity checks.
 //
 // Each CTE body is also walked here so refs inside the body (e.g.
 // "WITH x AS (SELECT bad FROM users)") are checked against their own
@@ -662,15 +694,14 @@ func (c *columnChecker) pushCTEs(parent *scope, with *tree.With) *scope {
 	if with == nil || len(with.CTEList) == 0 {
 		return parent
 	}
-	frame := &scope{parent: parent}
+	frame := &scope{parent: parent, ctes: make(map[string][]string)}
 	for _, cte := range with.CTEList {
 		if cte == nil {
 			continue
 		}
 		name := string(cte.Name.Alias)
 		if name != "" {
-			// TODO(#98): infer columns from cte.Stmt and cte.Name.Cols.
-			frame.sources = append(frame.sources, unknownSource(name))
+			frame.ctes[strings.ToLower(name)] = projectedColumns(cte.Name.Cols, selectStatementOf(cte.Stmt))
 		}
 		if cte.Stmt != nil {
 			c.checkStatement(cte.Stmt)
@@ -684,7 +715,7 @@ func (c *columnChecker) pushCTEs(parent *scope, with *tree.With) *scope {
 // user wrote, when available) for non-plain-table targets such as
 // numeric TableRefs — refs against those targets are then suppressed
 // instead of falsely reported.
-func (c *columnChecker) targetSource(te tree.TableExpr) source {
+func (c *columnChecker) targetSource(te tree.TableExpr, sc *scope) source {
 	switch t := te.(type) {
 	case *tree.AliasedTableExpr:
 		alias := string(t.As.Alias)
@@ -692,13 +723,13 @@ func (c *columnChecker) targetSource(te tree.TableExpr) source {
 			if alias == "" {
 				alias = name
 			}
-			return c.sourceForTable(alias, name)
+			return c.sourceForName(alias, name, sc)
 		}
 		return unknownSource(alias)
 	case *tree.TableName:
-		return c.sourceForTable(t.Table(), t.Table())
+		return c.sourceForName(t.Table(), t.Table(), sc)
 	case *tree.ParenTableExpr:
-		return c.targetSource(t.Expr)
+		return c.targetSource(t.Expr, sc)
 	}
 	return unknownSource("")
 }
@@ -719,13 +750,46 @@ func (c *columnChecker) sourceForTable(alias, name string) source {
 	return source{alias: alias, columns: cols}
 }
 
+// sourceForName resolves a TableName-shaped FROM/target reference to
+// a source. CTEs in scope take precedence over the catalog so that
+// `WITH t AS (...) SELECT * FROM t` wires `t` to the CTE's projection
+// instead of a catalog miss. A CTE with nil columns (inference
+// defeated) yields an unknownSource — refs against the alias are
+// silently skipped, matching pre-#98 behavior for that shape.
+func (c *columnChecker) sourceForName(alias, name string, sc *scope) source {
+	if cols, ok := lookupCTE(sc, name); ok {
+		if cols == nil {
+			return unknownSource(alias)
+		}
+		return source{alias: alias, columns: cols}
+	}
+	return c.sourceForTable(alias, name)
+}
+
+// lookupCTE walks the scope chain returning the projected columns of
+// the CTE named name. ok is true iff a CTE with that name is in
+// scope; cols may still be nil when the CTE's projection could not be
+// inferred (SELECT *, VALUES, etc.). Lookup is case-insensitive to
+// match the catalog's identifier folding.
+func lookupCTE(sc *scope, name string) ([]string, bool) {
+	want := strings.ToLower(name)
+	for s := sc; s != nil; s = s.parent {
+		if cols, ok := s.ctes[want]; ok {
+			return cols, true
+		}
+	}
+	return nil, false
+}
+
 // addTableExpr walks a FROM/JOIN/USING TableExpr, appending one
 // source per table-shaped leaf. JOIN ON conditions are walked in the
 // already-extended scope so both sides are visible to the predicate;
 // JOIN USING column names are resolved against that same scope so
-// USING (id) catches typos like USING (idd). Subqueries and other
-// non-table sources are recorded as unknownSource so refs against
-// their alias are skipped (deferred to #98).
+// USING (id) catches typos like USING (idd). FROM-subqueries get
+// their projection inferred via projectedColumns; opaque sources
+// (TableRef, RowsFromExpr, StatementSource) and inference-defeated
+// subqueries are recorded as unknownSource so refs against their
+// alias are skipped.
 func (c *columnChecker) addTableExpr(sc *scope, te tree.TableExpr) {
 	switch t := te.(type) {
 	case *tree.AliasedTableExpr:
@@ -736,16 +800,19 @@ func (c *columnChecker) addTableExpr(sc *scope, te tree.TableExpr) {
 			if alias == "" {
 				alias = name
 			}
-			sc.sources = append(sc.sources, c.sourceForTable(alias, name))
+			sc.sources = append(sc.sources, c.sourceForName(alias, name, sc))
 		case *tree.Subquery:
 			// The body is recursed with sc.parent (not sc) so it sees
 			// neither its own alias (about to be appended below) nor
 			// any sibling FROM items — non-LATERAL FROM subqueries
 			// can only reference the enclosing query.
 			c.checkSelectStatement(inner.Select, &scope{parent: sc.parent})
-			// TODO(#98): infer columns from inner.Select's projection
-			// list (and t.As.Cols if explicit).
-			sc.sources = append(sc.sources, unknownSource(alias))
+			cols := projectedColumns(t.As.Cols, inner.Select)
+			if cols == nil {
+				sc.sources = append(sc.sources, unknownSource(alias))
+			} else {
+				sc.sources = append(sc.sources, source{alias: alias, columns: cols})
+			}
 		case *tree.ParenTableExpr:
 			c.addTableExpr(sc, &tree.AliasedTableExpr{Expr: tree.StripTableParens(inner), As: t.As})
 		default:
@@ -786,7 +853,7 @@ func (c *columnChecker) addTableExpr(sc *scope, te tree.TableExpr) {
 			}
 		}
 	case *tree.TableName:
-		sc.sources = append(sc.sources, c.sourceForTable(t.Table(), t.Table()))
+		sc.sources = append(sc.sources, c.sourceForName(t.Table(), t.Table(), sc))
 	case *tree.ParenTableExpr:
 		c.addTableExpr(sc, t.Expr)
 	default:
@@ -1182,6 +1249,131 @@ func availableAliases(sc *scope) []string {
 		}
 	}
 	return out
+}
+
+// projectedColumns returns the column names exposed by a derived
+// source (a CTE body or FROM-subquery). explicitCols, when non-empty,
+// is the user-provided alias list from `WITH cte(a, b) AS (...)` /
+// `(SELECT ...) AS x(a, b)` and wins outright. Otherwise the names
+// come from inferProjection over sel. A nil sel — used by the CTE
+// callsite when the body is not a SELECT (writable CTE, etc.) —
+// produces nil unless an explicit alias list overrides it.
+//
+// Returns nil when the projection cannot be enumerated (SELECT *,
+// VALUES, opaque expression, non-SELECT CTE body) — callers must
+// then fall back to unknownSource so refs are silently skipped
+// instead of false-positive flagged.
+func projectedColumns(explicitCols tree.ColumnDefList, sel tree.SelectStatement) []string {
+	if cols := explicitColumnNames(explicitCols); cols != nil {
+		return cols
+	}
+	if sel == nil {
+		return nil
+	}
+	return inferProjection(sel)
+}
+
+// selectStatementOf returns the inner SelectStatement of a CTE body,
+// or nil for non-SELECT bodies (writable CTEs like `WITH x AS (INSERT
+// ... RETURNING ...) ...`). Callers fall back to unknownSource for
+// the nil case.
+func selectStatementOf(stmt tree.Statement) tree.SelectStatement {
+	if sel, ok := stmt.(*tree.Select); ok && sel != nil {
+		return sel.Select
+	}
+	return nil
+}
+
+// explicitColumnNames returns the names from an AliasClause.Cols list,
+// or nil when the list is empty. ColumnDef.Type is recorded only for
+// record-returning function aliases and is irrelevant to name
+// resolution.
+func explicitColumnNames(cols tree.ColumnDefList) []string {
+	if len(cols) == 0 {
+		return nil
+	}
+	out := make([]string, len(cols))
+	for i, c := range cols {
+		out[i] = string(c.Name)
+	}
+	return out
+}
+
+// inferProjection walks a SelectStatement and returns the list of
+// column names its projection exposes — see projectedColumns for the
+// nil-vs-empty contract.
+//
+// Set ops (UNION/INTERSECT/EXCEPT) inherit their left branch's
+// projection — SQL requires both branches to expose the same column
+// count and the left branch's labels are the user-visible names.
+// ParenSelect descends. SelectClause walks each SelectExpr per
+// columnNameOf. VALUES returns nil because its columns are
+// positional-only (PostgreSQL labels them column1/column2/...; refs
+// by name are not supported here).
+func inferProjection(s tree.SelectStatement) []string {
+	switch t := s.(type) {
+	case *tree.SelectClause:
+		return projectionOf(t.Exprs)
+	case *tree.UnionClause:
+		if t.Left == nil {
+			return nil
+		}
+		return inferProjection(t.Left.Select)
+	case *tree.ParenSelect:
+		if t.Select == nil {
+			return nil
+		}
+		return inferProjection(t.Select.Select)
+	}
+	return nil
+}
+
+// projectionOf converts a SELECT-list into a column-name slice. Any
+// SelectExpr whose name cannot be derived (stars, casts, arithmetic,
+// unaliased function calls, ...) defeats inference for the whole
+// projection and the function returns nil — partial inference would
+// mis-report "available_columns" against the source. The caller then
+// records an unknownSource so refs against the alias are silently
+// skipped.
+func projectionOf(exprs tree.SelectExprs) []string {
+	if len(exprs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(exprs))
+	for _, se := range exprs {
+		name, ok := columnNameOf(se)
+		if !ok {
+			return nil
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// columnNameOf extracts the addressable name for one SelectExpr.
+// ok=false signals "the entire projection should be treated as
+// unknown" — triggered by stars OR by any expression shape whose
+// column name we cannot derive without re-implementing PostgreSQL's
+// label-inference rules (cast, type-annotation, arithmetic,
+// indirection, function calls without aliases, ...). Defeating
+// inference is the conservative choice: pretending an opaque
+// expression contributes no column would mis-report
+// available_columns and false-positive a valid ref like
+// `SELECT t.id FROM (SELECT id::int FROM users) t`.
+//
+// Bare column references parse as *tree.UnresolvedName (with
+// Parts[0] = column, Parts[1..] = qualifiers) regardless of how
+// many parts the user wrote — *tree.ColumnItem is produced only
+// after typecheck, which semcheck does not run, so it is not
+// handled here.
+func columnNameOf(se tree.SelectExpr) (string, bool) {
+	if se.As != "" {
+		return string(se.As), true
+	}
+	if u, ok := se.Expr.(*tree.UnresolvedName); ok && !u.Star {
+		return u.Parts[0], true
+	}
+	return "", false
 }
 
 // containsFold reports whether names contains target under ASCII
