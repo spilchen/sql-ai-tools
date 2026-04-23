@@ -16,6 +16,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/risk"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
+	"github.com/spilchen/sql-ai-tools/internal/summarize"
 	"github.com/spilchen/sql-ai-tools/internal/validateresult"
 )
 
@@ -687,6 +688,98 @@ func TestDetectRiskyQueryHandler(t *testing.T) {
 				require.Equal(t, tc.expectedReasonCode, findings[0].ReasonCode)
 				require.Equal(t, risk.SeverityCritical, findings[0].Severity)
 				require.NotEmpty(t, findings[0].FixHint)
+			}
+		})
+	}
+}
+
+func TestSummarizeSQLHandler(t *testing.T) {
+	tests := []struct {
+		name                 string
+		args                 map[string]any
+		expectedToolErr      bool
+		expectedEnvErrs      bool
+		expectedCode         string
+		expectedSummaryCount int
+		expectedOperation    summarize.Operation
+		expectedTables       []string
+		expectedPredicates   []string
+	}{
+		{
+			name:                 "DELETE with WHERE",
+			args:                 map[string]any{"sql": "DELETE FROM orders WHERE status='x'"},
+			expectedSummaryCount: 1,
+			expectedOperation:    summarize.OpDelete,
+			expectedTables:       []string{"orders"},
+			expectedPredicates:   []string{"status = 'x'"},
+		},
+		{
+			name:                 "multiple statements",
+			args:                 map[string]any{"sql": "SELECT 1; UPDATE t SET x=1 WHERE id=1"},
+			expectedSummaryCount: 2,
+		},
+		{
+			name:            "parse error returns structured SQLSTATE error",
+			args:            map[string]any{"sql": "SELECTT 1"},
+			expectedEnvErrs: true,
+			expectedCode:    "42601",
+		},
+		{
+			name:            "empty sql",
+			args:            map[string]any{"sql": ""},
+			expectedToolErr: true,
+		},
+		{
+			name:            "missing sql param",
+			args:            map[string]any{},
+			expectedToolErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := SummarizeSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = tc.args
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			require.NotNil(t, res)
+
+			if tc.expectedToolErr {
+				require.True(t, res.IsError, "expected tool-level error")
+				return
+			}
+
+			env := requireEnvelope(t, res)
+			require.Equal(t, testParserVersion, env.ParserVersion)
+			require.Equal(t, output.TierZeroConfig, env.Tier)
+			require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
+
+			if tc.expectedEnvErrs {
+				require.NotEmpty(t, env.Errors)
+				require.Nil(t, env.Data)
+				if tc.expectedCode != "" {
+					require.Equal(t, tc.expectedCode, env.Errors[0].Code)
+				}
+				return
+			}
+
+			require.Empty(t, env.Errors)
+			require.NotNil(t, env.Data)
+
+			var summaries []summarize.Summary
+			require.NoError(t, json.Unmarshal(env.Data, &summaries))
+			require.Len(t, summaries, tc.expectedSummaryCount)
+
+			if tc.expectedOperation != "" {
+				require.Equal(t, tc.expectedOperation, summaries[0].Operation)
+			}
+			if tc.expectedTables != nil {
+				require.Equal(t, tc.expectedTables, summaries[0].Tables)
+			}
+			if tc.expectedPredicates != nil {
+				require.Equal(t, tc.expectedPredicates, summaries[0].Predicates)
 			}
 		})
 	}

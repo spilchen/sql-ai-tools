@@ -38,6 +38,7 @@ var expectedTools = []string{
 	tools.ValidateSQLToolName,
 	tools.FormatSQLToolName,
 	tools.DetectRiskyQueryToolName,
+	tools.SummarizeSQLToolName,
 	tools.ExplainSQLToolName,
 	tools.ExplainSchemaChangeToolName,
 	tools.ListTablesToolName,
@@ -313,6 +314,29 @@ func TestIntegrationDetectRiskyQuery(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIntegrationSummarizeSQL asserts the tool returns one Summary per
+// statement with the expected operation and table set. Specific field
+// shapes (predicates, joins, affected_columns) are pinned in the
+// summarize package's own tests; this test exists to catch wiring
+// breakage between server registration, handler dispatch, and JSON
+// round-trip across the stdio boundary.
+func TestIntegrationSummarizeSQL(t *testing.T) {
+	c := newMCPClient(t)
+
+	res := callTool(t, c, tools.SummarizeSQLToolName, map[string]any{
+		"sql": "DELETE FROM orders WHERE status='x'",
+	})
+	env := decodeEnvelope(t, res)
+	assertTier1Envelope(t, env)
+	require.Empty(t, env.Errors)
+
+	var summaries []map[string]any
+	require.NoError(t, json.Unmarshal(env.Data, &summaries))
+	require.Len(t, summaries, 1)
+	require.Equal(t, "DELETE", summaries[0]["operation"])
+	require.Equal(t, []any{"orders"}, summaries[0]["tables"])
 }
 
 // TestIntegrationListTables covers list_tables on both the happy path
