@@ -121,7 +121,7 @@ func TestIntegrationExecCmdEnforcesTimeoutFlag(t *testing.T) {
 	var env output.Envelope
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
 	require.Len(t, env.Errors, 1)
-	require.Contains(t, env.Errors[0].Message, "57014",
+	require.Equal(t, "57014", env.Errors[0].Code,
 		"--timeout=1ms must produce a SQLSTATE 57014 error from the cluster")
 	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus,
 		"a cluster-side timeout error leaves the manager's recovery contract in place — connection_status reverts")
