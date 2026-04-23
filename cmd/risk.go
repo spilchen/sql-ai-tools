@@ -33,9 +33,11 @@ func newRiskCmd(state *rootState) *cobra.Command {
 		Use:   "risk [file]",
 		Short: "Detect risky SQL patterns",
 		Long: `Analyze SQL for dangerous patterns such as DELETE or UPDATE without a
-WHERE clause, DROP TABLE, and SELECT *. Input is read from the -e flag
-(inline SQL), a positional file argument, or stdin. Each finding
-includes a reason code, severity, human-readable message, and fix hint.`,
+WHERE clause, DROP/TRUNCATE statements, SELECT *, SERIAL or missing
+primary keys, deep OFFSET pagination, and XA two-phase-commit
+statements. Input is read from the -e flag (inline SQL), a positional
+file argument, or stdin. Each finding includes a reason code, severity,
+human-readable message, and fix hint.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierZeroConfig, cmd)

@@ -162,6 +162,131 @@ func TestAnalyze(t *testing.T) {
 			sql:                 "DROP DATABASE d; ALTER TABLE t DROP COLUMN c; SELECT id FROM t FOR UPDATE",
 			expectedReasonCodes: []string{"DROP_DATABASE", "ALTER_TABLE_DROP_COLUMN", "SELECT_FOR_UPDATE_NO_WHERE"},
 		},
+		{
+			name:                "TRUNCATE TABLE is critical",
+			sql:                 "TRUNCATE TABLE users",
+			expectedReasonCodes: []string{"TRUNCATE_TABLE"},
+		},
+		{
+			name:                "TRUNCATE TABLE CASCADE is critical",
+			sql:                 "TRUNCATE TABLE users CASCADE",
+			expectedReasonCodes: []string{"TRUNCATE_TABLE"},
+		},
+		{
+			name:                "TRUNCATE multiple tables yields one finding",
+			sql:                 "TRUNCATE TABLE a, b",
+			expectedReasonCodes: []string{"TRUNCATE_TABLE"},
+		},
+		{
+			name:                "SERIAL primary key inline",
+			sql:                 "CREATE TABLE t (id SERIAL PRIMARY KEY)",
+			expectedReasonCodes: []string{"SERIAL_PRIMARY_KEY"},
+		},
+		{
+			name:                "BIGSERIAL primary key inline",
+			sql:                 "CREATE TABLE t (id BIGSERIAL PRIMARY KEY)",
+			expectedReasonCodes: []string{"SERIAL_PRIMARY_KEY"},
+		},
+		{
+			name:                "SMALLSERIAL primary key inline",
+			sql:                 "CREATE TABLE t (id SMALLSERIAL PRIMARY KEY)",
+			expectedReasonCodes: []string{"SERIAL_PRIMARY_KEY"},
+		},
+		{
+			name:                "SERIAL non-PK column is safe",
+			sql:                 "CREATE TABLE t (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), seq SERIAL)",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "SERIAL inside table-level PRIMARY KEY constraint",
+			sql:                 "CREATE TABLE t (a SERIAL, b INT, PRIMARY KEY (a, b))",
+			expectedReasonCodes: []string{"SERIAL_PRIMARY_KEY"},
+		},
+		{
+			name:                "UUID primary key is safe",
+			sql:                 "CREATE TABLE t (id UUID PRIMARY KEY DEFAULT gen_random_uuid())",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "missing primary key on plain CREATE TABLE",
+			sql:                 "CREATE TABLE t (a INT, b STRING)",
+			expectedReasonCodes: []string{"MISSING_PRIMARY_KEY"},
+		},
+		{
+			name:                "table-level PRIMARY KEY constraint satisfies missing-PK rule",
+			sql:                 "CREATE TABLE t (a INT, b INT, PRIMARY KEY (a, b))",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "UNIQUE without PRIMARY KEY still missing PK",
+			sql:                 "CREATE TABLE t (id INT, UNIQUE(id))",
+			expectedReasonCodes: []string{"MISSING_PRIMARY_KEY"},
+		},
+		{
+			name:                "CREATE TABLE AS exempt from missing-PK rule",
+			sql:                 "CREATE TABLE copy AS SELECT 1 AS a",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "OFFSET below threshold is safe",
+			sql:                 "SELECT id FROM t ORDER BY id LIMIT 20 OFFSET 100",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "OFFSET at threshold flags",
+			sql:                 "SELECT id FROM t ORDER BY id LIMIT 20 OFFSET 1000",
+			expectedReasonCodes: []string{"LARGE_OFFSET"},
+		},
+		{
+			name:                "OFFSET well above threshold flags",
+			sql:                 "SELECT id FROM t ORDER BY id LIMIT 20 OFFSET 50000",
+			expectedReasonCodes: []string{"LARGE_OFFSET"},
+		},
+		{
+			name:                "OFFSET as subquery does not flag",
+			sql:                 "SELECT id FROM t LIMIT 20 OFFSET (SELECT 5000)",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "OFFSET as scientific-notation literal flags",
+			sql:                 "SELECT id FROM t LIMIT 20 OFFSET 1e4",
+			expectedReasonCodes: []string{"LARGE_OFFSET"},
+		},
+		{
+			name:                "OFFSET as decimal literal flags",
+			sql:                 "SELECT id FROM t LIMIT 20 OFFSET 2000.0",
+			expectedReasonCodes: []string{"LARGE_OFFSET"},
+		},
+		{
+			name:                "OFFSET that overflows int64 still flags",
+			sql:                 "SELECT id FROM t LIMIT 20 OFFSET 9999999999999999999",
+			expectedReasonCodes: []string{"LARGE_OFFSET"},
+		},
+		{
+			name:                "OFFSET as parameter placeholder does not flag",
+			sql:                 "SELECT id FROM t LIMIT 20 OFFSET $1",
+			expectedReasonCodes: nil,
+		},
+		{
+			name:                "PREPARE TRANSACTION flags",
+			sql:                 "PREPARE TRANSACTION 'tx1'",
+			expectedReasonCodes: []string{"XA_PREPARED_TXN"},
+		},
+		{
+			name:                "COMMIT PREPARED flags",
+			sql:                 "COMMIT PREPARED 'tx1'",
+			expectedReasonCodes: []string{"XA_PREPARED_TXN"},
+		},
+		{
+			name:                "ROLLBACK PREPARED flags",
+			sql:                 "ROLLBACK PREPARED 'tx1'",
+			expectedReasonCodes: []string{"XA_PREPARED_TXN"},
+		},
+		{
+			name:                "PREPARE statement (non-XA) is safe",
+			sql:                 "PREPARE q AS SELECT 1",
+			expectedReasonCodes: nil,
+		},
 	}
 
 	for _, tc := range tests {
@@ -235,6 +360,31 @@ func TestFindingSeverity(t *testing.T) {
 			sql:              "SELECT id FROM t FOR SHARE",
 			expectedSeverity: SeverityHigh,
 		},
+		{
+			name:             "TRUNCATE_TABLE is critical",
+			sql:              "TRUNCATE TABLE t",
+			expectedSeverity: SeverityCritical,
+		},
+		{
+			name:             "SERIAL_PRIMARY_KEY is high",
+			sql:              "CREATE TABLE t (id SERIAL PRIMARY KEY)",
+			expectedSeverity: SeverityHigh,
+		},
+		{
+			name:             "MISSING_PRIMARY_KEY is medium",
+			sql:              "CREATE TABLE t (a INT)",
+			expectedSeverity: SeverityMedium,
+		},
+		{
+			name:             "LARGE_OFFSET is medium",
+			sql:              "SELECT id FROM t LIMIT 10 OFFSET 5000",
+			expectedSeverity: SeverityMedium,
+		},
+		{
+			name:             "XA_PREPARED_TXN is high",
+			sql:              "PREPARE TRANSACTION 'tx1'",
+			expectedSeverity: SeverityHigh,
+		},
 	}
 
 	for _, tc := range tests {
@@ -284,4 +434,12 @@ func TestAlterTableDropColumnMessage(t *testing.T) {
 	require.Len(t, findings, 1)
 	require.Contains(t, findings[0].Message, "users")
 	require.Contains(t, findings[0].Message, "email")
+}
+
+func TestTruncateCascadeMessageMentionsForeignKeys(t *testing.T) {
+	findings, err := Analyze("TRUNCATE TABLE users CASCADE")
+	require.NoError(t, err)
+	require.Len(t, findings, 1)
+	require.Contains(t, findings[0].Message, "CASCADE")
+	require.Contains(t, findings[0].Message, "foreign keys")
 }
