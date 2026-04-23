@@ -20,9 +20,17 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
+
+// DefaultStatementTimeout is the per-EXPLAIN statement_timeout applied
+// inside the read-only transaction wrapper when the caller does not
+// override it via WithStatementTimeout. 30s is generous enough for
+// EXPLAIN and EXPLAIN (DDL, SHAPE) on large schemas while still
+// preventing a runaway plan from hanging an agent indefinitely.
+const DefaultStatementTimeout = 30 * time.Second
 
 // dsnCredentialPattern matches the userinfo portion of a postgres URI
 // (e.g. "user:password@") so it can be redacted from error messages.
@@ -60,16 +68,53 @@ type ExplainResult struct {
 // The dsn field is unexported and the type intentionally has no
 // Stringer or GoStringer implementation, so accidental logging via
 // %v or %+v cannot leak credentials.
+//
+// The stmtTimeout field is the SET LOCAL statement_timeout applied
+// inside the read-only transaction that wraps every Explain /
+// ExplainDDL call. It is set once at construction (default
+// DefaultStatementTimeout) via WithStatementTimeout; the Manager is
+// not safe for concurrent use, so the field never needs synchronisation.
 type Manager struct {
-	dsn  string
-	conn *pgx.Conn // nil until the first successful connect
+	dsn         string
+	stmtTimeout time.Duration
+	conn        *pgx.Conn // nil until the first successful connect
+}
+
+// Option configures a Manager at construction time. Implemented via
+// the functional-options pattern so future knobs (e.g. application_name,
+// retry budget) extend the API without breaking call sites.
+type Option func(*Manager)
+
+// WithStatementTimeout overrides the per-EXPLAIN statement_timeout
+// applied inside the read-only transaction wrapper. A non-positive
+// value falls back to DefaultStatementTimeout so callers cannot
+// accidentally disable the guardrail by passing a zero duration.
+func WithStatementTimeout(d time.Duration) Option {
+	return func(m *Manager) {
+		if d <= 0 {
+			m.stmtTimeout = DefaultStatementTimeout
+			return
+		}
+		m.stmtTimeout = d
+	}
 }
 
 // NewManager creates a Manager that will connect to the cluster
 // identified by dsn on first use. It does not validate or parse the
 // DSN — invalid values surface as connection errors on first use.
-func NewManager(dsn string) *Manager {
-	return &Manager{dsn: dsn}
+//
+// Options are applied in order; later options override earlier ones.
+// Callers that pass no options get DefaultStatementTimeout for the
+// EXPLAIN-wrapper guardrail.
+func NewManager(dsn string, opts ...Option) *Manager {
+	m := &Manager{
+		dsn:         dsn,
+		stmtTimeout: DefaultStatementTimeout,
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Ping connects to the cluster (if not already connected) and returns
@@ -101,16 +146,21 @@ func (m *Manager) Ping(ctx context.Context) (ClusterInfo, error) {
 // Explain runs `EXPLAIN <sql>` against the cluster and returns the
 // parsed plan tree alongside the raw tabular output.
 //
-// EXPLAIN (without ANALYZE) does not execute the wrapped statement, so
-// no read-only safety wrapper is applied here; the dedicated allowlist
-// (issue #21) layers on top. Cluster errors (syntax in the wrapped
-// statement, perm denied, etc.) are returned wrapped; callers surface
-// them as generic envelope errors today. SQLSTATE-aware enrichment for
-// pgwire errors is a future enhancement, not a current contract.
+// EXPLAIN (without ANALYZE) does not execute the wrapped statement,
+// but as defense-in-depth the call still runs inside a BEGIN READ ONLY
+// transaction with SET LOCAL statement_timeout = m.stmtTimeout. The
+// txn guarantees that any future shape change (e.g. an EXPLAIN flavor
+// that does write) cannot escape the read-only sandbox at this layer.
+// The companion AST allowlist in internal/safety is the first line of
+// defense and runs before this method is reached. Cluster errors
+// (syntax in the wrapped statement, perm denied, etc.) are returned
+// wrapped; callers surface them as generic envelope errors today.
+// SQLSTATE-aware enrichment for pgwire errors is a future enhancement,
+// not a current contract.
 //
-// On any query/scan/parse failure after a successful connect, the
-// underlying connection is closed and the Manager reverts to its
-// pre-connect state, mirroring Ping's recovery contract.
+// On any begin/exec/query/scan/parse failure after a successful
+// connect, the underlying connection is closed and the Manager reverts
+// to its pre-connect state, mirroring Ping's recovery contract.
 func (m *Manager) Explain(ctx context.Context, sql string) (ExplainResult, error) {
 	if err := m.connect(ctx); err != nil {
 		return ExplainResult{}, err
@@ -125,13 +175,36 @@ func (m *Manager) Explain(ctx context.Context, sql string) (ExplainResult, error
 	return result, nil
 }
 
-// runExplain is the inner half of Explain that owns the query/scan/parse
-// pipeline. Splitting it out lets Explain centralize the connection
-// recovery: any error returned here triggers the same close-and-nil
-// sequence in the caller, so the three failure modes (Query, Scan,
-// rows.Err, parse) cannot drift apart.
+// runExplain is the inner half of Explain that owns the
+// txn/query/scan/parse pipeline. Splitting it out lets Explain
+// centralize the connection recovery: any error returned here triggers
+// the same close-and-nil sequence in the caller, so the failure modes
+// (BeginTx, Exec timeout, Query, Scan, rows.Err, parse, Commit) cannot
+// drift apart.
+//
+// The txn is opened with pgx.ReadOnly so any DML or DDL that somehow
+// reaches this method is rejected by the cluster with SQLSTATE 25006
+// ("read-only transaction"), mirroring the AST-layer rejection from
+// internal/safety.
 func (m *Manager) runExplain(ctx context.Context, sql string) (ExplainResult, error) {
-	rows, err := m.conn.Query(ctx, "EXPLAIN "+sql)
+	tx, err := m.conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return ExplainResult{}, fmt.Errorf("begin read-only txn: %w", err)
+	}
+	// Rollback is best-effort and a no-op after a successful Commit;
+	// the deferred call exists so any early return below releases the
+	// txn rather than leaving it open on the connection (which the
+	// caller is about to close on error anyway, but the explicit
+	// rollback matches the documented contract for callers reading
+	// the code).
+	defer tx.Rollback(ctx) //nolint:errcheck // best-effort cleanup
+
+	if _, err := tx.Exec(ctx,
+		fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", m.stmtTimeout.Milliseconds())); err != nil {
+		return ExplainResult{}, fmt.Errorf("set statement_timeout: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, "EXPLAIN "+sql)
 	if err != nil {
 		return ExplainResult{}, fmt.Errorf("run EXPLAIN: %w", err)
 	}
@@ -148,6 +221,17 @@ func (m *Manager) runExplain(ctx context.Context, sql string) (ExplainResult, er
 	if err := rows.Err(); err != nil {
 		return ExplainResult{}, fmt.Errorf("read EXPLAIN rows: %w", err)
 	}
+	// Explicit Close before Commit: pgx requires releasing any open
+	// rows handle before reusing the conn for another command. The
+	// deferred rows.Close above is harmless when called twice (pgx
+	// makes Close idempotent), so the close error here is the same
+	// late-driver-error condition the deferred close would surface;
+	// either way it would be eclipsed by the Commit attempt below.
+	rows.Close() //nolint:errcheck // see comment above
+
+	if err := tx.Commit(ctx); err != nil {
+		return ExplainResult{}, fmt.Errorf("commit read-only txn: %w", err)
+	}
 
 	header, plan, err := parseExplainTree(raw)
 	if err != nil {
@@ -161,14 +245,19 @@ func (m *Manager) runExplain(ctx context.Context, sql string) (ExplainResult, er
 // cluster returned.
 //
 // EXPLAIN (DDL, SHAPE) does not execute the wrapped DDL — it only asks
-// the declarative schema changer to compile a plan — so no read-only
-// safety wrapper is applied here; the dedicated allowlist (issue #21)
-// will layer on top by intercepting the SQL before it reaches this
-// method, leaving runExplainDDL as the single chokepoint to wrap.
+// the declarative schema changer to compile a plan. The call runs
+// inside a transaction so SET LOCAL statement_timeout = m.stmtTimeout
+// applies, but the txn is NOT opened in pgx.ReadOnly mode: the cluster
+// rejects `EXPLAIN (DDL, SHAPE) <ddl>` inside a read-only txn with
+// SQLSTATE 25006 ("cannot execute <ddl-tag> in a read-only
+// transaction") because the txn-mode check fires on the inner stmt
+// type before the SHAPE-only flag is consulted. The AST-layer
+// allowlist in internal/safety is the first line of defense for
+// rejecting unwanted DDL; statement_timeout is the second.
 //
-// On any query/scan/parse failure after a successful connect, the
-// underlying connection is closed and the Manager reverts to its
-// pre-connect state, mirroring Explain's recovery contract.
+// On any begin/exec/query/scan/parse failure after a successful
+// connect, the underlying connection is closed and the Manager reverts
+// to its pre-connect state, mirroring Explain's recovery contract.
 func (m *Manager) ExplainDDL(ctx context.Context, sql string) (DDLExplainResult, error) {
 	if err := m.connect(ctx); err != nil {
 		return DDLExplainResult{}, err
@@ -184,16 +273,41 @@ func (m *Manager) ExplainDDL(ctx context.Context, sql string) (DDLExplainResult,
 }
 
 // runExplainDDL is the inner half of ExplainDDL that owns the
-// query/scan/parse pipeline. SHAPE output is contractually a single row
-// whose `info` column is the entire multi-line plan; we iterate with
-// Query (rather than QueryRow) so we can fail loudly on a future CRDB
-// version that splits the output across rows, matching the parser's
-// "be strict so format changes surface here" discipline. Splitting this
-// out lets ExplainDDL centralize the connection-recovery sequence so
-// the failure modes (Query, Scan, rows.Err, multi-row, parse) cannot
-// drift apart.
+// txn/query/scan/parse pipeline. SHAPE output is contractually a single
+// row whose `info` column is the entire multi-line plan; we iterate
+// with Query (rather than QueryRow) so we can fail loudly on a future
+// CRDB version that splits the output across rows, matching the
+// parser's "be strict so format changes surface here" discipline.
+// Splitting this out lets ExplainDDL centralize the connection-recovery
+// sequence so the failure modes (BeginTx, Exec timeout, Query, Scan,
+// rows.Err, multi-row, parse, Commit) cannot drift apart.
+//
+// Unlike runExplain, the txn is opened in default (read-write) mode:
+// the cluster's read-only-txn check fires on the inner DDL stmt before
+// the SHAPE-only flag is consulted, so wrapping in pgx.ReadOnly would
+// reject every well-formed call with SQLSTATE 25006. The AST-layer
+// allowlist in internal/safety is the load-bearing safety check for
+// this surface; the txn here exists solely so SET LOCAL
+// statement_timeout scopes to this call.
 func (m *Manager) runExplainDDL(ctx context.Context, sql string) (DDLExplainResult, error) {
-	rows, err := m.conn.Query(ctx, "EXPLAIN (DDL, SHAPE) "+sql)
+	tx, err := m.conn.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return DDLExplainResult{}, fmt.Errorf("begin txn: %w", err)
+	}
+	// Rollback is best-effort and a no-op after Commit. Although this
+	// txn is read-write, swallowing the rollback error is safe because
+	// the only Exec between BEGIN and Commit is `SET LOCAL` (no data
+	// writes), and EXPLAIN (DDL, SHAPE) is documented to compile a
+	// plan without executing the wrapped DDL. If a future CRDB version
+	// changes either invariant, this nolint deserves revisiting.
+	defer tx.Rollback(ctx) //nolint:errcheck // best-effort cleanup
+
+	if _, err := tx.Exec(ctx,
+		fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", m.stmtTimeout.Milliseconds())); err != nil {
+		return DDLExplainResult{}, fmt.Errorf("set statement_timeout: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, "EXPLAIN (DDL, SHAPE) "+sql)
 	if err != nil {
 		return DDLExplainResult{}, fmt.Errorf("run EXPLAIN (DDL, SHAPE): %w", err)
 	}
@@ -213,6 +327,14 @@ func (m *Manager) runExplainDDL(ctx context.Context, sql string) (DDLExplainResu
 	if len(raw) != 1 {
 		return DDLExplainResult{}, fmt.Errorf(
 			"EXPLAIN (DDL, SHAPE) returned %d rows, expected exactly 1 (CRDB output format may have changed)", len(raw))
+	}
+	// Explicit Close before Commit: see the matching comment in
+	// runExplain. pgx requires releasing the rows handle before
+	// reusing the conn, and the deferred Close above is idempotent.
+	rows.Close() //nolint:errcheck // see comment above
+
+	if err := tx.Commit(ctx); err != nil {
+		return DDLExplainResult{}, fmt.Errorf("commit txn: %w", err)
 	}
 
 	text := raw[0]

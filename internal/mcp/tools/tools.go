@@ -26,10 +26,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 
+	"github.com/spilchen/sql-ai-tools/internal/conn"
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/safety"
 )
 
 // Registered MCP tool names.
@@ -56,6 +59,29 @@ const TargetVersionParamName = "target_version"
 // for the target_version parameter so every tool documents the
 // argument identically.
 const TargetVersionParamDescription = "Optional target CockroachDB version (MAJOR.MINOR or MAJOR.MINOR.PATCH, with optional leading 'v'). Overrides the server-level default for this call."
+
+// ModeParamName is the optional MCP tool parameter name that lets a
+// client override the safety mode applied before any cluster contact.
+// Mirrors the CLI's --mode flag. Tier 3 tools that accept it run the
+// safety.Check allowlist before opening a connection.
+const ModeParamName = "mode"
+
+// ModeParamDescription is the shared MCP-schema description for the
+// mode parameter so every Tier 3 tool documents the argument
+// identically.
+const ModeParamDescription = `Optional safety mode applied before any cluster contact. Defaults to "read_only", which permits non-mutating statements only. "safe_write" and "full_access" are reserved for follow-up work and currently reject every statement.`
+
+// StatementTimeoutParamName is the optional MCP tool parameter name
+// that lets a client override the per-call SET LOCAL statement_timeout
+// applied inside the read-only transaction wrapper. The value is in
+// milliseconds (numeric) so the wire format matches MCP's JSON
+// type-system without parsing duration strings.
+const StatementTimeoutParamName = "statement_timeout_ms"
+
+// StatementTimeoutParamDescription is the shared MCP-schema
+// description for the statement_timeout_ms parameter so every Tier 3
+// tool documents the argument identically.
+const StatementTimeoutParamDescription = "Optional statement_timeout (milliseconds) applied inside the read-only transaction wrapper. Default 30000 (30s). Non-positive values fall back to the default."
 
 // extractRequiredString validates and returns a required string
 // parameter from an MCP tool request. Leading and trailing whitespace
@@ -196,6 +222,56 @@ func resolveTargetVersion(req mcp.CallToolRequest, defaultTargetVersion string) 
 			"%s parameter: %v", TargetVersionParamName, err))
 	}
 	return canonical, nil
+}
+
+// resolveSafetyMode picks the safety mode for a single Tier 3 tool
+// call. Missing or empty mode arguments fall back to safety.DefaultMode
+// (read_only). A non-string value is a hard error (tool-level) because
+// there is no reasonable interpretation. An unknown mode token is also
+// a tool-level error so the agent gets a precise "valid choices are…"
+// message rather than a misleading safety violation.
+//
+// On success the returned *mcp.CallToolResult is nil. On any malformed
+// argument it is a pre-built tool error.
+func resolveSafetyMode(req mcp.CallToolRequest) (safety.Mode, *mcp.CallToolResult) {
+	raw, exists := req.GetArguments()[ModeParamName]
+	if !exists {
+		return safety.DefaultMode, nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", mcp.NewToolResultError(fmt.Sprintf(
+			"%s parameter must be a string, got %T", ModeParamName, raw))
+	}
+	m, err := safety.ParseMode(strings.TrimSpace(s))
+	if err != nil {
+		return "", mcp.NewToolResultError(fmt.Sprintf(
+			"%s parameter: %v", ModeParamName, err))
+	}
+	return m, nil
+}
+
+// resolveStatementTimeout picks the statement_timeout for a single
+// Tier 3 tool call. Missing or non-positive values fall back to
+// conn.DefaultStatementTimeout (the same fallback WithStatementTimeout
+// applies, repeated here so the resolved duration is observable to
+// callers and tests). MCP delivers numeric arguments as float64; an
+// integer-valued float is the canonical wire form for milliseconds.
+// A non-numeric value is a tool-level error.
+func resolveStatementTimeout(req mcp.CallToolRequest) (time.Duration, *mcp.CallToolResult) {
+	raw, exists := req.GetArguments()[StatementTimeoutParamName]
+	if !exists {
+		return conn.DefaultStatementTimeout, nil
+	}
+	ms, ok := raw.(float64)
+	if !ok {
+		return 0, mcp.NewToolResultError(fmt.Sprintf(
+			"%s parameter must be a number (milliseconds), got %T", StatementTimeoutParamName, raw))
+	}
+	if ms <= 0 {
+		return conn.DefaultStatementTimeout, nil
+	}
+	return time.Duration(ms) * time.Millisecond, nil
 }
 
 // envelopeResult marshals env as JSON and wraps it in a successful MCP

@@ -141,6 +141,63 @@ func TestExplainCmdReadsFromStdin(t *testing.T) {
 		"stdin input must reach the connect step, not fail at input parsing")
 }
 
+// TestExplainCmdSafetyRejection verifies that the read-only safety
+// allowlist rejects mutating inner statements before any cluster
+// contact. The DSN points at an unreachable host on purpose: if the
+// safety check ever stops short-circuiting, this test will fail with
+// a connect error instead of the safety_violation it expects.
+func TestExplainCmdSafetyRejection(t *testing.T) {
+	tests := []struct {
+		name        string
+		sql         string
+		expectedTag string
+	}{
+		{name: "drop table", sql: "DROP TABLE users", expectedTag: "DROP TABLE"},
+		{name: "delete", sql: "DELETE FROM t WHERE id = 1", expectedTag: "DELETE"},
+		{name: "insert", sql: "INSERT INTO t VALUES (1)", expectedTag: "INSERT"},
+		{name: "update", sql: "UPDATE t SET x = 1 WHERE id = 1", expectedTag: "UPDATE"},
+		{name: "create table", sql: "CREATE TABLE x (id INT PRIMARY KEY)", expectedTag: "CREATE TABLE"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CRDB_DSN", "")
+			stdout, err := runExplain(t, "", "--output", "json",
+				"--dsn", "postgres://nope:1/db?connect_timeout=1",
+				"-e", tc.sql)
+			require.ErrorIs(t, err, output.ErrRendered)
+
+			var env output.Envelope
+			require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+			require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus,
+				"safety rejection must short-circuit before any cluster contact")
+			require.Len(t, env.Errors, 1)
+			require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
+			require.Equal(t, tc.expectedTag, env.Errors[0].Context["tag"])
+			require.Equal(t, "read_only", env.Errors[0].Context["mode"])
+			require.Equal(t, "explain", env.Errors[0].Context["operation"])
+		})
+	}
+}
+
+// TestExplainCmdInvalidMode verifies that --mode rejects unknown
+// values with an actionable error that lists the valid choices,
+// before any input reading or cluster contact.
+func TestExplainCmdInvalidMode(t *testing.T) {
+	t.Setenv("CRDB_DSN", "postgres://envhost:26257/defaultdb")
+
+	stdout, err := runExplain(t, "", "--output", "json",
+		"--mode", "yolo",
+		"-e", "SELECT 1")
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 1)
+	require.Contains(t, env.Errors[0].Message, "invalid safety mode")
+	require.Contains(t, env.Errors[0].Message, "read_only")
+}
+
 // TestExplainCmdRejectsExtraArgs verifies that more than one positional
 // argument is rejected (the optional positional is the SQL file).
 func TestExplainCmdRejectsExtraArgs(t *testing.T) {

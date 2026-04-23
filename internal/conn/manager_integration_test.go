@@ -199,6 +199,95 @@ func TestIntegrationManagerExplainDDLRecoversAfterError(t *testing.T) {
 		"recovered call should return a real plan, not zero value")
 }
 
+// TestIntegrationManagerExplainEnforcesStatementTimeout pins the
+// defense-in-depth contract added in issue #21: every Explain call
+// runs inside a SET LOCAL statement_timeout, so a slow EXPLAIN cannot
+// hang an agent indefinitely. We pass an aggressive 1ms timeout via
+// WithStatementTimeout and explain a query that pg_sleeps for far
+// longer; the cluster must reject with SQLSTATE 57014
+// ("query_canceled") before the explain returns. A regression that
+// drops the SET LOCAL would let the EXPLAIN succeed and fail this
+// test loudly.
+//
+// We use EXPLAIN ANALYZE rather than plain EXPLAIN because plain
+// EXPLAIN does not execute the wrapped statement (so pg_sleep would
+// not actually run). ANALYZE forces execution, exercising the timeout.
+func TestIntegrationManagerExplainEnforcesStatementTimeout(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+	mgr := conn.NewManager(cluster.DSN, conn.WithStatementTimeout(1*time.Millisecond))
+	t.Cleanup(func() { _ = mgr.Close(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err := mgr.Explain(ctx, "ANALYZE SELECT pg_sleep(5)")
+	require.Error(t, err, "EXPLAIN ANALYZE pg_sleep(5) under a 1ms timeout must fail")
+	// SQLSTATE 57014 is the pg-standard "query_canceled" code that
+	// statement_timeout produces. Asserting on it rather than on a
+	// fragile message substring locks in the wire-protocol contract.
+	require.Contains(t, err.Error(), "57014",
+		"timeout error must carry SQLSTATE 57014 (query_canceled)")
+}
+
+// TestIntegrationManagerExplainRunsInReadOnlyTxn pins the second half
+// of the issue #21 wrapper: every Explain call runs inside a BEGIN
+// READ ONLY transaction. We invoke the Manager directly with an
+// EXPLAIN ANALYZE of an INSERT — ANALYZE forces execution of the
+// wrapped statement, and the read-only txn rejects the INSERT with
+// SQLSTATE 25006 ("cannot execute INSERT in a read-only transaction").
+// A regression that drops the pgx.ReadOnly access mode from
+// runExplain would let the INSERT succeed (or fail for a different
+// reason), and this test would fail loudly.
+//
+// Note: this bypasses internal/safety on purpose — the safety
+// allowlist would reject EXPLAIN ANALYZE INSERT before the cluster
+// is reached. We exercise Manager.Explain directly to test the
+// Manager-side wrapper independently of the AST allowlist.
+func TestIntegrationManagerExplainRunsInReadOnlyTxn(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+	mgr := conn.NewManager(cluster.DSN)
+	t.Cleanup(func() { _ = mgr.Close(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	mustExec(t, ctx, cluster.DSN,
+		"CREATE TABLE IF NOT EXISTS read_only_explain_probe (id INT PRIMARY KEY)")
+
+	_, err := mgr.Explain(ctx, "ANALYZE INSERT INTO read_only_explain_probe VALUES (1)")
+	require.Error(t, err, "EXPLAIN ANALYZE INSERT must be rejected by the read-only txn wrapper")
+	require.Contains(t, err.Error(), "25006",
+		"rejection must carry SQLSTATE 25006 (read_only_sql_transaction)")
+}
+
+// TestIntegrationManagerExplainDDLEnforcesStatementTimeout mirrors
+// TestIntegrationManagerExplainEnforcesStatementTimeout for the DDL
+// path. runExplainDDL has a duplicated SET LOCAL statement_timeout
+// block (see comment in runExplain about why the txn shape differs),
+// so a regression that drops it from one path but not the other would
+// pass the SELECT timeout test while breaking DDL planning.
+//
+// We use a fast-but-non-trivial DDL plan and a 1ms timeout: even
+// EXPLAIN (DDL, SHAPE) compilation takes longer than 1ms when it
+// exercises the schema changer.
+func TestIntegrationManagerExplainDDLEnforcesStatementTimeout(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+	mgr := conn.NewManager(cluster.DSN, conn.WithStatementTimeout(1*time.Millisecond))
+	t.Cleanup(func() { _ = mgr.Close(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	mustExec(t, ctx, cluster.DSN,
+		"CREATE TABLE IF NOT EXISTS explain_ddl_timeout_probe (id INT PRIMARY KEY)")
+
+	_, err := mgr.ExplainDDL(ctx,
+		"ALTER TABLE explain_ddl_timeout_probe ADD COLUMN y INT")
+	require.Error(t, err, "ExplainDDL under a 1ms timeout must fail")
+	require.Contains(t, err.Error(), "57014",
+		"timeout error must carry SQLSTATE 57014 (query_canceled)")
+}
+
 // mustExec opens a one-off pgx connection and runs sql, failing the
 // test on any error. Used to perform DDL setup outside the Manager:
 // Manager intentionally exposes no general Exec, so tests that need a

@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/conn"
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
+	"github.com/spilchen/sql-ai-tools/internal/safety"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
 )
 
@@ -28,10 +30,18 @@ import (
 // (the raw EXPLAIN tabular rows) and json (structured envelope with
 // header, plan tree, and raw rows).
 //
-// This is a Tier 3 (connected) command. Read-only safety enforcement
-// (statement allowlist, transaction wrapping) is deferred to issue #21.
+// This is a Tier 3 (connected) command. The --mode flag (default
+// read_only) and --timeout flag (default 30s) gate the cluster call:
+// the safety allowlist (internal/safety) rejects DML/DDL inner
+// statements before any pgwire round-trip, and the read-only
+// transaction wrapper inside conn.Manager applies the statement
+// timeout for defense-in-depth.
 func newExplainCmd(state *rootState) *cobra.Command {
-	var expr string
+	var (
+		expr    string
+		mode    string
+		timeout time.Duration
+	)
 
 	cmd := &cobra.Command{
 		Use:   "explain [file]",
@@ -39,7 +49,12 @@ func newExplainCmd(state *rootState) *cobra.Command {
 		Long: `Connect to a CockroachDB cluster and run EXPLAIN against the supplied
 DML statement. The wrapped statement is not executed. Input is read from
 the -e flag (inline SQL), a positional file argument, or stdin. The
-connection string is read from --dsn or CRDB_DSN (flag wins).`,
+connection string is read from --dsn or CRDB_DSN (flag wins).
+
+The --mode flag selects the safety policy applied before the cluster
+call. Default is "read_only", which permits SELECT, SHOW, and other
+non-mutating statements. "safe_write" and "full_access" are reserved
+for follow-up issues and currently reject every statement.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierConnected, cmd)
@@ -58,7 +73,26 @@ connection string is read from --dsn or CRDB_DSN (flag wins).`,
 					fmt.Errorf("no connection string: pass --dsn or set CRDB_DSN"))
 			}
 
-			mgr := conn.NewManager(state.dsn)
+			parsedMode, err := safety.ParseMode(mode)
+			if err != nil {
+				return r.RenderError(baseEnv, err)
+			}
+
+			// Safety check runs before any cluster contact: a
+			// rejection produces a structured envelope with
+			// connection_status=disconnected, exactly as if --dsn
+			// were missing.
+			violation, err := safety.Check(parsedMode, safety.OpExplain, sql)
+			if err != nil {
+				return r.RenderErrorEntry(baseEnv, err, diag.FromParseError(err, sql))
+			}
+			if violation != nil {
+				return r.RenderErrorEntry(baseEnv,
+					fmt.Errorf("safety violation: %s", violation.Reason),
+					safety.Envelope(violation))
+			}
+
+			mgr := conn.NewManager(state.dsn, conn.WithStatementTimeout(timeout))
 			defer mgr.Close(cmd.Context()) //nolint:errcheck // best-effort cleanup
 
 			result, err := mgr.Explain(cmd.Context(), sql)
@@ -86,6 +120,10 @@ connection string is read from --dsn or CRDB_DSN (flag wins).`,
 	}
 
 	cmd.Flags().StringVarP(&expr, "expression", "e", "", "inline SQL to explain")
+	cmd.Flags().StringVar(&mode, "mode", string(safety.DefaultMode),
+		"safety mode: read_only (default), safe_write, full_access")
+	cmd.Flags().DurationVar(&timeout, "timeout", conn.DefaultStatementTimeout,
+		"statement timeout for the wrapped EXPLAIN call")
 
 	return cmd
 }

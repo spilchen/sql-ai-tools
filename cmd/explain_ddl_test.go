@@ -77,12 +77,14 @@ func TestExplainDDLCmdNoInput(t *testing.T) {
 	require.Contains(t, env.Errors[0].Message, "no SQL input")
 }
 
-// TestExplainDDLCmdReachesConnectAttempt verifies that with a SQL input
-// and an unreachable DSN, explain-ddl gets past input parsing and DSN
-// validation and fails at the connect step. The same "connect to
-// CockroachDB" wording as ping/explain locks in that the conn.Manager
-// path is shared.
-func TestExplainDDLCmdReachesConnectAttempt(t *testing.T) {
+// TestExplainDDLCmdReachesSafetyCheck verifies that with a SQL input
+// and a valid DSN, explain-ddl gets past input parsing and DSN
+// validation and the safety allowlist intercepts the DDL before any
+// cluster contact. The default --mode=read_only rejects every DDL
+// (since DDL modifies schema), so a safety_violation envelope is the
+// expected stop point. The cluster is never reached, so no connect
+// error is produced.
+func TestExplainDDLCmdReachesSafetyCheck(t *testing.T) {
 	t.Setenv("CRDB_DSN", "")
 
 	stdout, err := runExplainDDL(t, "", "--output", "json",
@@ -92,14 +94,18 @@ func TestExplainDDLCmdReachesConnectAttempt(t *testing.T) {
 
 	var env output.Envelope
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus,
+		"safety rejection must short-circuit before any cluster contact")
 	require.Len(t, env.Errors, 1)
-	require.NotContains(t, env.Errors[0].Message, "no connection string")
-	require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
+	require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
+	require.Equal(t, "ALTER TABLE", env.Errors[0].Context["tag"])
+	require.Equal(t, "read_only", env.Errors[0].Context["mode"])
 }
 
 // TestExplainDDLCmdReadsFromFileArg verifies that a positional file
-// argument is plumbed through sqlinput.ReadSQL and reaches the connect
-// step (rather than failing at input resolution).
+// argument is plumbed through sqlinput.ReadSQL and reaches the safety
+// check (rather than failing at input resolution). A safety_violation
+// for the file's ALTER TABLE proves the file was read and parsed.
 func TestExplainDDLCmdReadsFromFileArg(t *testing.T) {
 	t.Setenv("CRDB_DSN", "")
 
@@ -115,12 +121,13 @@ func TestExplainDDLCmdReadsFromFileArg(t *testing.T) {
 	var env output.Envelope
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
 	require.Len(t, env.Errors, 1)
-	require.Contains(t, env.Errors[0].Message, "connect to CockroachDB",
-		"file arg must reach the connect step, not fail at input parsing")
+	require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code,
+		"file arg must reach the safety check, not fail at input parsing")
+	require.Equal(t, "ALTER TABLE", env.Errors[0].Context["tag"])
 }
 
 // TestExplainDDLCmdReadsFromStdin verifies that piped SQL on stdin
-// reaches the connect step.
+// reaches the safety check. Same pattern as the file-arg test above.
 func TestExplainDDLCmdReadsFromStdin(t *testing.T) {
 	t.Setenv("CRDB_DSN", "")
 
@@ -131,8 +138,47 @@ func TestExplainDDLCmdReadsFromStdin(t *testing.T) {
 	var env output.Envelope
 	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
 	require.Len(t, env.Errors, 1)
-	require.Contains(t, env.Errors[0].Message, "connect to CockroachDB",
-		"stdin input must reach the connect step, not fail at input parsing")
+	require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code,
+		"stdin input must reach the safety check, not fail at input parsing")
+	require.Equal(t, "ALTER TABLE", env.Errors[0].Context["tag"])
+}
+
+// TestExplainDDLCmdSafetyRejectsNonDDL verifies that under read_only,
+// explain-ddl rejects a non-DDL inner statement with the
+// "explain_ddl requires a DDL statement" reason — distinct from the
+// "modifies schema" rejection that fires for DDL inputs. The two reject
+// reasons differ; this test pins the SELECT case so the distinction
+// cannot regress to a single generic error.
+func TestExplainDDLCmdSafetyRejectsNonDDL(t *testing.T) {
+	t.Setenv("CRDB_DSN", "")
+	stdout, err := runExplainDDL(t, "", "--output", "json",
+		"--dsn", "postgres://nope:1/db?connect_timeout=1",
+		"-e", "SELECT 1")
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
+	require.Len(t, env.Errors, 1)
+	require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
+	require.Equal(t, "SELECT", env.Errors[0].Context["tag"])
+	require.Contains(t, env.Errors[0].Context["reason"], "requires a DDL statement")
+}
+
+// TestExplainDDLCmdInvalidMode mirrors TestExplainCmdInvalidMode for
+// the explain-ddl surface so the --mode validation error is consistent.
+func TestExplainDDLCmdInvalidMode(t *testing.T) {
+	t.Setenv("CRDB_DSN", "postgres://envhost:26257/defaultdb")
+
+	stdout, err := runExplainDDL(t, "", "--output", "json",
+		"--mode", "yolo",
+		"-e", "ALTER TABLE t ADD COLUMN x INT")
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Len(t, env.Errors, 1)
+	require.Contains(t, env.Errors[0].Message, "invalid safety mode")
 }
 
 // TestExplainDDLCmdRejectsExtraArgs verifies that more than one
