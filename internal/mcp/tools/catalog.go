@@ -85,11 +85,15 @@ func ListTablesTool() mcp.Tool {
 			mcp.Items(schemasItemSchema()),
 		),
 		mcp.WithString(dsnParam,
-			mcp.Description("CockroachDB connection string (postgres:// URI). Mutually exclusive with schemas; when supplied, list-tables falls back to live information_schema introspection in the DSN's database."),
+			mcp.Description("CockroachDB connection string (postgres:// URI). Mutually exclusive with schemas; when supplied, list-tables falls back to live information_schema introspection in the DSN's database. For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below."),
 		),
 		mcp.WithBoolean(includeSystemParam,
 			mcp.Description("On the live (dsn) path, broaden the listing to every relation visible in information_schema (system schemas, views, sequences). Ignored on the schemas path. Default false."),
 		),
+		mcp.WithString(SSLModeParamName, mcp.Description(SSLModeParamDescription+" Ignored on the schemas path.")),
+		mcp.WithString(SSLRootCertParamName, mcp.Description(SSLRootCertParamDescription+" Ignored on the schemas path.")),
+		mcp.WithString(SSLCertParamName, mcp.Description(SSLCertParamDescription+" Ignored on the schemas path.")),
+		mcp.WithString(SSLKeyParamName, mcp.Description(SSLKeyParamDescription+" Ignored on the schemas path.")),
 	)
 }
 
@@ -110,8 +114,12 @@ func DescribeTableTool() mcp.Tool {
 			mcp.Items(schemasItemSchema()),
 		),
 		mcp.WithString(dsnParam,
-			mcp.Description("CockroachDB connection string (postgres:// URI). Mutually exclusive with schemas; when supplied, describe_table runs SHOW CREATE TABLE against the cluster."),
+			mcp.Description("CockroachDB connection string (postgres:// URI). Mutually exclusive with schemas; when supplied, describe_table runs SHOW CREATE TABLE against the cluster. For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below."),
 		),
+		mcp.WithString(SSLModeParamName, mcp.Description(SSLModeParamDescription+" Ignored on the schemas path.")),
+		mcp.WithString(SSLRootCertParamName, mcp.Description(SSLRootCertParamDescription+" Ignored on the schemas path.")),
+		mcp.WithString(SSLCertParamName, mcp.Description(SSLCertParamDescription+" Ignored on the schemas path.")),
+		mcp.WithString(SSLKeyParamName, mcp.Description(SSLKeyParamDescription+" Ignored on the schemas path.")),
 	)
 }
 
@@ -137,7 +145,7 @@ func ListTablesHandler(parserVersion string) server.ToolHandlerFunc {
 			if toolErr != nil {
 				return toolErr, nil
 			}
-			return listTablesLive(ctx, parserVersion, dsn, includeSystem)
+			return listTablesLive(ctx, parserVersion, req, dsn, includeSystem)
 		}
 		return listTablesFromSchemas(parserVersion, sources)
 	}
@@ -177,10 +185,15 @@ func listTablesFromSchemas(parserVersion string, sources []catalog.SchemaSource)
 // connected only after a successful round-trip; pre-flight errors
 // keep the disconnected status so the envelope reflects what
 // happened.
-func listTablesLive(ctx context.Context, parserVersion, dsn string, includeSystem bool) (*mcp.CallToolResult, error) {
+func listTablesLive(ctx context.Context, parserVersion string, req mcp.CallToolRequest, dsn string, includeSystem bool) (*mcp.CallToolResult, error) {
 	env := connectedEnvelope(parserVersion, "" /* targetVersion */)
 
-	mgr := conn.NewManager(dsn)
+	mergedDSN, toolErr := mergeDSNWithTLS(req, &env, dsn)
+	if toolErr != nil {
+		return toolErr, nil
+	}
+
+	mgr := conn.NewManager(mergedDSN)
 	defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 	tables, err := mgr.ListTablesFromCluster(ctx, conn.ListOptions{IncludeSystem: includeSystem})
@@ -223,7 +236,7 @@ func DescribeTableHandler(parserVersion string) server.ToolHandlerFunc {
 		}
 
 		if dsn != "" {
-			return describeTableLive(ctx, parserVersion, dsn, tableName)
+			return describeTableLive(ctx, parserVersion, req, dsn, tableName)
 		}
 		return describeTableFromSchemas(parserVersion, sources, tableName)
 	}
@@ -253,10 +266,15 @@ func describeTableFromSchemas(parserVersion string, sources []catalog.SchemaSour
 	return envelopeResult(env)
 }
 
-func describeTableLive(ctx context.Context, parserVersion, dsn, tableName string) (*mcp.CallToolResult, error) {
+func describeTableLive(ctx context.Context, parserVersion string, req mcp.CallToolRequest, dsn, tableName string) (*mcp.CallToolResult, error) {
 	env := connectedEnvelope(parserVersion, "" /* targetVersion */)
 
-	mgr := conn.NewManager(dsn)
+	mergedDSN, toolErr := mergeDSNWithTLS(req, &env, dsn)
+	if toolErr != nil {
+		return toolErr, nil
+	}
+
+	mgr := conn.NewManager(mergedDSN)
 	defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 	tbl, err := mgr.DescribeTableFromCluster(ctx, tableName)

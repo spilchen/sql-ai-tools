@@ -322,3 +322,14 @@ func (r *recordingTB) Fatalf(format string, args ...any) {
 }
 
 func (r *recordingTB) Helper() {}
+
+// TestWithSecureSetsSecureFlag pins the option-plumbing for WithSecure
+// without spawning a subprocess. A regression that dropped the field
+// assignment (e.g. an option-pattern refactor) would cause Start to
+// keep emitting --insecure even with WithSecure() applied; this test
+// catches that without depending on a cockroach binary.
+func TestWithSecureSetsSecureFlag(t *testing.T) {
+	var opts startOpts
+	WithSecure().apply(&opts)
+	require.True(t, opts.secure, "WithSecure() must set startOpts.secure")
+}

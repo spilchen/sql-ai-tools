@@ -32,10 +32,14 @@ func SimulateSQLTool() mcp.Tool {
 		SimulateSQLToolName,
 		mcp.WithDescription(`Simulate one or more SQL statements without applying them. Each parsed statement is dispatched to a non-executing EXPLAIN flavor: SELECT runs through EXPLAIN ANALYZE (real runtime stats; reads have no side effects), INSERT/UPDATE/DELETE/UPSERT runs through plain EXPLAIN (planner estimates only — the write is never applied), and DDL runs through EXPLAIN (DDL, SHAPE) plus a SHOW STATISTICS row-count annotation per affected table. Multi-statement input returns one entry per statement in parse order.`),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL statement(s) to simulate. Multi-statement input is split per ';' and each statement is dispatched independently.")),
-		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI)")),
+		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 		mcp.WithString(ModeParamName, mcp.Description(ModeParamDescription)),
 		mcp.WithNumber(StatementTimeoutParamName, mcp.Description(StatementTimeoutParamDescription)),
+		mcp.WithString(SSLModeParamName, mcp.Description(SSLModeParamDescription)),
+		mcp.WithString(SSLRootCertParamName, mcp.Description(SSLRootCertParamDescription)),
+		mcp.WithString(SSLCertParamName, mcp.Description(SSLCertParamDescription)),
+		mcp.WithString(SSLKeyParamName, mcp.Description(SSLKeyParamDescription)),
 	)
 }
 
@@ -92,7 +96,12 @@ func SimulateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 			return envelopeResult(env)
 		}
 
-		mgr := conn.NewManager(dsn, conn.WithStatementTimeout(timeout))
+		mergedDSN, toolErr := mergeDSNWithTLS(req, &env, dsn)
+		if toolErr != nil {
+			return toolErr, nil
+		}
+
+		mgr := conn.NewManager(mergedDSN, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 		result, err := mgr.Simulate(ctx, sql)

@@ -23,6 +23,7 @@ import (
 
 	"github.com/spilchen/sql-ai-tools/internal/catalog"
 	"github.com/spilchen/sql-ai-tools/internal/config"
+	"github.com/spilchen/sql-ai-tools/internal/conn"
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/schemawarn"
@@ -78,7 +79,12 @@ func newRootCmd() *cobra.Command {
 		Long: `crdb-sql exposes CockroachDB's parser, type system, and structured
 error infrastructure as a CLI and MCP server so that
 AI agents can validate, format, and reason about CockroachDB SQL without
-round-tripping through a live cluster.`,
+round-tripping through a live cluster.
+
+Secure clusters are supported transparently: TLS parameters can ride
+inside --dsn as libpq URI params (sslmode, sslrootcert, sslcert, sslkey)
+or be supplied via the matching --ssl* flags. See the README "Connecting
+to a secure cluster" section for examples.`,
 		// Both silences are deliberate: cobra should neither print the
 		// usage dump on a runtime error (noisy) nor print the error
 		// itself (we want a single source of truth). The Execute caller
@@ -105,6 +111,23 @@ round-tripping through a live cluster.`,
 				state.dsn = dsn
 			} else {
 				state.dsn = os.Getenv("CRDB_DSN")
+			}
+
+			tls, err := readTLSFlags(cmd)
+			if err != nil {
+				return err
+			}
+			if !tls.IsZero() {
+				// MergeTLSParams enforces the form policy (URI required)
+				// and the conflict policy (no silent overrides). Both
+				// are returned as plain errors so the caller surfaces
+				// them via the standard exit-1 path used for missing or
+				// malformed --dsn input.
+				merged, err := conn.MergeTLSParams(state.dsn, tls)
+				if err != nil {
+					return err
+				}
+				state.dsn = merged
 			}
 
 			cfgPath, err := cmd.Flags().GetString(configFlag)
@@ -134,11 +157,19 @@ round-tripping through a live cluster.`,
 	root.PersistentFlags().StringP(outputFlag, "o", string(output.FormatText),
 		`output format: "text" or "json"`)
 	root.PersistentFlags().String(dsnFlag, "",
-		"CockroachDB connection string (overrides CRDB_DSN env var)")
+		"CockroachDB connection string (overrides CRDB_DSN env var); TLS params can ride inside as libpq URI params (sslmode/sslrootcert/sslcert/sslkey) or via the --ssl* flags below")
 	root.PersistentFlags().String(configFlag, "",
 		"path to crdb-sql.yaml (default: auto-discover in CWD)")
 	root.PersistentFlags().String(targetVersionFlag, "",
 		"Target CockroachDB version (e.g. 25.4.0); reported in the response envelope")
+	root.PersistentFlags().String(sslModeFlag, "",
+		`TLS verification mode (e.g. "verify-full", "require"); merged into --dsn as ?sslmode=`)
+	root.PersistentFlags().String(sslRootCertFlag, "",
+		"path to the trusted CA certificate; merged into --dsn as ?sslrootcert=")
+	root.PersistentFlags().String(sslCertFlag, "",
+		"path to the client certificate (cert-based auth); merged into --dsn as ?sslcert=")
+	root.PersistentFlags().String(sslKeyFlag, "",
+		"path to the client private key (cert-based auth); merged into --dsn as ?sslkey=")
 	root.AddCommand(newVersionCmd(state))
 	root.AddCommand(newVersionsCmd(state))
 	root.AddCommand(newPingCmd(state))
@@ -165,7 +196,41 @@ const (
 	dsnFlag           = "dsn"
 	configFlag        = "config"
 	targetVersionFlag = "target-version"
+	sslModeFlag       = "sslmode"
+	sslRootCertFlag   = "sslrootcert"
+	sslCertFlag       = "sslcert"
+	sslKeyFlag        = "sslkey"
 )
+
+// readTLSFlags reads the four --ssl* persistent flags into a
+// conn.TLSParams. Any GetString failure is propagated unchanged so the
+// caller can surface it the same way it would surface an unknown
+// --output value (cobra returns these only when the flag is not
+// registered, which is a programming error).
+func readTLSFlags(cmd *cobra.Command) (conn.TLSParams, error) {
+	mode, err := cmd.Flags().GetString(sslModeFlag)
+	if err != nil {
+		return conn.TLSParams{}, err
+	}
+	rootCert, err := cmd.Flags().GetString(sslRootCertFlag)
+	if err != nil {
+		return conn.TLSParams{}, err
+	}
+	cert, err := cmd.Flags().GetString(sslCertFlag)
+	if err != nil {
+		return conn.TLSParams{}, err
+	}
+	key, err := cmd.Flags().GetString(sslKeyFlag)
+	if err != nil {
+		return conn.TLSParams{}, err
+	}
+	return conn.TLSParams{
+		SSLMode:     mode,
+		SSLRootCert: rootCert,
+		SSLCert:     cert,
+		SSLKey:      key,
+	}, nil
+}
 
 // loadConfig resolves the project YAML config. When path is non-empty,
 // the file at that path must exist and parse cleanly (explicit user

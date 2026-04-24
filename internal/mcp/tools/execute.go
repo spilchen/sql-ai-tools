@@ -36,11 +36,15 @@ func ExecuteSQLTool() mcp.Tool {
 		ExecuteSQLToolName,
 		mcp.WithDescription(`Execute SQL against a CockroachDB cluster with safety guardrails. Returns rows, columns, and the command tag in a structured envelope. The mode parameter selects the safety policy: read_only (default) admits non-mutating statements only; safe_write also admits INSERT/UPDATE/DELETE; full_access admits any parsed statement. For read_only SELECTs without a LIMIT, max_rows is injected so the cluster does not stream an unbounded result.`),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL statement to execute")),
-		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI)")),
+		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 		mcp.WithString(ModeParamName, mcp.Description(ModeParamDescription)),
 		mcp.WithNumber(StatementTimeoutParamName, mcp.Description(StatementTimeoutParamDescription)),
 		mcp.WithNumber(MaxRowsParamName, mcp.Description(MaxRowsParamDescription)),
+		mcp.WithString(SSLModeParamName, mcp.Description(SSLModeParamDescription)),
+		mcp.WithString(SSLRootCertParamName, mcp.Description(SSLRootCertParamDescription)),
+		mcp.WithString(SSLCertParamName, mcp.Description(SSLCertParamDescription)),
+		mcp.WithString(SSLKeyParamName, mcp.Description(SSLKeyParamDescription)),
 	)
 }
 
@@ -114,7 +118,12 @@ func ExecuteSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 			}
 		}
 
-		mgr := conn.NewManager(dsn, conn.WithStatementTimeout(timeout))
+		mergedDSN, toolErr := mergeDSNWithTLS(req, &env, dsn)
+		if toolErr != nil {
+			return toolErr, nil
+		}
+
+		mgr := conn.NewManager(mergedDSN, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 		result, err := mgr.Execute(ctx, rewritten, conn.ExecuteOptions{
