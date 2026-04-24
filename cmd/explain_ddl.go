@@ -36,8 +36,11 @@ import (
 // declarative schema changer to compile a plan — and the safety
 // allowlist still gates the call: in the default read_only mode every
 // DDL is rejected (since DDL modifies schema), so users must escalate
-// to --mode=safe_write or --mode=full_access (issue #29) to
-// exercise this command.
+// to --mode=safe_write or --mode=full_access to exercise this
+// command. safe_write admits DDL but still rejects nested EXPLAIN,
+// privilege/role changes (DCL), cluster admin, tenant management,
+// and non-DDL inputs; full_access admits any DDL that parses while
+// still rejecting nested EXPLAIN and non-DDL inputs.
 func newExplainDDLCmd(state *rootState) *cobra.Command {
 	var (
 		expr    string
@@ -57,8 +60,11 @@ connection string is read from --dsn or CRDB_DSN (flag wins).
 The --mode flag selects the safety policy applied before the cluster
 call. The default "read_only" rejects every DDL (since DDL modifies
 schema), so this command requires --mode=safe_write or
---mode=full_access — both reserved for follow-up issue #29
-and currently rejected with a "not yet implemented" violation.`,
+--mode=full_access. safe_write admits DDL but still rejects nested
+EXPLAIN, privilege/role changes (DCL), cluster administration,
+tenant management, and non-DDL inputs; full_access admits any DDL
+that parses while still rejecting nested EXPLAIN and non-DDL
+inputs.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierConnected, cmd)
