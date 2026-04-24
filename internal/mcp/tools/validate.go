@@ -34,7 +34,7 @@ import (
 func ValidateSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		ValidateSQLToolName,
-		mcp.WithDescription("Validate SQL for syntax, type, and (with the schemas argument) name errors. Returns an envelope whose data is {\"valid\": true, \"checks\": {syntax, type_check, name_resolution}}; each check is \"ok\" or \"skipped\". Failures are reported as structured envelope errors with SQLSTATE codes, severity, message, and source position. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
+		mcp.WithDescription("Validate SQL for syntax, type, and (with the schemas argument) name errors. Returns an envelope whose data is {\"valid\": true, \"checks\": {syntax, type_check, name_resolution}}; each check is \"ok\" or \"skipped\". Failures are reported as structured envelope errors with SQLSTATE codes, severity, message, and source position. Syntax errors include \"did you mean?\" suggestions when the offending token resembles a SQL keyword. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to validate")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 		mcp.WithArray(schemasParam,

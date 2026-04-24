@@ -32,7 +32,7 @@ import (
 func ExplainSchemaChangeTool() mcp.Tool {
 	return mcp.NewTool(
 		ExplainSchemaChangeToolName,
-		mcp.WithDescription("Run EXPLAIN (DDL, SHAPE) against a CockroachDB cluster and return the declarative schema-changer plan as structured JSON. The wrapped DDL is not executed — the schema changer only compiles a plan. Returns the operations list (with backfill / merge / validate steps), the canonicalized statement, and the raw text the cluster returned. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
+		mcp.WithDescription("Run EXPLAIN (DDL, SHAPE) against a CockroachDB cluster and return the declarative schema-changer plan as structured JSON. The wrapped DDL is not executed — the schema changer only compiles a plan. Returns the operations list (with backfill / merge / validate steps), the canonicalized statement, and the raw text the cluster returned. Syntax errors include \"did you mean?\" suggestions when the offending token resembles a SQL keyword. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("DDL statement to plan (e.g. ALTER TABLE ... ADD COLUMN ...)")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),

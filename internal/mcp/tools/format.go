@@ -24,7 +24,7 @@ import (
 func FormatSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		FormatSQLToolName,
-		mcp.WithDescription("Pretty-print SQL statements in canonical CockroachDB format. Returns an envelope with the formatted SQL string. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
+		mcp.WithDescription("Pretty-print SQL statements in canonical CockroachDB format. Returns an envelope with the formatted SQL string. Syntax errors include \"did you mean?\" suggestions when the offending token resembles a SQL keyword. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to format (may contain multiple semicolon-separated statements)")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)

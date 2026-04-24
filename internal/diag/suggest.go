@@ -21,7 +21,7 @@ const maxSuggestions = 3
 
 // Suggest returns up to three "did you mean?" fix suggestions for
 // the misspelled token, ranked by Levenshtein edit distance against
-// candidates.
+// candidates. Suggestions carry a Reason prefix of ReasonLevenshtein.
 //
 // Suggestions are filtered by a length-scaled threshold: short names
 // permit fewer edits (e.g. distance 2 between "id" and "od" is too
@@ -48,11 +48,59 @@ const maxSuggestions = 3
 // borrows the underlying string from candidates (Go strings are
 // immutable, so this is safe for typical []string callers).
 func Suggest(misspelled string, candidates []string, pos *output.Position) []output.Suggestion {
-	if misspelled == "" || pos == nil || len(candidates) == 0 {
+	if misspelled == "" {
+		return nil
+	}
+	return suggestWithDistance(misspelled, candidates, pos, maxDistance(len(misspelled)), levenshtein, ReasonLevenshtein, false /* preferSameLen */)
+}
+
+// ReasonLevenshtein and ReasonDamerauLevenshtein are the metric
+// prefixes embedded in the output.Suggestion.Reason field. Each
+// emitted Reason has the shape "<prefix>_<distance>" — for example
+// "levenshtein_distance_1" or "damerau_levenshtein_distance_2" — so
+// callers branching on the metric should compare with
+// strings.HasPrefix(s.Reason, ReasonLevenshtein+"_") rather than
+// identity. The trailing distance integer is comparable only within
+// the same metric: a Damerau-Levenshtein distance of 1 can
+// correspond to a Levenshtein distance of 2 when the typo is an
+// adjacent transposition.
+const (
+	ReasonLevenshtein        = "levenshtein_distance"
+	ReasonDamerauLevenshtein = "damerau_levenshtein_distance"
+)
+
+// suggestWithDistance is the lowest-level "did you mean?" ranker. It
+// is shared by the Levenshtein path (Suggest, used by semcheck for
+// unknown table/function/column names) and the Damerau-Levenshtein
+// path (SuggestKeyword, used by FromParseError for keyword typos).
+//
+// dist is the edit-distance function applied to the lower-cased
+// misspelled/candidate pair; callers pick Levenshtein or
+// Damerau-Levenshtein. reasonPrefix names the metric in the emitted
+// Suggestion.Reason field (e.g. ReasonLevenshtein → "levenshtein_
+// distance_1") so downstream agents can tell the metrics apart.
+// preferSameLen, when true, breaks ties between candidates at the
+// same distance by preferring those whose length matches the
+// misspelled token — this biases toward substitution/transposition
+// fixes over insertion/deletion ones, which is the right call when
+// the metric is Damerau and adjacent swaps are the dominant typo.
+//
+// limit is the inclusive distance cap; candidates farther than limit
+// are skipped (with a length pre-filter to avoid the DP). Callers
+// passing limit <= 0 get nil.
+func suggestWithDistance(
+	misspelled string,
+	candidates []string,
+	pos *output.Position,
+	limit int,
+	dist func(a, b string) int,
+	reasonPrefix string,
+	preferSameLen bool,
+) []output.Suggestion {
+	if misspelled == "" || pos == nil || len(candidates) == 0 || limit <= 0 {
 		return nil
 	}
 
-	limit := maxDistance(len(misspelled))
 	type scored struct {
 		name     string
 		distance int
@@ -68,7 +116,7 @@ func Suggest(misspelled string, candidates []string, pos *output.Position) []out
 		if absDiff(len(cand), len(misspelled)) > limit {
 			continue
 		}
-		d := levenshtein(strings.ToLower(misspelled), strings.ToLower(cand))
+		d := dist(strings.ToLower(misspelled), strings.ToLower(cand))
 		if d > limit {
 			continue
 		}
@@ -81,6 +129,13 @@ func Suggest(misspelled string, candidates []string, pos *output.Position) []out
 	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].distance != hits[j].distance {
 			return hits[i].distance < hits[j].distance
+		}
+		if preferSameLen {
+			iSame := len(hits[i].name) == len(misspelled)
+			jSame := len(hits[j].name) == len(misspelled)
+			if iSame != jSame {
+				return iSame
+			}
 		}
 		return hits[i].name < hits[j].name
 	})
@@ -98,7 +153,7 @@ func Suggest(misspelled string, candidates []string, pos *output.Position) []out
 			Replacement: h.name,
 			Range:       rng,
 			Confidence:  confidence(h.distance, max(len(misspelled), len(h.name))),
-			Reason:      fmt.Sprintf("levenshtein_distance_%d", h.distance),
+			Reason:      fmt.Sprintf("%s_%d", reasonPrefix, h.distance),
 		}
 	}
 	return out
