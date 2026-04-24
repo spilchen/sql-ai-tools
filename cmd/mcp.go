@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	internalmcp "github.com/spilchen/sql-ai-tools/internal/mcp"
+	"github.com/spilchen/sql-ai-tools/internal/mcp/proxy"
 )
 
 // newMCPCmd builds the `crdb-sql mcp` subcommand. It launches an MCP
@@ -30,7 +31,14 @@ func newMCPCmd(state *rootState) *cobra.Command {
 		Short: "Run the crdb-sql MCP server on stdio",
 		Long: `Start an MCP (Model Context Protocol) server that speaks JSON-RPC
 over stdio. Intended to be launched by an MCP client (e.g. Claude Code
-via "claude mcp add"); the process exits when the client closes stdin.`,
+via "claude mcp add"); the process exits when the client closes stdin.
+
+Per-call target_version routing: any tool call whose target_version
+maps to a different parser quarter than this binary's bundled parser
+is forwarded to the matching sibling backend (crdb-sql-vXXX) on
+$PATH. The first cut spawns one sibling subprocess per routed call;
+expect ~tens-of-ms overhead per call vs. local handlers (benchmark
+tracked in #146; warm pooling in #145).`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			// Resolve the parser version up front so a stamped release
@@ -41,7 +49,10 @@ via "claude mcp add"); the process exits when the client closes stdin.`,
 			if err != nil {
 				return err
 			}
-			s := internalmcp.NewServer(Version, parserVer, state.targetVersion)
+			s := internalmcp.NewServer(
+				Version, parserVer, state.targetVersion,
+				internalmcp.WithRouter(proxy.NewSpawnRouter()),
+			)
 			// Wrap the transport error so a failure in the stdio loop
 			// surfaces through cobra's "Error:" line as obviously
 			// transport-layer rather than as an opaque message from
