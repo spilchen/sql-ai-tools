@@ -19,6 +19,12 @@ jobs:
   ci:
     name: build / lint / test
     runs-on: ubuntu-latest
+    # The CI runner does not install a cockroach binary, so any
+    # integration-tagged test reaching cockroachtest.Shared would
+    # otherwise t.Fatalf. Setting CRDB_INTEGRATION_OPTIONAL converts
+    # that fatal back into a skip — only here, never on dev machines.
+    env:
+      CRDB_INTEGRATION_OPTIONAL: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
