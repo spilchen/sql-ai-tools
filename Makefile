@@ -14,7 +14,9 @@ GO_PKGS                 := ./...
 #   make install DESTDIR=/tmp/stage
 #   make install BINDIR=/opt/crdb-sql/bin
 # /usr/local/bin typically requires sudo; we don't invoke it from the recipe
-# so non-root prefixes aren't surprised.
+# so non-root prefixes aren't surprised. The install recipe is copy-only
+# (no Go toolchain required), so `sudo make install` works even when root's
+# PATH lacks `go` — see the install target's comment block for the split.
 PREFIX                  ?= /usr/local
 BINDIR                  ?= $(PREFIX)/bin
 GOFMT_FILES             := $(shell find . -name '*.go' -not -path './vendor/*')
@@ -97,13 +99,26 @@ build-latest: build ## Alias for `make build` — compile the latest-quarter bin
 build-all: $(addprefix build-, $(QUARTERS)) build ## Compile every supported per-quarter backend plus the unsuffixed latest.
 
 # Copies bin/crdb-sql plus any crdb-sql-v[0-9]* siblings that already exist
-# on disk — so `make build-all install` ships every per-quarter backend
-# without forcing a rebuild here. The numeric class in the glob scopes the
-# recipe to the v<digits> quarter naming used by QUARTERS (v261, v262, ...)
-# and excludes unrelated bin/ artifacts like golangci-lint. The `build` dep
-# guarantees the unsuffixed binary; the for-loop's existence check makes
+# on disk. The numeric class in the glob scopes the recipe to the v<digits>
+# quarter naming used by QUARTERS (v261, v262, ...) and excludes unrelated
+# bin/ artifacts like golangci-lint. The for-loop's existence check makes
 # missing siblings a silent no-op rather than an error.
-install: build ## Copy built binaries to $(DESTDIR)$(BINDIR) (default /usr/local/bin; may need sudo).
+#
+# install is intentionally copy-only — it does NOT depend on `build`. The
+# split follows the GNU convention so `sudo make install` never invokes the
+# Go toolchain (root's PATH may not include `go`, and we don't want root
+# writing build artifacts back into the source tree). Typical flow:
+#
+#   make build && sudo make install                 # latest only
+#   make build-all && sudo make install             # every quarter sibling
+#
+# The unsuffixed bin/crdb-sql is required; if it's missing we error out
+# with a hint instead of silently no-op'ing the copy loop.
+install: ## Copy already-built binaries from bin/ to $(DESTDIR)$(BINDIR). Run 'make build' (or 'make build-all') first.
+	@if [ ! -f $(BIN) ]; then \
+		echo "install: $(BIN) not found — run 'make build' (or 'make build-all') first."; \
+		exit 2; \
+	fi
 	@install -d -m 0755 $(DESTDIR)$(BINDIR)
 	@for f in $(BIN_DIR)/$(BINARY) $(BIN_DIR)/$(BINARY)-v[0-9]*; do \
 		[ -f "$$f" ] || continue; \
