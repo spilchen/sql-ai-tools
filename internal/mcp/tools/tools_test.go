@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/spilchen/sql-ai-tools/internal/builtinstubs"
+	"github.com/spilchen/sql-ai-tools/internal/conn"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/risk"
 	"github.com/spilchen/sql-ai-tools/internal/sqlparse"
@@ -1544,4 +1545,142 @@ func TestDetectRiskyQueryHandler_VersionWarning(t *testing.T) {
 			require.Equal(t, tc.targetVersion, featWarn.Context["target"])
 		})
 	}
+}
+
+// TestResolveTLSParams pins the absent-vs-set contract for the four
+// optional TLS arguments. Absent / nil yields an empty TLSParams;
+// non-string values are rejected as tool errors so a caller cannot
+// silently bypass the merge by sending a number.
+func TestResolveTLSParams(t *testing.T) {
+	tests := []struct {
+		name           string
+		args           map[string]any
+		expectedParams conn.TLSParams
+		expectedErr    bool
+	}{
+		{
+			name:           "all absent",
+			args:           map[string]any{},
+			expectedParams: conn.TLSParams{},
+		},
+		{
+			name: "all four populated",
+			args: map[string]any{
+				"sslmode":     "verify-full",
+				"sslrootcert": "/p/ca.crt",
+				"sslcert":     "/p/client.crt",
+				"sslkey":      "/p/client.key",
+			},
+			expectedParams: conn.TLSParams{
+				SSLMode:     "verify-full",
+				SSLRootCert: "/p/ca.crt",
+				SSLCert:     "/p/client.crt",
+				SSLKey:      "/p/client.key",
+			},
+		},
+		{
+			name:           "whitespace trimmed",
+			args:           map[string]any{"sslmode": "  require  "},
+			expectedParams: conn.TLSParams{SSLMode: "require"},
+		},
+		{
+			name:        "non-string sslmode rejected",
+			args:        map[string]any{"sslmode": 1},
+			expectedErr: true,
+		},
+		{
+			name:        "non-string sslcert rejected",
+			args:        map[string]any{"sslcert": true},
+			expectedErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = tc.args
+			got, toolErr := resolveTLSParams(req)
+			if tc.expectedErr {
+				require.NotNil(t, toolErr)
+				return
+			}
+			require.Nil(t, toolErr)
+			require.Equal(t, tc.expectedParams, got)
+		})
+	}
+}
+
+// TestExplainSQLToolAdvertisesTLSParams pins the discoverability
+// contract: the four TLS knobs appear as top-level properties on the
+// tool schema. Without this, an agent inspecting the schema for
+// available parameters would not know TLS could be configured outside
+// the dsn URI string.
+func TestExplainSQLToolAdvertisesTLSParams(t *testing.T) {
+	tools := map[string]mcpgo.Tool{
+		"explain_sql":           ExplainSQLTool(),
+		"explain_schema_change": ExplainSchemaChangeTool(),
+		"execute_sql":           ExecuteSQLTool(),
+		"simulate_sql":          SimulateSQLTool(),
+		"list_tables":           ListTablesTool(),
+		"describe_table":        DescribeTableTool(),
+	}
+	for name, tool := range tools {
+		t.Run(name, func(t *testing.T) {
+			props := tool.InputSchema.Properties
+			for _, param := range []string{
+				SSLModeParamName,
+				SSLRootCertParamName,
+				SSLCertParamName,
+				SSLKeyParamName,
+			} {
+				require.Contains(t, props, param,
+					"%s schema must advertise the %s property", name, param)
+			}
+		})
+	}
+}
+
+// TestExplainSQLHandlerTLSConflictSurfacesEnvelopeError pins the
+// load-bearing routing rule from mergeDSNWithTLS: a DSN/flag conflict
+// is *not* a tool-level error — it is appended to env.Errors as
+// tls_param_error so any earlier envelope warnings (target_version
+// mismatch etc.) are preserved.
+//
+// Picking explain_sql for coverage; the helper is shared so all five
+// connected tools follow the same path. A regression that flipped
+// merge errors back to mcp.NewToolResultError would silently drop
+// envelope state and is exactly the bug this test exists to catch.
+func TestExplainSQLHandlerTLSConflictSurfacesEnvelopeError(t *testing.T) {
+	handler := ExplainSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":     "SELECT 1",
+		"dsn":     "postgres://h:26257/db?sslmode=require",
+		"sslmode": "verify-full",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
+	require.Len(t, env.Errors, 1)
+	require.Equal(t, "tls_param_error", env.Errors[0].Code)
+	require.Contains(t, env.Errors[0].Message, "sslmode")
+}
+
+// TestExplainSQLHandlerTLSWrongTypeIsToolError pins the
+// schema-validation routing: a non-string TLS argument is malformed
+// at the request layer (the tool never ran), so it surfaces as a
+// tool-level error rather than an envelope entry.
+func TestExplainSQLHandlerTLSWrongTypeIsToolError(t *testing.T) {
+	handler := ExplainSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":     "SELECT 1",
+		"dsn":     "postgres://h:26257/db",
+		"sslmode": 1,
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	require.True(t, res.IsError, "non-string sslmode must surface as a tool-level error")
 }

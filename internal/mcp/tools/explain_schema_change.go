@@ -34,10 +34,14 @@ func ExplainSchemaChangeTool() mcp.Tool {
 		ExplainSchemaChangeToolName,
 		mcp.WithDescription(`Run EXPLAIN (DDL, SHAPE) against a CockroachDB cluster and return the declarative schema-changer plan as structured JSON. The wrapped DDL is not executed — the schema changer only compiles a plan. Returns the operations list (with backfill / merge / validate steps), the canonicalized statement, and the raw text the cluster returned.`),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("DDL statement to plan (e.g. ALTER TABLE ... ADD COLUMN ...)")),
-		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI)")),
+		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 		mcp.WithString(ModeParamName, mcp.Description(ModeParamDescription)),
 		mcp.WithNumber(StatementTimeoutParamName, mcp.Description(StatementTimeoutParamDescription)),
+		mcp.WithString(SSLModeParamName, mcp.Description(SSLModeParamDescription)),
+		mcp.WithString(SSLRootCertParamName, mcp.Description(SSLRootCertParamDescription)),
+		mcp.WithString(SSLCertParamName, mcp.Description(SSLCertParamDescription)),
+		mcp.WithString(SSLKeyParamName, mcp.Description(SSLKeyParamDescription)),
 	)
 }
 
@@ -87,7 +91,12 @@ func ExplainSchemaChangeHandler(parserVersion, defaultTargetVersion string) serv
 			return envelopeResult(env)
 		}
 
-		mgr := conn.NewManager(dsn, conn.WithStatementTimeout(timeout))
+		mergedDSN, toolErr := mergeDSNWithTLS(req, &env, dsn)
+		if toolErr != nil {
+			return toolErr, nil
+		}
+
+		mgr := conn.NewManager(mergedDSN, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 		result, err := mgr.ExplainDDL(ctx, sql)

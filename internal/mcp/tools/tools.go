@@ -93,6 +93,33 @@ const StatementTimeoutParamName = "statement_timeout_ms"
 // applies.
 const StatementTimeoutParamDescription = "Optional statement_timeout (milliseconds) applied inside the cluster-side transaction wrapper. Default 30000 (30s). Non-positive values fall back to the default."
 
+// SSLModeParamName / SSLRootCertParamName / SSLCertParamName /
+// SSLKeyParamName are the optional MCP tool parameter names that let
+// a client supply libpq TLS knobs alongside the dsn. They are merged
+// into the dsn via conn.MergeTLSParams, which fails loudly if the
+// dsn already carries a non-empty value for the same key. Names match
+// libpq spelling so an agent that already knows the URI form can
+// reach for them by the same identifier.
+const (
+	SSLModeParamName     = "sslmode"
+	SSLRootCertParamName = "sslrootcert"
+	SSLCertParamName     = "sslcert"
+	SSLKeyParamName      = "sslkey"
+)
+
+// SSL*ParamDescription strings document each TLS knob in the wire
+// schema. Per-field rather than a single shared blurb because the
+// agent picks them individually; a generic description would not tell
+// it which field controls verification depth vs. CA path vs. client
+// auth. The conflict policy is named in each one so a caller reading
+// just one description still sees the failure mode.
+const (
+	SSLModeParamDescription     = `Optional libpq TLS verification mode (e.g. "verify-full", "require"). Merged into dsn as ?sslmode=. Errors if dsn already supplies a non-empty sslmode.`
+	SSLRootCertParamDescription = "Optional path to the trusted CA certificate. Merged into dsn as ?sslrootcert=. Errors if dsn already supplies a non-empty sslrootcert."
+	SSLCertParamDescription     = "Optional path to the client certificate (cert-based auth). Merged into dsn as ?sslcert=. Errors if dsn already supplies a non-empty sslcert."
+	SSLKeyParamDescription      = "Optional path to the client private key (cert-based auth). Merged into dsn as ?sslkey=. Errors if dsn already supplies a non-empty sslkey."
+)
+
 // extractRequiredString validates and returns a required string
 // parameter from an MCP tool request. Leading and trailing whitespace
 // is trimmed so all handlers behave consistently. On success, the
@@ -325,4 +352,96 @@ func envelopeResult(env output.Envelope) (*mcp.CallToolResult, error) {
 		return mcp.NewToolResultError(fmt.Sprintf("encode result: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(body)), nil
+}
+
+// resolveTLSParams reads the four optional sslmode/sslrootcert/sslcert/
+// sslkey arguments from req and returns a conn.TLSParams. Each field
+// is independently optional; absence yields an empty string, and any
+// non-string value is a tool-level error (no reasonable interpretation).
+//
+// On success the returned *mcp.CallToolResult is nil. On a malformed
+// argument it is a pre-built tool error so the caller can return
+// immediately rather than producing a misleading envelope.
+func resolveTLSParams(req mcp.CallToolRequest) (conn.TLSParams, *mcp.CallToolResult) {
+	mode, toolErr := tlsStringParam(req, SSLModeParamName)
+	if toolErr != nil {
+		return conn.TLSParams{}, toolErr
+	}
+	rootCert, toolErr := tlsStringParam(req, SSLRootCertParamName)
+	if toolErr != nil {
+		return conn.TLSParams{}, toolErr
+	}
+	cert, toolErr := tlsStringParam(req, SSLCertParamName)
+	if toolErr != nil {
+		return conn.TLSParams{}, toolErr
+	}
+	key, toolErr := tlsStringParam(req, SSLKeyParamName)
+	if toolErr != nil {
+		return conn.TLSParams{}, toolErr
+	}
+	return conn.TLSParams{
+		SSLMode:     mode,
+		SSLRootCert: rootCert,
+		SSLCert:     cert,
+		SSLKey:      key,
+	}, nil
+}
+
+// tlsStringParam is the per-field reader behind resolveTLSParams. It
+// is a private sibling of catalog.go's extractOptionalString; kept
+// separate so the absent-vs-empty contract stays colocated with the
+// TLS-merge code that depends on it (an empty value here flows through
+// IsZero and short-circuits the merge, which is contract-relevant).
+func tlsStringParam(req mcp.CallToolRequest, name string) (string, *mcp.CallToolResult) {
+	raw, exists := req.GetArguments()[name]
+	if !exists || raw == nil {
+		return "", nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", mcp.NewToolResultError(fmt.Sprintf("%s parameter must be a string, got %T", name, raw))
+	}
+	return strings.TrimSpace(s), nil
+}
+
+// mergeDSNWithTLS is the shared connect-prep step for Tier 3 tools.
+// It reads the four optional TLS params and folds them into dsn via
+// conn.MergeTLSParams. Two failure modes, both surfaced through the
+// returned *mcp.CallToolResult:
+//
+//   - Param-shape errors (non-string TLS field) come back as
+//     mcp.NewToolResultError because the request is malformed at the
+//     schema layer; the tool itself never ran.
+//
+//   - Merge errors (DSN-side conflict, non-URI form) are appended to
+//     env.Errors as a tls_param_error and the envelope is returned as
+//     a successful tool result. This preserves any warnings already
+//     accumulated on env (target_version mismatch, etc.); routing the
+//     merge error through mcp.NewToolResultError would discard them,
+//     because that constructor builds a fresh result that never
+//     references the envelope.
+//
+// On success the merged DSN is returned and *mcp.CallToolResult is
+// nil. On either failure the caller returns the result verbatim.
+func mergeDSNWithTLS(req mcp.CallToolRequest, env *output.Envelope, dsn string) (string, *mcp.CallToolResult) {
+	tls, toolErr := resolveTLSParams(req)
+	if toolErr != nil {
+		return "", toolErr
+	}
+	merged, err := conn.MergeTLSParams(dsn, tls)
+	if err != nil {
+		env.Errors = append(env.Errors, output.Error{
+			Code:     "tls_param_error",
+			Severity: output.SeverityError,
+			Message:  err.Error(),
+			Category: "connect",
+		})
+		// envelopeResult only errs on json.Marshal of output.Envelope,
+		// which is statically marshalable — the error return is unreachable
+		// today and a future field that breaks marshalling would surface
+		// in every Tier 3 tool's success path long before reaching here.
+		envResult, _ := envelopeResult(*env)
+		return "", envResult
+	}
+	return merged, nil
 }

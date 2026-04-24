@@ -275,6 +275,53 @@ explain-ddl` is the planned schema-change-impact tool, but it cannot
 run today — its per-mode rules are still follow-up work and every
 input is rejected.
 
+### Connecting to a secure cluster
+
+`crdb-sql` talks to TLS-only clusters with no extra setup: pgx accepts
+the standard libpq URI parameters (`sslmode`, `sslrootcert`, `sslcert`,
+`sslkey`) inside the DSN, and the same four are also exposed as
+top-level `--ssl*` flags for the CLI and as input fields on every
+connected MCP tool.
+
+Password-based auth with a CA cert (typical for a managed cluster):
+
+```bash
+crdb-sql ping --dsn "postgresql://root@host:26257/defaultdb?sslmode=verify-full&sslrootcert=/path/ca.crt"
+```
+
+Client-certificate auth (typical for a self-managed cluster's `root`
+user):
+
+```bash
+crdb-sql ping --dsn "postgresql://root@host:26257/defaultdb?sslmode=verify-full&sslrootcert=/path/ca.crt&sslcert=/path/client.root.crt&sslkey=/path/client.root.key"
+```
+
+Equivalent invocation using the per-knob flags (the flag values are
+merged into the DSN before connect, and the merge fails loudly if the
+same parameter is supplied on both sides):
+
+```bash
+crdb-sql ping \
+  --dsn "postgresql://root@host:26257/defaultdb" \
+  --sslmode verify-full \
+  --sslrootcert /path/ca.crt \
+  --sslcert /path/client.root.crt \
+  --sslkey /path/client.root.key
+```
+
+The same fields appear on the MCP tool input schemas, so an agent
+configuring `explain_sql` (or any other connected tool) can supply
+TLS knobs without knowing the libpq URI form:
+
+```json
+{
+  "sql": "SELECT 1",
+  "dsn": "postgresql://root@host:26257/defaultdb",
+  "sslmode": "verify-full",
+  "sslrootcert": "/path/ca.crt"
+}
+```
+
 ## Use as an MCP server
 
 `crdb-sql mcp` runs the binary as a Model Context Protocol server over

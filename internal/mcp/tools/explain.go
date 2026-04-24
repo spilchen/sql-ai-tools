@@ -28,10 +28,14 @@ func ExplainSQLTool() mcp.Tool {
 		ExplainSQLToolName,
 		mcp.WithDescription(`Run EXPLAIN against a CockroachDB cluster and return the plan as structured JSON. The wrapped statement is not executed (this is plain EXPLAIN, not EXPLAIN ANALYZE). Returns the operator tree, header (distribution/vectorized), and the raw tabular rows.`),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL DML statement to explain")),
-		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI)")),
+		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 		mcp.WithString(ModeParamName, mcp.Description(ModeParamDescription)),
 		mcp.WithNumber(StatementTimeoutParamName, mcp.Description(StatementTimeoutParamDescription)),
+		mcp.WithString(SSLModeParamName, mcp.Description(SSLModeParamDescription)),
+		mcp.WithString(SSLRootCertParamName, mcp.Description(SSLRootCertParamDescription)),
+		mcp.WithString(SSLCertParamName, mcp.Description(SSLCertParamDescription)),
+		mcp.WithString(SSLKeyParamName, mcp.Description(SSLKeyParamDescription)),
 	)
 }
 
@@ -87,7 +91,12 @@ func ExplainSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 			return envelopeResult(env)
 		}
 
-		mgr := conn.NewManager(dsn, conn.WithStatementTimeout(timeout))
+		mergedDSN, toolErr := mergeDSNWithTLS(req, &env, dsn)
+		if toolErr != nil {
+			return toolErr, nil
+		}
+
+		mgr := conn.NewManager(mergedDSN, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 		result, err := mgr.Explain(ctx, sql)

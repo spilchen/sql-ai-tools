@@ -150,6 +150,7 @@ func (l *lockedBuf) String() string {
 type startOpts struct {
 	startTimeout time.Duration
 	extraArgs    []string
+	secure       bool
 }
 
 // Option configures Start.
@@ -183,6 +184,21 @@ func WithExtraArgs(args ...string) Option {
 	})
 }
 
+// WithSecure drops `--insecure` from the cockroach demo invocation.
+// In secure mode demo provisions a self-signed CA and a node
+// certificate into a tempdir, then writes a TLS-enabled DSN whose
+// query string includes at least `sslmode` and `sslrootcert` pointing
+// at the demo-issued CA. Demo authenticates the SQL session with a
+// generated password rather than a client certificate, so the DSN
+// does not carry `sslcert`/`sslkey` — tests exercising the client-cert
+// auth path need their own `cockroach cert create-*` setup.
+//
+// Secure clusters cannot be served by Shared, which caches an
+// insecure cluster — call Start directly and Stop in defer/cleanup.
+func WithSecure() Option {
+	return optionFunc(func(o *startOpts) { o.secure = true })
+}
+
 // Start launches an in-memory single-node demo cluster in the
 // background. It blocks until the cluster has written its listening
 // URL to a private temp file (default 30s timeout, configurable via
@@ -214,11 +230,13 @@ func Start(ctx context.Context, opts ...Option) (*Cluster, error) {
 		"demo",
 		"--background",
 		"--no-example-database",
-		"--insecure",
 		"--disable-demo-license",
 		"--listening-url-file=" + urlPath,
 		"--sql-port=0",
 		"--http-port=0",
+	}
+	if !resolved.secure {
+		args = append(args, "--insecure")
 	}
 	args = append(args, resolved.extraArgs...)
 
