@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/diag"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/safety"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // defaultExecuteMaxRows is the row cap applied to read_only SELECTs
@@ -78,13 +80,25 @@ func ExecuteSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 
 		env := connectedEnvelope(parserVersion, target)
 
-		violation, err := safety.Check(mode, safety.OpExecute, sql)
+		// Parse once up front so version.Inspect, safety.CheckParsed,
+		// and safety.MaybeInjectLimitParsed share a single AST. Append
+		// (not assign) into env.Errors so a pre-stamped warning from
+		// connectedEnvelope (e.g. target_version_mismatch) survives a
+		// downstream parse / safety / cluster failure.
+		//
+		// Order matters: version.Inspect and safety.CheckParsed are
+		// read-only walks; safety.MaybeInjectLimitParsed mutates
+		// stmts[0].AST.Limit in place when injection fires, so the
+		// inspectors must run first.
+		parsed, err := parser.Parse(sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
 			return envelopeResult(env)
 		}
-		if violation != nil {
-			env.Errors = []output.Error{safety.Envelope(violation)}
+		env.Errors = append(env.Errors, version.Inspect(parsed, target, nil)...)
+
+		if violation := safety.CheckParsed(mode, safety.OpExecute, parsed); violation != nil {
+			env.Errors = append(env.Errors, safety.Envelope(violation))
 			return envelopeResult(env)
 		}
 
@@ -94,10 +108,9 @@ func ExecuteSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 		rewritten := sql
 		var injected bool
 		if mode == safety.ModeReadOnly && maxRows > 0 {
-			rewritten, injected, err = safety.MaybeInjectLimit(sql, maxRows)
-			if err != nil {
-				env.Errors = []output.Error{diag.FromParseError(err, sql)}
-				return envelopeResult(env)
+			if rw, did := safety.MaybeInjectLimitParsed(parsed, maxRows); did {
+				rewritten = rw
+				injected = true
 			}
 		}
 
@@ -109,7 +122,7 @@ func ExecuteSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 			MaxRows: maxRows,
 		})
 		if err != nil {
-			env.Errors = []output.Error{diag.FromClusterError(err, rewritten)}
+			env.Errors = append(env.Errors, diag.FromClusterError(err, rewritten))
 			return envelopeResult(env)
 		}
 

@@ -7,6 +7,7 @@ package safety
 
 import (
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 )
 
@@ -33,6 +34,10 @@ import (
 // safety.Check can treat the error path as unreachable; we still
 // surface parser errors rather than silently swallowing them so a
 // caller skipping Check won't get mysterious behaviour.
+//
+// See MaybeInjectLimitParsed for callers (cmd/exec.go,
+// internal/mcp/tools/execute.go) that already ran parser.Parse and
+// want to skip a second client-side parse.
 func MaybeInjectLimit(sql string, maxRows int) (string, bool, error) {
 	if maxRows <= 0 {
 		return sql, false, nil
@@ -41,12 +46,42 @@ func MaybeInjectLimit(sql string, maxRows int) (string, bool, error) {
 	if err != nil {
 		return sql, false, err
 	}
-	if len(stmts) != 1 {
+	rewritten, injected := MaybeInjectLimitParsed(stmts, maxRows)
+	if !injected {
 		return sql, false, nil
+	}
+	return rewritten, true, nil
+}
+
+// MaybeInjectLimitParsed is the parsed-input variant of
+// MaybeInjectLimit. Callers that already invoked parser.Parse use it
+// to avoid a second parse. Mirrors summarize.Parsed /
+// sqlformat.FormatParsed in shape: the parsed-input variant drops
+// the parse-error return since the parse already succeeded upstream.
+//
+// Return contract: on injection (rewritten, true). On no-injection
+// — including the maxRows<=0, multi-statement, non-Select, and
+// already-bounded cases — ("", false). Callers MUST keep their own
+// SQL string and fall back to it on false; the parsed variant
+// deliberately does not round-trip the AST back through
+// tree.AsStringWithFlags on the no-injection path so it cannot
+// reformat or drop comments. Nil-string-on-false is loud-by-design:
+// a caller that writes `rewritten, _ = MaybeInjectLimitParsed(...)`
+// would dispatch an empty query rather than fail-silently to the
+// original input, surfacing the contract violation immediately.
+//
+// Ownership: stmts[0].AST is mutated in place when injection fires
+// (the slice itself is not retained past return). The same AST
+// cannot be safely re-fed to a downstream consumer that expects the
+// pre-injection shape, so run version.Inspect / safety.CheckParsed
+// on the AST first, then call MaybeInjectLimitParsed last.
+func MaybeInjectLimitParsed(stmts statements.Statements, maxRows int) (string, bool) {
+	if maxRows <= 0 || len(stmts) != 1 {
+		return "", false
 	}
 	sel, ok := stmts[0].AST.(*tree.Select)
 	if !ok || selectIsBounded(sel) {
-		return sql, false, nil
+		return "", false
 	}
 	if sel.Limit == nil {
 		sel.Limit = &tree.Limit{Count: tree.NewDInt(tree.DInt(maxRows))}
@@ -55,7 +90,7 @@ func MaybeInjectLimit(sql string, maxRows int) (string, bool, error) {
 		// when selectIsBounded returns false) and only add the Count.
 		sel.Limit.Count = tree.NewDInt(tree.DInt(maxRows))
 	}
-	return tree.AsStringWithFlags(sel, tree.FmtSimple), true, nil
+	return tree.AsStringWithFlags(sel, tree.FmtSimple), true
 }
 
 // selectIsBounded reports whether sel already has a row-count cap.

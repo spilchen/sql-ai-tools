@@ -139,6 +139,117 @@ func TestExecuteSQLToolAdvertisesParams(t *testing.T) {
 	}
 }
 
+// TestExecuteSQLHandler_VersionWarning is the execute_sql mirror of
+// TestParseSQLHandler_VersionWarning: a per-call target_version that
+// predates the seeded plpgsql_function_body Introduced version emits
+// a feature_not_yet_introduced WARNING into env.Errors. Because
+// CREATE FUNCTION is DDL, the read_only allowlist rejects it before
+// any cluster contact, so the test runs without a reachable cluster
+// — the warning simply coexists with the safety_violation in
+// env.Errors, which also pins the append-not-overwrite invariant on
+// the safety-rejection branch.
+func TestExecuteSQLHandler_VersionWarning(t *testing.T) {
+	tests := []struct {
+		name           string
+		targetVersion  string
+		expectFeatWarn bool
+	}{
+		{name: "before introduced", targetVersion: "23.2", expectFeatWarn: true},
+		{name: "at introduced", targetVersion: "24.1", expectFeatWarn: false},
+		{name: "no target version skips", targetVersion: "", expectFeatWarn: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := ExecuteSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+			args := map[string]any{
+				"sql": plpgsqlVersionWarningSQL,
+				"dsn": "postgres://nope:1/db",
+			}
+			if tc.targetVersion != "" {
+				args["target_version"] = tc.targetVersion
+			}
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = args
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			env := requireEnvelope(t, res)
+
+			featWarn := findEnvErrorByCode(env.Errors, output.CodeFeatureNotYetIntroduced)
+			if !tc.expectFeatWarn {
+				require.Nilf(t, featWarn, "unexpected feature warning: %+v", featWarn)
+				return
+			}
+			require.NotNilf(t, featWarn, "expected feature_not_yet_introduced in %+v", env.Errors)
+			require.Equal(t, output.SeverityWarning, featWarn.Severity)
+			require.Equal(t, "plpgsql_function_body", featWarn.Context["feature_tag"])
+			require.Equal(t, tc.targetVersion, featWarn.Context["target"])
+
+			require.NotNilf(t, findEnvErrorByCode(env.Errors, output.CodeSafetyViolation),
+				"version warning must coexist with the safety violation in %+v", env.Errors)
+		})
+	}
+}
+
+// TestExecuteSQLHandler_ParseErrorPreservesPriorWarnings is the
+// execute_sql mirror of TestParseSQLHandler_ParseErrorPreservesPriorWarnings:
+// a pre-stamped target_version_mismatch warning from connectedEnvelope
+// must survive the parse-error branch. Pins that the handler appends
+// rather than overwrites env.Errors on parse failure.
+func TestExecuteSQLHandler_ParseErrorPreservesPriorWarnings(t *testing.T) {
+	handler := ExecuteSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	// target_version with a different MAJOR.MINOR than testParserVersion
+	// (v0.26.2) triggers VersionMismatchWarning; SELECTT 1 then forces
+	// a parse error.
+	req.Params.Arguments = map[string]any{
+		"sql":            "SELECTT 1",
+		"dsn":            "postgres://nope:1/db",
+		"target_version": "25.4",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+
+	require.NotNilf(t, findEnvErrorByCode(env.Errors, output.CodeTargetVersionMismatch),
+		"target_version_mismatch warning must survive parse failure: %+v", env.Errors)
+	require.NotNilf(t, findEnvErrorByCode(env.Errors, "42601"),
+		"parse error must still be present: %+v", env.Errors)
+}
+
+// TestExecuteSQLHandler_ConnectFailurePreservesPriorWarnings pins
+// the cluster-error append-not-overwrite invariant: a pre-stamped
+// target_version_mismatch warning from connectedEnvelope must
+// survive a downstream cluster connect failure. Distinct from
+// TestExecuteSQLHandler_ParseErrorPreservesPriorWarnings (parse
+// branch) and TestExecuteSQLHandler_VersionWarning (safety branch);
+// without this, a regression that reverted only the
+// diag.FromClusterError append back to assignment would silently
+// drop version warnings whenever the cluster was unreachable.
+//
+// Uses a SELECT (admits under read_only so safety does not
+// short-circuit) and an unreachable DSN with a 1s connect_timeout
+// so the handler reaches the mgr.Execute branch and fails there.
+func TestExecuteSQLHandler_ConnectFailurePreservesPriorWarnings(t *testing.T) {
+	handler := ExecuteSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"sql":            "SELECT 1",
+		"dsn":            "postgres://nope:1/db?connect_timeout=1",
+		"target_version": "25.4",
+	}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	env := requireEnvelope(t, res)
+
+	require.NotNilf(t, findEnvErrorByCode(env.Errors, output.CodeTargetVersionMismatch),
+		"target_version_mismatch warning must survive cluster connect failure: %+v", env.Errors)
+	require.NotEmpty(t, env.Errors, "expected at least the cluster-error entry alongside the warning")
+}
+
 // TestResolveMaxRows pins the documented contract on the max_rows
 // resolver: missing → defaultMax; positive → cast to int; negative
 // → 0 ("unlimited"); non-numeric → tool-level error. Each case is a

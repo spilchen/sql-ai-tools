@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser/statements"
 	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 )
 
@@ -186,6 +187,20 @@ func Check(mode Mode, op Operation, sql string) (*Violation, error) {
 	if err != nil {
 		return nil, err
 	}
+	return CheckParsed(mode, op, stmts), nil
+}
+
+// CheckParsed is the parsed-input variant of Check. Callers that
+// already invoked parser.Parse (e.g. to also run version.Inspect on
+// the same AST) use it to avoid a second parse.
+//
+// Return contract: nil when every statement in stmts is permitted
+// under (mode, op), or *Violation describing the first offending
+// statement (multi-statement inputs short-circuit on the first
+// reject). The empty-batch defensive case from Check is preserved so
+// a caller that hands in an empty Statements slice still gets the
+// "no statements parsed" sentinel rather than a silent pass.
+func CheckParsed(mode Mode, op Operation, stmts statements.Statements) *Violation {
 	if len(stmts) == 0 {
 		// Defensive: parser.Parse("") returns zero stmts and no error.
 		// The CLI's sqlinput layer rejects empty input upstream, but
@@ -200,14 +215,14 @@ func Check(mode Mode, op Operation, sql string) (*Violation, error) {
 			Mode:   mode,
 			Op:     op,
 			Kind:   KindOther,
-		}, nil
+		}
 	}
 	for _, s := range stmts {
 		if v := classify(mode, op, s.AST); v != nil {
-			return v, nil
+			return v
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 // classify applies the (mode, op) rule to a single parsed statement.
