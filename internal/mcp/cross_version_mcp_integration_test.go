@@ -5,15 +5,18 @@
 
 //go:build integration
 
-// End-to-end test for issue #129: a single long-lived `crdb-sql mcp`
-// server forwards each tool call to the sibling backend whose parser
-// quarter matches the call's target_version. Builds both the latest
-// crdb-sql (v262) and the crdb-sql-v261 sibling into a tempdir, then
-// spawns one MCP server and issues two parse_sql calls — one for
-// each quarter — within the same session. The envelope's
-// parser_version field on each response proves which sibling
-// actually executed the call. Integration-tagged because it pays
-// the `go build` cost twice; run via `make test-integration`.
+// End-to-end test for issues #129 and #145: a single long-lived
+// `crdb-sql mcp` server forwards each tool call to the sibling
+// backend whose parser quarter matches the call's target_version,
+// reusing a warm pooled child for repeated calls to the same
+// target. Builds both the latest crdb-sql (v262) and the
+// crdb-sql-v261 sibling into a tempdir, then spawns one MCP server
+// and issues parse_sql calls — one for each quarter, plus a repeat
+// of the routed (v261) call to exercise the pool's warm-reuse
+// path. The envelope's parser_version field on each response proves
+// which sibling actually executed the call. Integration-tagged
+// because it pays the `go build` cost twice; run via
+// `make test-integration`.
 
 package mcp_test
 
@@ -43,9 +46,12 @@ import (
 // "both quarters now accept it" green-but-meaningless outcome.
 const crossVersionParserDivergentStmt = "ALTER TABLE t ENABLE TRIGGER tr"
 
-// TestPerCallMCPTargetVersionRouting is the demo for issue #129.
-// One MCP server, two tool calls in the same session, two different
-// parsers exercised — proven by the envelope's parser_version field.
+// TestPerCallMCPTargetVersionRouting is the demo for issues #129
+// and #145. One MCP server, multiple tool calls in the same
+// session, two different parsers exercised — proven by the
+// envelope's parser_version field. The routed-call case runs twice
+// back-to-back to exercise the pool's warm-reuse path: the second
+// call must hit the same warm sibling and produce identical output.
 func TestPerCallMCPTargetVersionRouting(t *testing.T) {
 	repoRoot := findMCPRepoRoot(t)
 	binDir := t.TempDir()
@@ -141,11 +147,51 @@ func TestPerCallMCPTargetVersionRouting(t *testing.T) {
 		})
 	}
 
+	t.Run("warm pool reuses sibling for repeat routed call", func(t *testing.T) {
+		// Issue #145: a second routed call to the same target_version
+		// must reuse the warm pooled child rather than spawning a
+		// fresh sibling. This subtest runs after the first routed
+		// call above has already populated the pool with the v261
+		// child, so the reuse path is the only way it can succeed.
+		// We assert on output equivalence (same parser_version, same
+		// SQLSTATE) — not on timing — because timing assertions are
+		// flake-prone on CI. A regression that broke pool reuse
+		// (e.g. spawn-per-call resurrected) would still produce the
+		// right output, but TestPoolWarmReuse pins that case at the
+		// unit level.
+		callCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		var req mcp.CallToolRequest
+		req.Params.Name = "parse_sql"
+		req.Params.Arguments = map[string]any{
+			"sql":            crossVersionParserDivergentStmt,
+			"target_version": "26.1.0",
+		}
+		res, err := c.CallTool(callCtx, req)
+		require.NoError(t, err, "warm-reuse routed call must succeed")
+		require.False(t, res.IsError, "expected envelope-shaped success result")
+		require.Len(t, res.Content, 1)
+		tcText, ok := res.Content[0].(mcp.TextContent)
+		require.True(t, ok)
+		var env output.Envelope
+		require.NoError(t, json.Unmarshal([]byte(tcText.Text), &env))
+		require.Equal(t, "v0.26.1", env.ParserVersion,
+			"warm-reuse call must still hit the v261 sibling")
+		var sawSyntaxErr bool
+		for _, e := range env.Errors {
+			if e.Code == "42601" {
+				sawSyntaxErr = true
+				break
+			}
+		}
+		require.True(t, sawSyntaxErr, "warm-reuse call must surface the same v261 parse error")
+	})
+
 	t.Run("missing sibling produces tool error with discovery hint", func(t *testing.T) {
 		// target_version=25.4.0 needs crdb-sql-v254, which we
 		// never built. Two things must hold end-to-end:
 		//   1. the result is an MCP tool error (IsError=true), not
-		//      a JSON-RPC transport error — proves SpawnRouter is
+		//      a JSON-RPC transport error — proves PoolRouter is
 		//      wired (NoopRouter would also produce an error here,
 		//      but its message would say "routing not enabled"
 		//      rather than "not installed");
@@ -171,7 +217,7 @@ func TestPerCallMCPTargetVersionRouting(t *testing.T) {
 		require.Contains(t, tcText.Text, "crdb-sql-v254",
 			"missing-backend message must name the requested sibling")
 		require.Contains(t, tcText.Text, "not installed",
-			"missing-backend message must say the backend is not installed (proves SpawnRouter, not NoopRouter)")
+			"missing-backend message must say the backend is not installed (proves PoolRouter, not NoopRouter)")
 		require.Contains(t, tcText.Text, "crdb-sql-v261",
 			"missing-backend message must list the discovered v261 sibling under 'Available backends'")
 	})
