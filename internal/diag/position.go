@@ -124,6 +124,32 @@ func CharIndexToByteOffset(sql string, charIdx int) int {
 	return len(sql)
 }
 
+// AdjustPosition translates a Position computed against a stripped SQL
+// buffer back to coordinates in the original input. originalSQL is the
+// pre-strip text; translate maps stripped byte offsets to original
+// byte offsets (typically sqlformat.StripResult.Translate). Returns
+// nil when pos is nil so callers can chain the call unconditionally.
+//
+// Line and Column are recomputed against originalSQL via the same
+// 1-based / byte-counting convention used by the rest of this package
+// (see lineColumn). Pass a no-op identity translate (or simply skip the
+// call) when the stripper did not modify the input — every other field
+// then re-derives to the same values.
+func AdjustPosition(
+	pos *output.Position, originalSQL string, translate func(int) int,
+) *output.Position {
+	if pos == nil {
+		return nil
+	}
+	origOffset := translate(pos.ByteOffset)
+	line, col := lineColumn(originalSQL, origOffset)
+	return &output.Position{
+		Line:       line,
+		Column:     col,
+		ByteOffset: origOffset,
+	}
+}
+
 // lineColumn converts a 0-based byte offset within sql into a 1-based
 // line and column. The column counts bytes from the last newline (or
 // start of string), not runes, matching the CockroachDB parser's

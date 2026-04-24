@@ -24,7 +24,7 @@ import (
 func FormatSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		FormatSQLToolName,
-		mcp.WithDescription("Pretty-print SQL statements in canonical CockroachDB format. Returns an envelope with the formatted SQL string."),
+		mcp.WithDescription("Pretty-print SQL statements in canonical CockroachDB format. Returns an envelope with the formatted SQL string. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to format (may contain multiple semicolon-separated statements)")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
@@ -50,12 +50,18 @@ func FormatSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHan
 
 		// Auto-clean cockroach sql REPL prompts the same way the CLI
 		// format subcommand does, so MCP clients pasting transcripts
-		// get the same forgiving behavior.
-		sql = sqlformat.StripShellPrompts(sql)
+		// get the same forgiving behavior. preprocessSQL also surfaces
+		// the input_preprocessed warning when stripping fired, so the
+		// caller can see the modification.
+		originalSQL := sql
+		strip := preprocessSQL(&env, sql)
+		sql = strip.Stripped
 
+		before := len(env.Errors)
 		parsed, err := parser.Parse(sql)
 		if err != nil {
 			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
+			translateErrorPositions(&env, before, originalSQL, strip)
 			return envelopeResult(env)
 		}
 		env.Errors = append(env.Errors, version.Inspect(parsed, target, nil)...)

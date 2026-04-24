@@ -57,7 +57,12 @@ non-mutating statements. "safe_write" additionally admits DML
 (INSERT/UPDATE/DELETE/UPSERT) so the planner can return a plan for
 the inner write. "full_access" admits any parsed statement; the
 cluster's read-only transaction wrapper still surfaces SQLSTATE 25006
-for inner DDL the planner refuses to plan under read-only.`,
+for inner DDL the planner refuses to plan under read-only.
+
+Pasted output from a cockroach sql REPL session is auto-cleaned: primary
+prompts (user@host:port/db>) and continuation prompts (->) are stripped
+before parsing, and the JSON envelope carries an input_preprocessed
+warning so the modification is visible.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierConnected, cmd)
@@ -70,6 +75,9 @@ for inner DDL the planner refuses to plan under read-only.`,
 				return r.RenderError(baseEnv, err)
 			}
 			sql = strings.TrimSpace(sql)
+			originalSQL := sql
+			strip := preprocessSQL(&baseEnv, sql)
+			sql = strip.Stripped
 
 			if state.dsn == "" {
 				return r.RenderError(baseEnv,
@@ -87,12 +95,24 @@ for inner DDL the planner refuses to plan under read-only.`,
 			// were missing.
 			violation, err := safety.Check(parsedMode, safety.OpExplain, sql)
 			if err != nil {
-				return r.RenderErrorEntry(baseEnv, err, diag.FromParseError(err, sql))
+				parseErr := diag.FromParseError(err, sql)
+				if strip.Removed {
+					parseErr.Position = diag.AdjustPosition(parseErr.Position, originalSQL, strip.Translate)
+				}
+				return r.RenderErrorEntry(baseEnv, err, parseErr)
 			}
 			if violation != nil {
+				safetyErr := safety.Envelope(violation)
+				// safety.Envelope carries no Position today, so the
+				// branch below is a no-op. Run it to stay future-proof
+				// if safety later attaches positions, matching the
+				// pattern in the MCP-side handler and cmd/exec.go.
+				if strip.Removed {
+					safetyErr.Position = diag.AdjustPosition(safetyErr.Position, originalSQL, strip.Translate)
+				}
 				return r.RenderErrorEntry(baseEnv,
 					fmt.Errorf("safety violation: %s", violation.Reason),
-					safety.Envelope(violation))
+					safetyErr)
 			}
 
 			mgr := conn.NewManager(state.dsn, conn.WithStatementTimeout(timeout))
@@ -100,7 +120,11 @@ for inner DDL the planner refuses to plan under read-only.`,
 
 			result, err := mgr.Explain(cmd.Context(), sql)
 			if err != nil {
-				return r.RenderErrorEntry(baseEnv, err, diag.FromClusterError(err, sql))
+				clusterErr := diag.FromClusterError(err, sql)
+				if strip.Removed {
+					clusterErr.Position = diag.AdjustPosition(clusterErr.Position, originalSQL, strip.Translate)
+				}
+				return r.RenderErrorEntry(baseEnv, err, clusterErr)
 			}
 
 			baseEnv.ConnectionStatus = output.ConnectionConnected

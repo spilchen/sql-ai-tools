@@ -68,7 +68,12 @@ tell that the check did not run.
 
 If no -e and no file argument are given and a crdb-sql.yaml config is
 present in the working directory, validate iterates every query file
-matched by the config and reports per-file results in one envelope.`,
+matched by the config and reports per-file results in one envelope.
+
+Pasted output from a cockroach sql REPL session is auto-cleaned: primary
+prompts (user@host:port/db>) and continuation prompts (->) are stripped
+before parsing, and the JSON envelope carries an input_preprocessed
+warning so the modification is visible.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if expr == "" && len(args) == 0 && len(schemaFiles) == 0 && state.cfg != nil {
@@ -92,6 +97,9 @@ matched by the config and reports per-file results in one envelope.`,
 			// Trim surrounding whitespace so trailing newlines from
 			// stdin/file do not skew position reporting.
 			sql = strings.TrimSpace(sql)
+			originalSQL := sql
+			strip := preprocessSQL(&baseEnv, sql)
+			sql = strip.Stripped
 
 			stmts, parseErr := parser.Parse(sql)
 			if parseErr != nil {
@@ -105,8 +113,12 @@ matched by the config and reports per-file results in one envelope.`,
 					FunctionResolution: validateresult.CheckSkipped,
 					NameResolution:     validateresult.CheckSkipped,
 				}
+				e := diag.FromParseError(parseErr, sql)
+				if strip.Removed {
+					e.Position = diag.AdjustPosition(e.Position, originalSQL, strip.Translate)
+				}
 				return renderValidateFailure(r, baseEnv,
-					[]output.Error{diag.FromParseError(parseErr, sql)}, parseChecks)
+					[]output.Error{e}, parseChecks)
 			}
 
 			// Version-aware feature warnings are advisory: they
@@ -141,6 +153,12 @@ matched by the config and reports per-file results in one envelope.`,
 			checks.NameResolution = semRes.NameResolution
 
 			if len(semErrs) > 0 {
+				if strip.Removed {
+					for i := range semErrs {
+						semErrs[i].Position = diag.AdjustPosition(
+							semErrs[i].Position, originalSQL, strip.Translate)
+					}
+				}
 				return renderValidateFailure(r, baseEnv, semErrs, checks)
 			}
 

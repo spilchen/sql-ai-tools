@@ -42,7 +42,12 @@ WHERE predicates, joins, columns mutated by DML (affected_columns),
 the full read-and-write column footprint (referenced_columns), a
 select_star flag set when the projection uses '*' or 't.*', and a
 risk level delegated to the same rules as 'crdb-sql risk'. Input is
-read from the -e flag, a positional file argument, or stdin.`,
+read from the -e flag, a positional file argument, or stdin.
+
+Pasted output from a cockroach sql REPL session is auto-cleaned: primary
+prompts (user@host:port/db>) and continuation prompts (->) are stripped
+before parsing, and the JSON envelope carries an input_preprocessed
+warning so the modification is visible.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierZeroConfig, cmd)
@@ -55,9 +60,13 @@ read from the -e flag, a positional file argument, or stdin.`,
 				return r.RenderError(baseEnv, err)
 			}
 
+			originalSQL := sql
+			strip := preprocessSQL(&baseEnv, sql)
+			sql = strip.Stripped
+
 			parsed, parseErr := parser.Parse(sql)
 			if parseErr != nil {
-				return renderParseError(r, baseEnv, parseErr, sql)
+				return renderParseErrorTranslated(r, baseEnv, parseErr, sql, originalSQL, strip)
 			}
 			baseEnv.Errors = append(baseEnv.Errors,
 				version.Inspect(parsed, state.targetVersion, nil)...)

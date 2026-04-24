@@ -93,7 +93,12 @@ call:
 For read_only SELECTs that lack a LIMIT clause, --max-rows is injected
 into the rewritten SQL so the cluster does not stream an unbounded
 result. Set --max-rows=0 to disable both injection and runtime
-truncation.`,
+truncation.
+
+Pasted output from a cockroach sql REPL session is auto-cleaned: primary
+prompts (user@host:port/db>) and continuation prompts (->) are stripped
+before parsing, and the JSON envelope carries an input_preprocessed
+warning so the modification is visible.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierConnected, cmd)
@@ -106,6 +111,9 @@ truncation.`,
 				return r.RenderError(baseEnv, err)
 			}
 			sql = strings.TrimSpace(sql)
+			originalSQL := sql
+			strip := preprocessSQL(&baseEnv, sql)
+			sql = strip.Stripped
 
 			if state.dsn == "" {
 				return r.RenderError(baseEnv,
@@ -128,15 +136,24 @@ truncation.`,
 			// inspectors must run first.
 			parsed, parseErr := parser.Parse(sql)
 			if parseErr != nil {
-				return renderParseError(r, baseEnv, parseErr, sql)
+				return renderParseErrorTranslated(r, baseEnv, parseErr, sql, originalSQL, strip)
 			}
 			baseEnv.Errors = append(baseEnv.Errors,
 				version.Inspect(parsed, state.targetVersion, nil)...)
 
 			if violation := safety.CheckParsed(parsedMode, safety.OpExecute, parsed); violation != nil {
+				safetyErr := safety.Envelope(violation)
+				// safety.Envelope carries no Position today, so the
+				// branch below is a no-op. Run it to stay future-proof
+				// if safety later attaches positions, matching the
+				// pattern used by cmd/explain.go, cmd/explain_ddl.go,
+				// and cmd/simulate.go.
+				if strip.Removed {
+					safetyErr.Position = diag.AdjustPosition(safetyErr.Position, originalSQL, strip.Translate)
+				}
 				return r.RenderErrorEntry(baseEnv,
 					fmt.Errorf("safety violation: %s", violation.Reason),
-					safety.Envelope(violation))
+					safetyErr)
 			}
 
 			// LIMIT injection is scoped to read_only because the other
@@ -159,7 +176,27 @@ truncation.`,
 				MaxRows: maxRows,
 			})
 			if err != nil {
-				return r.RenderErrorEntry(baseEnv, err, diag.FromClusterError(err, rewritten))
+				clusterErr := diag.FromClusterError(err, rewritten)
+				// Order matters: when both `injected` and
+				// `strip.Removed` are true, `injected` must win because
+				// the canonicalized rewrite invalidates the strip map.
+				switch {
+				case injected:
+					// rewritten is the canonicalized AST re-serialized by
+					// tree.AsStringWithFlags, not stripped SQL with an
+					// appended LIMIT. Pgwire positions index into rewritten,
+					// so strip.Translate (stripped → original) cannot
+					// honestly translate them. Drop Position rather than
+					// report wrong line/column.
+					clusterErr.Position = nil
+					if clusterErr.Context == nil {
+						clusterErr.Context = make(map[string]any, 1)
+					}
+					clusterErr.Context[output.ContextPositionOmittedReason] = output.ReasonLimitInjectionRewroteSQL
+				case strip.Removed:
+					clusterErr.Position = diag.AdjustPosition(clusterErr.Position, originalSQL, strip.Translate)
+				}
+				return r.RenderErrorEntry(baseEnv, err, clusterErr)
 			}
 
 			if injected {

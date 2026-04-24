@@ -87,7 +87,8 @@ CockroachDB parser's built-in formatter. Input is read from the -e flag
 
 Pasted output from a cockroach sql REPL session is auto-cleaned: primary
 prompts (user@host:port/db>) and continuation prompts (->) are stripped
-before parsing, so transcripts paste in unmodified.
+before parsing, and the JSON envelope carries an input_preprocessed
+warning so the modification is visible.
 
 Use --color=always|never|auto to control ANSI syntax highlighting in
 text mode. The default (auto) colorizes only when stdout is a terminal.
@@ -109,11 +110,14 @@ JSON output is never colorized.`,
 				return r.RenderError(baseEnv, err)
 			}
 
-			sql = strings.TrimSpace(sqlformat.StripShellPrompts(sql))
+			sql = strings.TrimSpace(sql)
+			originalSQL := sql
+			strip := preprocessSQL(&baseEnv, sql)
+			sql = strip.Stripped
 
 			parsed, parseErr := parser.Parse(sql)
 			if parseErr != nil {
-				return renderParseError(r, baseEnv, parseErr, sql)
+				return renderParseErrorTranslated(r, baseEnv, parseErr, sql, originalSQL, strip)
 			}
 			baseEnv.Errors = append(baseEnv.Errors,
 				version.Inspect(parsed, state.targetVersion, nil)...)

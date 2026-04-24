@@ -23,7 +23,7 @@ import (
 func SummarizeSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		SummarizeSQLToolName,
-		mcp.WithDescription("Summarize SQL statements via AST walk. Returns per-statement operation, tables, predicates, joins, affected_columns (DML write set), referenced_columns (full read+write footprint), select_star (true when projection uses '*' or 't.*' so referenced_columns is a lower bound), and risk level."),
+		mcp.WithDescription("Summarize SQL statements via AST walk. Returns per-statement operation, tables, predicates, joins, affected_columns (DML write set), referenced_columns (full read+write footprint), select_star (true when projection uses '*' or 't.*' so referenced_columns is a lower bound), and risk level. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to summarize")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
@@ -49,9 +49,15 @@ func SummarizeSQLHandler(parserVersion, defaultTargetVersion string) server.Tool
 
 		env := baseEnvelope(parserVersion, target)
 
+		originalSQL := sql
+		strip := preprocessSQL(&env, sql)
+		sql = strip.Stripped
+
+		before := len(env.Errors)
 		parsed, err := parser.Parse(sql)
 		if err != nil {
 			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
+			translateErrorPositions(&env, before, originalSQL, strip)
 			return envelopeResult(env)
 		}
 		env.Errors = append(env.Errors, version.Inspect(parsed, target, nil)...)

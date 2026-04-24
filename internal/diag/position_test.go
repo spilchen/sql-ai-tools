@@ -206,3 +206,64 @@ func TestLineColumn(t *testing.T) {
 		})
 	}
 }
+
+// TestAdjustPosition pins the contract that AdjustPosition translates
+// stripped-buffer Positions back to original-input coordinates and
+// re-derives Line/Column against the original. The translate function
+// in each case is the simplest possible non-trivial mapper: a constant
+// prefix offset added to every input. This isolates the AdjustPosition
+// logic from the more elaborate sqlformat.StripResult.Translate logic
+// covered separately in internal/sqlformat/strip_test.go.
+func TestAdjustPosition(t *testing.T) {
+	const original = "root@:26257/db> SELECT 1;\nSELECT bad FROM" // 41 bytes total
+	const promptLen = len("root@:26257/db> ")                     // 16
+
+	identity := func(off int) int { return off }
+	addPrompt := func(off int) int { return off + promptLen }
+
+	tests := []struct {
+		name        string
+		pos         *output.Position
+		originalSQL string
+		translate   func(int) int
+		expected    *output.Position
+	}{
+		{
+			name:      "nil position is preserved",
+			pos:       nil,
+			translate: identity,
+			expected:  nil,
+		},
+		{
+			name:        "identity translate re-derives line/column unchanged",
+			pos:         &output.Position{Line: 99, Column: 99, ByteOffset: 0},
+			originalSQL: original,
+			translate:   identity,
+			expected:    &output.Position{Line: 1, Column: 1, ByteOffset: 0},
+		},
+		{
+			name:        "prompt-prefix translate shifts byte offset and column",
+			pos:         &output.Position{Line: 1, Column: 1, ByteOffset: 0},
+			originalSQL: original,
+			translate:   addPrompt,
+			expected:    &output.Position{Line: 1, Column: promptLen + 1, ByteOffset: promptLen},
+		},
+		{
+			name:        "translate across newline updates line number",
+			pos:         &output.Position{Line: 1, Column: 1, ByteOffset: 10}, // "SELECT bad" first byte in stripped
+			originalSQL: original,
+			// In stripped buffer offset 10 is 'S' of "SELECT bad". After
+			// the prompt translate it lands at byte 26 of original, the
+			// 'S' of the second statement on line 2.
+			translate: addPrompt,
+			expected:  &output.Position{Line: 2, Column: 1, ByteOffset: 26},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AdjustPosition(tc.pos, tc.originalSQL, tc.translate)
+			require.Equal(t, tc.expected, got)
+		})
+	}
+}

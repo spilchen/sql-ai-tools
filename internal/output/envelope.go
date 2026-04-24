@@ -120,6 +120,34 @@ const (
 	// programmatically — for example, prompt the user to escalate the
 	// safety mode — without parsing the human-readable Message.
 	CodeSafetyViolation = "safety_violation"
+
+	// CodeInputPreprocessed is emitted (severity WARNING) by the MCP
+	// and CLI handlers whenever sqlformat.StripShellPromptsWithMap
+	// removed cockroach sql REPL prompt bytes from the caller's input
+	// before parsing. The accompanying Error.Context carries the
+	// bytes_removed integer so agents can confirm the modification
+	// programmatically.
+	CodeInputPreprocessed = "input_preprocessed"
+)
+
+// Wire-contract Context keys and values. Promoted here so the MCP and
+// CLI sides cannot drift via a typo in one place.
+const (
+	// ContextPositionOmittedReason is the Error.Context key set by the
+	// execute handlers when they intentionally drop a cluster error's
+	// Position because no honest translation is possible. The value is
+	// one of the Reason* constants below; agents should branch on the
+	// value, not parse the human-readable Message.
+	ContextPositionOmittedReason = "position_omitted_reason"
+
+	// ReasonLimitInjectionRewroteSQL is set as the value of
+	// ContextPositionOmittedReason when safety.MaybeInjectLimitParsed
+	// re-serialized the AST through tree.AsStringWithFlags. The
+	// resulting `rewritten` SQL is canonicalized — comments dropped,
+	// whitespace normalized — so pgwire positions index into a buffer
+	// the strip map cannot translate. Position is dropped rather than
+	// reported in a frame the caller cannot reconstruct.
+	ReasonLimitInjectionRewroteSQL = "limit_injection_rewrote_sql"
 )
 
 // Severity is the severity level of a structured Error. Values use the
