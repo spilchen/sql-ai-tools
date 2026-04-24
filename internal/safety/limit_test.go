@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 	"github.com/stretchr/testify/require"
 
 	"github.com/spilchen/sql-ai-tools/internal/safety"
@@ -127,6 +129,89 @@ func TestMaybeInjectLimit(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMaybeInjectLimitParsed pins the parsed-input contract directly,
+// rather than only through the string-input wrapper. The wrapper
+// masks no-injection by returning the original SQL string, so a
+// parsed-variant regression that returned ("", false) for an
+// injectable bare SELECT would be invisible to wrapper-only tests
+// (the wrapper would silently swap back to the original input and
+// look like a deliberate no-op). Direct coverage of the *Parsed
+// entry point keeps the empty-string-on-no-injection contract
+// regression-tested.
+func TestMaybeInjectLimitParsed(t *testing.T) {
+	tests := []struct {
+		name             string
+		sql              string
+		max              int
+		expectedInjected bool
+		expectedContains string
+	}{
+		{
+			name:             "bare select gets limit",
+			sql:              "SELECT * FROM t",
+			max:              250,
+			expectedInjected: true,
+			expectedContains: "LIMIT 250",
+		},
+		{
+			name: "non-select returns empty no-injection",
+			sql:  "INSERT INTO t VALUES (1)",
+			max:  100,
+		},
+		{
+			name: "already-bounded select returns empty no-injection",
+			sql:  "SELECT * FROM t LIMIT 5",
+			max:  100,
+		},
+		{
+			name: "max zero returns empty no-injection",
+			sql:  "SELECT * FROM t",
+			max:  0,
+		},
+		{
+			name: "multi-statement returns empty no-injection",
+			sql:  "SELECT 1; SELECT 2",
+			max:  100,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stmts, err := parser.Parse(tc.sql)
+			require.NoError(t, err)
+
+			out, injected := safety.MaybeInjectLimitParsed(stmts, tc.max)
+			require.Equal(t, tc.expectedInjected, injected)
+			if !tc.expectedInjected {
+				require.Empty(t, out,
+					"no-injection contract: parsed variant returns empty string, not the original SQL")
+				return
+			}
+			require.Contains(t, strings.ToUpper(out), tc.expectedContains)
+		})
+	}
+}
+
+// TestMaybeInjectLimitParsedMutatesAST pins the documented ownership
+// contract: when injection fires, stmts[0].AST is mutated in place so
+// downstream consumers of the same Statements slice see the new
+// LIMIT. A regression that built a fresh AST and serialized it would
+// pass the in/out string assertion but break the documented "captures
+// stmts by reference" contract that exec.go and execute.go rely on.
+func TestMaybeInjectLimitParsedMutatesAST(t *testing.T) {
+	stmts, err := parser.Parse("SELECT * FROM t")
+	require.NoError(t, err)
+
+	sel, ok := stmts[0].AST.(*tree.Select)
+	require.True(t, ok)
+	require.Nil(t, sel.Limit, "precondition: bare SELECT has no Limit node")
+
+	_, injected := safety.MaybeInjectLimitParsed(stmts, 42)
+	require.True(t, injected)
+	require.NotNil(t, sel.Limit, "AST must be mutated in place to reflect the injected LIMIT")
+	require.NotNil(t, sel.Limit.Count)
 }
 
 func TestMaybeInjectLimitParseError(t *testing.T) {

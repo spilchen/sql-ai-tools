@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
 	"github.com/spf13/cobra"
 
 	"github.com/spilchen/sql-ai-tools/internal/conn"
@@ -20,6 +21,7 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/output"
 	"github.com/spilchen/sql-ai-tools/internal/safety"
 	"github.com/spilchen/sql-ai-tools/internal/sqlinput"
+	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
 // defaultExecMaxRows is the row cap applied to execute results when
@@ -115,11 +117,23 @@ truncation.`,
 				return r.RenderError(baseEnv, err)
 			}
 
-			violation, err := safety.Check(parsedMode, safety.OpExecute, sql)
-			if err != nil {
-				return r.RenderErrorEntry(baseEnv, err, diag.FromParseError(err, sql))
+			// Parse once up front so version.Inspect, safety.CheckParsed,
+			// and safety.MaybeInjectLimitParsed share a single AST. The
+			// cluster will reparse on its own — that's the cluster's
+			// concern — but the client-side parses collapse to one.
+			//
+			// Order matters: version.Inspect and safety.CheckParsed are
+			// read-only walks; safety.MaybeInjectLimitParsed mutates
+			// stmts[0].AST.Limit in place when injection fires, so the
+			// inspectors must run first.
+			parsed, parseErr := parser.Parse(sql)
+			if parseErr != nil {
+				return renderParseError(r, baseEnv, parseErr, sql)
 			}
-			if violation != nil {
+			baseEnv.Errors = append(baseEnv.Errors,
+				version.Inspect(parsed, state.targetVersion, nil)...)
+
+			if violation := safety.CheckParsed(parsedMode, safety.OpExecute, parsed); violation != nil {
 				return r.RenderErrorEntry(baseEnv,
 					fmt.Errorf("safety violation: %s", violation.Reason),
 					safety.Envelope(violation))
@@ -127,14 +141,13 @@ truncation.`,
 
 			// LIMIT injection is scoped to read_only because the other
 			// modes are explicit opt-ins where the user has already
-			// accepted writes / unbounded scans. Injection runs after
-			// safety.Check so we can rely on parsability.
+			// accepted writes / unbounded scans.
 			rewritten := sql
 			var injected bool
 			if parsedMode == safety.ModeReadOnly && maxRows > 0 {
-				rewritten, injected, err = safety.MaybeInjectLimit(sql, maxRows)
-				if err != nil {
-					return r.RenderErrorEntry(baseEnv, err, diag.FromParseError(err, sql))
+				if rw, did := safety.MaybeInjectLimitParsed(parsed, maxRows); did {
+					rewritten = rw
+					injected = true
 				}
 			}
 

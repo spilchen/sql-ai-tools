@@ -163,6 +163,100 @@ func TestExecCmdInvalidMode(t *testing.T) {
 	require.Contains(t, env.Errors[0].Message, "invalid safety mode")
 }
 
+// plpgsqlExecVersionWarningSQL is the PL/pgSQL fixture shared by the
+// exec version-warning tests. plpgsql_function_body is registered as
+// introduced in v24.1 (see internal/version/registry.go), so any
+// --target-version older than that triggers a feature_not_yet_introduced
+// warning when version.Inspect runs over the parsed AST.
+const plpgsqlExecVersionWarningSQL = `CREATE FUNCTION f() RETURNS INT LANGUAGE PLpgSQL AS $$ BEGIN RETURN 1; END $$`
+
+// TestExecCmdVersionWarning_PLpgSQL pins that --target-version below
+// the feature's Introduced version emits a feature_not_yet_introduced
+// WARNING into env.Errors AND that the warning survives a downstream
+// safety_violation (the append-not-overwrite invariant the parse
+// handler tests pin on its own surface). CREATE FUNCTION is DDL, so
+// the read_only allowlist rejects it before any cluster contact —
+// connection_status stays disconnected and the test does not need a
+// reachable cluster.
+func TestExecCmdVersionWarning_PLpgSQL(t *testing.T) {
+	stdout, err := runExec(t, "",
+		"--target-version", "23.2",
+		"--dsn", "postgres://nope:1/db",
+		"--output", "json",
+		"-e", plpgsqlExecVersionWarningSQL)
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Equal(t, "23.2", env.TargetVersion)
+
+	// Filter rather than index: the envelope may also carry a
+	// target_version_mismatch warning (parser is on v0.26 in this
+	// build) and the safety_violation appended after the warning.
+	var featWarn *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == output.CodeFeatureNotYetIntroduced {
+			featWarn = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, featWarn, "expected a feature_not_yet_introduced warning in %+v", env.Errors)
+	require.Equal(t, output.SeverityWarning, featWarn.Severity)
+	require.Equal(t, "plpgsql_function_body", featWarn.Context["feature_tag"])
+	require.Equal(t, "24.1", featWarn.Context["introduced"])
+	require.Equal(t, "23.2", featWarn.Context["target"])
+
+	var safetyErr *output.Error
+	for i := range env.Errors {
+		if env.Errors[i].Code == output.CodeSafetyViolation {
+			safetyErr = &env.Errors[i]
+			break
+		}
+	}
+	require.NotNilf(t, safetyErr,
+		"version warning must coexist with the safety violation in %+v", env.Errors)
+}
+
+// TestExecCmdVersionWarning_NoneAtNewerTarget pins the negative case:
+// when target is at or after the feature's Introduced version, no
+// feature warning is emitted.
+func TestExecCmdVersionWarning_NoneAtNewerTarget(t *testing.T) {
+	stdout, err := runExec(t, "",
+		"--target-version", "24.1",
+		"--dsn", "postgres://nope:1/db",
+		"--output", "json",
+		"-e", plpgsqlExecVersionWarningSQL)
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"target at Introduced must not warn, got %+v", e)
+	}
+}
+
+// TestExecCmdVersionWarning_NoFlagSkips covers the documented
+// short-circuit: omitting --target-version skips the inspector
+// entirely. Without this, a regression that promoted "" to "warn
+// anyway" would only surface on the parse / validate / summarize
+// surfaces.
+func TestExecCmdVersionWarning_NoFlagSkips(t *testing.T) {
+	stdout, err := runExec(t, "",
+		"--dsn", "postgres://nope:1/db",
+		"--output", "json",
+		"-e", plpgsqlExecVersionWarningSQL)
+	require.ErrorIs(t, err, output.ErrRendered)
+
+	var env output.Envelope
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+	require.Empty(t, env.TargetVersion)
+	for _, e := range env.Errors {
+		require.NotEqualf(t, output.CodeFeatureNotYetIntroduced, e.Code,
+			"no --target-version must skip inspector, got %+v", e)
+	}
+}
+
 // TestRenderExecText covers the text-mode rendering branches:
 // tabular output for SELECT-shape results, command-tag-only output for
 // DML without RETURNING, the truncated trailer, and the LIMIT-injected
