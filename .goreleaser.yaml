@@ -34,7 +34,9 @@ builds:
   #      STUBS_VERSION=vN.M`).
   #   3. Create build/go.vNM.mod referencing the new fork tag.
   #   4. Append a builds: entry below mirroring this one but with
-  #      binary: crdb-sql-vNM, gomod.modfile: build/go.vNM.mod, and
+  #      binary: crdb-sql-vNM, an extra flags: entry
+  #      `-modfile=build/go.vNM.mod` (goreleaser v2 has no per-build
+  #      gomod key — the modfile rides on go build's own flags), and
   #      ldflag stamp builtQuarterStamp=vNM.
   # Then update build/parser-versions.yaml's quarters list and the
   # Makefile QUARTERS variable so `make build-all` picks it up.
@@ -67,10 +69,8 @@ builds:
   # requests --target-version 26.1.x. Built against the v0.26.1 parser
   # fork via build/go.v261.mod's replace directive.
   - id: crdb-sql-v261
-    main: .
+    main: ./cmd/crdb-sql
     binary: crdb-sql-v261
-    gomod:
-      modfile: build/go.v261.mod
     env:
       - CGO_ENABLED=0
     goos:
@@ -81,6 +81,7 @@ builds:
       - arm64
     flags:
       - -trimpath
+      - -modfile=build/go.v261.mod
     ldflags:
       - -s -w
       - -X github.com/spilchen/sql-ai-tools/cmd.Version={{.Version}}
