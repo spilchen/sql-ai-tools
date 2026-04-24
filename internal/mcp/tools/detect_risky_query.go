@@ -23,7 +23,7 @@ import (
 func DetectRiskyQueryTool() mcp.Tool {
 	return mcp.NewTool(
 		DetectRiskyQueryToolName,
-		mcp.WithDescription("Detect risky SQL patterns such as DELETE/UPDATE without WHERE, DROP/TRUNCATE, SELECT *, SERIAL or missing primary keys, deep OFFSET pagination, and XA two-phase-commit statements. Returns findings with reason codes, severity, and fix hints."),
+		mcp.WithDescription("Detect risky SQL patterns via AST walk (parser-only; no cluster contact, no statement execution). Flags issues such as DELETE/UPDATE without WHERE, DROP/TRUNCATE, SELECT *, SERIAL or missing primary keys, deep OFFSET pagination, and XA two-phase-commit statements. Returns findings with reason codes, severity, and fix hints."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to analyze for risky patterns")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
