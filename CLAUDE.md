@@ -67,6 +67,7 @@ All workflows go through the Makefile:
 
 - `make build` — compile to `bin/crdb-sql`
 - `make test` — run the Go test suite (`go test ./...`)
+- `make test-integration` — run the `integration`-tagged suite. Requires a reachable cluster (install `cockroach` or set `CRDB_TEST_DSN`); fails loudly if neither is available.
 - `make fmt` — auto-format sources with gofmt
 - `make fmt-check` — fail if any file is not gofmt-clean
 - `make vet` — run `go vet ./...`

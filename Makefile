@@ -85,11 +85,13 @@ test: ## Run the Go test suite.
 	go test $(GO_PKGS)
 
 # Integration tests are gated behind the `integration` build tag and
-# require a real cockroach binary. Set COCKROACH_BIN to override the
-# default $PATH lookup. With neither COCKROACH_BIN nor CRDB_TEST_DSN
-# set, the tests t.Skip cleanly so this target is safe to run on
-# machines that have not installed cockroach.
-test-integration: ## Run integration tests (requires cockroach binary; set COCKROACH_BIN to override).
+# require a reachable cluster. Resolution order: CRDB_TEST_DSN (point
+# at an existing cluster) -> COCKROACH_BIN (path to a binary) ->
+# `cockroach` on $PATH. With none of those available the suite now
+# fails loudly instead of silently skipping; the prior skip behavior
+# is reserved for the GitHub Actions CI job, which sets
+# CRDB_INTEGRATION_OPTIONAL=1 in .github/workflows/ci.yml.
+test-integration: ## Run integration tests (requires reachable cluster; install cockroach or set CRDB_TEST_DSN).
 	go test -tags integration -count=1 -timeout 180s $(GO_PKGS)
 
 fmt: ## Auto-format sources with gofmt.

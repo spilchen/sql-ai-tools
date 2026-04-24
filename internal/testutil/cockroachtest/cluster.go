@@ -21,6 +21,8 @@
 //   - Shared and RunTests provide the per-test-binary pattern used by
 //     integration test packages: one cluster is started on the first
 //     Shared call and torn down by RunTests when the test binary exits.
+//     Shared fails the test (rather than skipping) when no cluster is
+//     reachable; see "Binary resolution" below for the opt-out.
 //
 // Binary resolution (in order):
 //
@@ -28,8 +30,11 @@
 //  2. `cockroach` on $PATH.
 //
 // If neither resolves to an executable file, Start returns
-// ErrBinaryNotFound and Shared translates that into t.Skip so CI
-// machines without a cockroach binary stay green.
+// ErrBinaryNotFound. Shared turns that into t.Fatalf by default so a
+// silent skip can never masquerade as a passing integration test;
+// environments that legitimately lack a cockroach binary (today: the
+// GitHub Actions CI job) opt back into the old skip behavior by
+// setting CRDB_INTEGRATION_OPTIONAL=1.
 //
 // CRDB_TEST_DSN bypass: when CRDB_TEST_DSN is set, Shared returns a
 // Cluster with only DSN populated and a no-op Stop. This lets a
@@ -45,6 +50,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -62,9 +68,14 @@ const (
 )
 
 // ErrBinaryNotFound is returned by Start when no cockroach binary can
-// be located via COCKROACH_BIN or $PATH. Callers (typically Shared)
-// translate this into t.Skipf with a message explaining how to enable
-// the integration tests.
+// be located via COCKROACH_BIN or $PATH. Shared turns this into
+// t.Fatalf by default so missing-binary cases fail loudly, or into
+// t.Skipf when CRDB_INTEGRATION_OPTIONAL holds a strconv.ParseBool-truthy
+// value (the CI escape hatch — falsy or unparseable values still Fatal,
+// so a typo can't accidentally enable skipping). Shared callers also
+// have CRDB_TEST_DSN as a third option (point at an already-running
+// cluster); Start itself does not honor that var because its job is
+// to spawn a process, not to wrap an existing one.
 var ErrBinaryNotFound = errors.New(
 	"cockroach binary not found (set COCKROACH_BIN or put cockroach on PATH)")
 
@@ -407,15 +418,61 @@ var (
 	sharedStarted bool
 )
 
+// integrationOptionalEnv is the opt-in env var that converts Shared's
+// missing-binary fatal into a skip. It exists for one reason: the
+// GitHub Actions CI job does not install cockroach and would otherwise
+// fail every integration-tagged test. Anywhere else (developer
+// laptops, fresh checkouts, ad-hoc CI), leaving it unset means missing
+// binaries surface as loud test failures instead of invisible skips.
+//
+// The value is parsed by strconv.ParseBool — see that function for the
+// full grammar. Truthy values (e.g. "1", "true") enable the skip;
+// falsy ones (e.g. "0", "false") disable it. An unparseable value
+// (e.g. "yes", "on", "1\n") is itself a Fatal — silently treating an
+// unrecognized value as "off" would just relocate the silent-skip
+// footgun this package is trying to remove.
+const integrationOptionalEnv = "CRDB_INTEGRATION_OPTIONAL"
+
+// missingBinaryMsg is the message Shared uses when it cannot reach a
+// cluster and CRDB_INTEGRATION_OPTIONAL is unset. It enumerates every
+// knob that would make the test runnable so a developer hitting the
+// failure for the first time has a complete recovery menu in front of
+// them.
+const missingBinaryMsg = "cockroachtest: no cockroach binary found and CRDB_TEST_DSN unset; " +
+	"install cockroach on $PATH, set COCKROACH_BIN, set CRDB_TEST_DSN=postgresql://..., " +
+	"or export CRDB_INTEGRATION_OPTIONAL=1 to skip"
+
 // Shared returns the per-test-binary cluster, starting one on the
-// first call. CRDB_TEST_DSN takes precedence: if set, Shared returns a
-// Cluster whose DSN is the env value and whose Stop is a no-op.
+// first call. CRDB_TEST_DSN takes precedence: if set at first-call
+// time, Shared returns a Cluster whose DSN is the env value and
+// whose Stop is a no-op.
+//
+// Env-read timing: CRDB_TEST_DSN and the binary-resolution variables
+// (COCKROACH_BIN, $PATH) are read only on the first call; the result
+// is cached. CRDB_INTEGRATION_OPTIONAL is the exception — it is
+// re-read on every call so a test that flips the opt-in mid-run gets
+// the new behavior on subsequent calls, not the value captured at
+// first-call time.
 //
 // Behavior on missing binary: when neither CRDB_TEST_DSN nor a
-// resolvable cockroach binary is available, Shared calls t.Skipf and
-// returns nil. On a real *testing.T, Skipf invokes runtime.Goexit, so
-// the nil return is only observable to test doubles that override
-// Skipf (e.g. the recordingTB used in cluster_test.go). Production
+// resolvable cockroach binary is available, Shared calls t.Fatalf by
+// default. Setting CRDB_INTEGRATION_OPTIONAL to a strconv.ParseBool
+// truthy value (e.g. "1", "true") converts the failure into t.Skipf —
+// this is the escape hatch for environments (today: the GitHub
+// Actions job) that legitimately have no cockroach installed. A
+// falsy or unparseable value Fatals just like the unset case, so a
+// typo can't accidentally enable skipping.
+//
+// Behavior on cached failure: a Shared call that follows a failed
+// Shared call replays the Skip/Fatal decision against the *current*
+// CRDB_INTEGRATION_OPTIONAL value, but only for ErrBinaryNotFound. A
+// generic Start failure cached on the first call always Fatals —
+// never skips — because CRDB_INTEGRATION_OPTIONAL is meant only for
+// the missing-binary case.
+//
+// On a real *testing.T, both Fatalf and Skipf invoke runtime.Goexit,
+// so the nil return is only observable to test doubles that override
+// them (e.g. the recordingTB used in cluster_test.go). Production
 // callers can rely on Shared either returning a usable *Cluster or
 // never returning.
 //
@@ -428,7 +485,7 @@ func Shared(t testing.TB) *Cluster {
 
 	if sharedStarted {
 		if sharedErr != nil {
-			t.Skipf("cockroachtest: shared cluster unavailable: %v", sharedErr)
+			reportCachedErr(t, sharedErr)
 			return nil
 		}
 		return sharedCluster
@@ -443,7 +500,7 @@ func Shared(t testing.TB) *Cluster {
 	c, err := Start(context.Background())
 	if errors.Is(err, ErrBinaryNotFound) {
 		sharedErr = err
-		t.Skipf("cockroachtest: %v; set COCKROACH_BIN or CRDB_TEST_DSN to enable integration tests", err)
+		reportMissingBinary(t, err)
 		return nil
 	}
 	if err != nil {
@@ -453,6 +510,50 @@ func Shared(t testing.TB) *Cluster {
 	}
 	sharedCluster = c
 	return sharedCluster
+}
+
+// reportMissingBinary handles the ErrBinaryNotFound outcome at the
+// first Shared call. It honors the CRDB_INTEGRATION_OPTIONAL escape
+// hatch (skip) on parseable-truthy values and Fatalf otherwise. An
+// unparseable value is itself a Fatal — relaying "I don't know what
+// you meant" as a skip would just re-introduce the silent-skip
+// footgun this package is trying to eliminate.
+func reportMissingBinary(t testing.TB, err error) {
+	t.Helper()
+	raw := os.Getenv(integrationOptionalEnv)
+	if raw == "" {
+		t.Fatalf("%s (underlying: %v)", missingBinaryMsg, err)
+		return
+	}
+	optIn, perr := strconv.ParseBool(raw)
+	if perr != nil {
+		t.Fatalf("%s=%q is not a boolean (%v); %s",
+			integrationOptionalEnv, raw, perr, missingBinaryMsg)
+		return
+	}
+	if !optIn {
+		t.Fatalf("%s (underlying: %v)", missingBinaryMsg, err)
+		return
+	}
+	t.Skipf("cockroachtest: %v; %s=%q set, skipping", err, integrationOptionalEnv, raw)
+}
+
+// reportCachedErr handles a Shared call that follows an earlier
+// Shared call which already failed. It discriminates by error type:
+// ErrBinaryNotFound flows back through reportMissingBinary so the CI
+// escape hatch still applies, but a generic Start failure (port
+// collision, premature exit, tempdir trouble, etc.) is always Fatal.
+// Routing every cached error through the missing-binary helper would
+// make CRDB_INTEGRATION_OPTIONAL=1 silently skip real startup
+// failures on every test after the first — the exact pattern this
+// commit set out to eliminate.
+func reportCachedErr(t testing.TB, err error) {
+	t.Helper()
+	if errors.Is(err, ErrBinaryNotFound) {
+		reportMissingBinary(t, err)
+		return
+	}
+	t.Fatalf("cockroachtest: failed to start cluster: %v", err)
 }
 
 // RunTests is the TestMain helper for integration test packages. It
