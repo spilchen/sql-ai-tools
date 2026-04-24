@@ -49,8 +49,8 @@ registers in [`internal/mcp/server.go`](internal/mcp/server.go) and
 | `summarize_sql` / `summarize` | 1 | Structured per-statement summary (tables touched, operations). |
 | `list_tables` / `list-tables` | 2-3 | Tables from loaded `--schema` files or a live `--dsn` cluster. |
 | `describe_table` / `describe` | 2-3 | Columns, types, nullability, primary key, indexes. |
-| `explain_sql` / `explain` | 3 | EXPLAIN output as structured JSON. Requires `--dsn`. |
-| `explain_schema_change` / `explain-ddl` | 3 | EXPLAIN (DDL, SHAPE) — schema-change plan with phases and operations. Currently rejects every input: the default `read_only` mode forbids DDL planning and `safe_write`/`full_access` are wired only for `execute_sql` (the per-mode rules for `explain-ddl` are follow-up work). |
+| `explain_sql` / `explain` | 3 | EXPLAIN output as structured JSON. `--mode read_only` (default) admits the read-only set; `--mode safe_write` additionally admits DML so the planner returns a plan for inner writes; `--mode full_access` admits anything that parses (the cluster-side read-only txn wrapper still surfaces SQLSTATE 25006 for inner DDL). Requires `--dsn`. |
+| `explain_schema_change` / `explain-ddl` | 3 | EXPLAIN (DDL, SHAPE) — schema-change plan with phases and operations. The default `read_only` mode rejects every DDL (since DDL modifies schema), so this command requires `--mode safe_write` (admits DDL but rejects DCL/cluster-admin/non-DDL) or `--mode full_access` (admits any DDL that parses). Requires `--dsn`. |
 | `simulate_sql` / `simulate` | 3 | Side-effect-free by construction: dispatches each statement to a non-mutating EXPLAIN flavor — SELECT runs through `EXPLAIN ANALYZE` inside `BEGIN READ ONLY` (the read does execute, but writes are blocked at the cluster), DML through plain `EXPLAIN` (planner-only, write never applied), DDL through `EXPLAIN (DDL, SHAPE)` (planner-only). Requires `--dsn`. |
 | `execute_sql` / `exec` | 3 | Run SQL against the cluster behind the safety allowlist. `--mode read_only` (default) admits the same set as `explain`; `--mode safe_write` additionally admits DML; `--mode full_access` admits anything that parses. Schema/privilege/cluster-admin ops require `full_access`. Requires `--dsn`. |
 
@@ -271,9 +271,9 @@ side-effect-free dispatch (see the catalog row for the exact rules).
 For actual writes, `crdb-sql exec --dsn ... --mode safe_write -e
 "..."` runs SQL behind the safety allowlist; the default
 `--mode read_only` admits the same shape as `explain`. `crdb-sql
-explain-ddl` is the planned schema-change-impact tool, but it cannot
-run today — its per-mode rules are still follow-up work and every
-input is rejected.
+explain-ddl --dsn ... --mode safe_write -e "ALTER TABLE ..."`
+returns the declarative schema-change plan — read_only rejects DDL
+by design, so this command requires safe_write or full_access.
 
 ### Connecting to a secure cluster
 
@@ -394,11 +394,11 @@ so configure your editor to run `gofmt`/`goimports` on save.
 ## Project status
 
 Tier 1 and Tier 2 are usable today. Tier 3 connected tools (`ping`,
-`list-tables`, `describe`, `explain`, `simulate`, `exec`) work;
-`exec` honours all three safety modes (`read_only`, `safe_write`,
-`full_access`). `explain-ddl` is the only Tier 3 tool that cannot run
-today — its per-mode rules are still follow-up work, so every input
-is rejected.
+`list-tables`, `describe`, `explain`, `explain-ddl`, `simulate`,
+`exec`) work; `exec`, `explain`, and `explain-ddl` honour all three
+safety modes (`read_only`, `safe_write`, `full_access`). `simulate`
+is the remaining Tier 3 surface whose `safe_write`/`full_access`
+wiring is still follow-up work.
 
 See [`docs/`](docs/) for the design document, hackathon plan, and
 research lessons that inform the architecture.

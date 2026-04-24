@@ -72,11 +72,12 @@ const ModeParamName = "mode"
 // mode parameter so every Tier 3 tool documents the argument
 // identically. The accepted set is the same across tools, but the
 // modes that any given tool actually admits depend on the tool:
-// today execute_sql and explain_schema_change wire safe_write and
-// full_access; explain_sql still reports "not yet implemented" for
-// those modes (follow-up work). The per-tool wording stays accurate
-// via the envelope's safety_violation Reason.
-const ModeParamDescription = `Optional safety mode applied before any cluster contact. Defaults to "read_only", which permits non-mutating statements only. "safe_write" additionally admits INSERT/UPDATE/DELETE; "full_access" admits any parsed statement. For explain_schema_change, "read_only" rejects every DDL — use "safe_write" or "full_access" instead. Today explain_sql still reports "not yet implemented" for safe_write/full_access (follow-up work).`
+// execute_sql, explain_sql, and explain_schema_change all wire
+// safe_write and full_access today. For explain_schema_change,
+// read_only rejects every DDL — use safe_write or full_access
+// instead. The per-tool wording stays accurate via the envelope's
+// safety_violation Reason.
+const ModeParamDescription = `Optional safety mode applied before any cluster contact. Defaults to "read_only", which permits non-mutating statements only. "safe_write" additionally admits INSERT/UPDATE/DELETE; "full_access" admits any parsed statement. For explain_schema_change, "read_only" rejects every DDL — use "safe_write" or "full_access" instead.`
 
 // StatementTimeoutParamName is the optional MCP tool parameter name
 // that lets a client override the per-call SET LOCAL statement_timeout

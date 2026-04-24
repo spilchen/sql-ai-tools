@@ -25,10 +25,10 @@
 //
 // Design doc reference: §Safety Model (read_only is the default,
 // safe_write and full_access are opt-in escalations). Issue #21
-// wired read_only end-to-end; issue #29 wired safe_write and
-// full_access for OpExecute; issue #152 wired them for OpExplainDDL.
-// OpExplain and OpSimulate still report "not yet implemented" for
-// safe_write/full_access — wiring them is follow-up work.
+// wired read_only end-to-end; issues #29, #151, and #152 wired
+// safe_write/full_access for OpExecute, OpExplain, and OpExplainDDL
+// respectively. OpSimulate still reports "not yet implemented" for
+// safe_write/full_access — wiring it is follow-up work.
 package safety
 
 import "fmt"
@@ -40,9 +40,9 @@ type Mode string
 
 // Mode values. ModeReadOnly is the default for every Tier 3 command;
 // the other two are recognised by ParseMode and admitted by Check
-// for OpExecute (issue #29) and OpExplainDDL (issue #152). For
-// OpExplain and OpSimulate, safe_write and full_access still report
-// "not yet implemented".
+// for OpExecute (#29), OpExplain (#151), and OpExplainDDL (#152).
+// For OpSimulate, safe_write and full_access still report "not yet
+// implemented".
 const (
 	ModeReadOnly   Mode = "read_only"
 	ModeSafeWrite  Mode = "safe_write"
@@ -63,9 +63,9 @@ const DefaultMode = ModeReadOnly
 // is actionable on its own.
 //
 // safe_write and full_access parse successfully for every Op even
-// though Check rejects them for OpExplain and OpSimulate today —
-// the split keeps the flag-parsing layer stable so the only churn
-// when those modes land for the other surfaces is inside Check.
+// though Check rejects them for OpSimulate today — the split keeps
+// the flag-parsing layer stable so the only churn when those modes
+// land for OpSimulate is inside Check.
 func ParseMode(s string) (Mode, error) {
 	switch Mode(s) {
 	case "":
