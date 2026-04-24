@@ -110,7 +110,7 @@ simulate → execute.
 | `describe_table` | Table name | Columns, types, constraints, indexes | 2-3 |
 | `explain_sql` | SQL string | EXPLAIN output as structured JSON | 3 |
 | `explain_schema_change` | DDL string | Schema changer plan with phases, elements, operations | 3 |
-| `detect_risky_query` | SQL string | Risk assessment with reason codes, severity, fix hints | 1-3 |
+| `detect_risky_sql` | SQL string | Risk assessment with reason codes, severity, fix hints | 1-3 |
 | `simulate_sql` | SQL string | Per-statement EXPLAIN-based simulation (ANALYZE for SELECT, plain EXPLAIN for DML writes, EXPLAIN (DDL, SHAPE) + table stats for DDL); no inner statement is executed at the cluster level | 3 |
 | `execute_sql` | SQL string | Query results with safety guardrails | 3 |
 
@@ -528,7 +528,7 @@ and learn what setup unlocks more capability.
 
 ### Rule-Based Analysis Engine
 
-`detect_risky_query` and `summarize_sql` are deterministic, rule-based tools
+`detect_risky_sql` and `summarize_sql` are deterministic, rule-based tools
 over AST, catalog metadata, and plan output. No LLM needed.
 
 **Rule registry architecture:**

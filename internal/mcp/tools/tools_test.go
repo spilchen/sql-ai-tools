@@ -931,7 +931,7 @@ func TestFormatSQLHandler(t *testing.T) {
 	}
 }
 
-func TestDetectRiskyQueryHandler(t *testing.T) {
+func TestDetectRiskySQLHandler(t *testing.T) {
 	tests := []struct {
 		name                 string
 		args                 map[string]any
@@ -977,7 +977,7 @@ func TestDetectRiskyQueryHandler(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := DetectRiskyQueryHandler(testParserVersion, "" /* defaultTargetVersion */)
+			handler := DetectRiskySQLHandler(testParserVersion, "" /* defaultTargetVersion */)
 			req := mcpgo.CallToolRequest{}
 			req.Params.Arguments = tc.args
 
@@ -1465,7 +1465,7 @@ func TestValidateSQLHandler_ParseErrorPreservesPriorWarnings(t *testing.T) {
 
 // plpgsqlVersionWarningSQL is the PL/pgSQL fixture shared by the
 // version-warning tests for summarize_sql, format_sql, and
-// detect_risky_query. The plpgsql_function_body feature is registered
+// detect_risky_sql. The plpgsql_function_body feature is registered
 // as introduced in v24.1 (see internal/version/registry.go), so any
 // target_version older than that produces a feature_not_yet_introduced
 // warning when version.Inspect runs over the parsed AST.
@@ -1602,11 +1602,11 @@ func TestFormatSQLHandler_ParseErrorPreservesPriorWarnings(t *testing.T) {
 		"parse error must still be present: %+v", env.Errors)
 }
 
-// TestDetectRiskyQueryHandler_ParseErrorPreservesPriorWarnings is the
-// detect_risky_query mirror — same append-not-overwrite contract on
+// TestDetectRiskySQLHandler_ParseErrorPreservesPriorWarnings is the
+// detect_risky_sql mirror — same append-not-overwrite contract on
 // the risk handler's parse-error branch.
-func TestDetectRiskyQueryHandler_ParseErrorPreservesPriorWarnings(t *testing.T) {
-	handler := DetectRiskyQueryHandler(testParserVersion, "" /* defaultTargetVersion */)
+func TestDetectRiskySQLHandler_ParseErrorPreservesPriorWarnings(t *testing.T) {
+	handler := DetectRiskySQLHandler(testParserVersion, "" /* defaultTargetVersion */)
 	req := mcpgo.CallToolRequest{}
 	req.Params.Arguments = map[string]any{
 		"sql":            "SELECTT 1",
@@ -1623,10 +1623,10 @@ func TestDetectRiskyQueryHandler_ParseErrorPreservesPriorWarnings(t *testing.T) 
 		"parse error must still be present: %+v", env.Errors)
 }
 
-// TestDetectRiskyQueryHandler_VersionWarning is the detect_risky_query
+// TestDetectRiskySQLHandler_VersionWarning is the detect_risky_sql
 // mirror of TestParseSQLHandler_VersionWarning. Risk findings remain
 // in the data payload regardless of the version warning.
-func TestDetectRiskyQueryHandler_VersionWarning(t *testing.T) {
+func TestDetectRiskySQLHandler_VersionWarning(t *testing.T) {
 	tests := []struct {
 		name           string
 		targetVersion  string
@@ -1639,7 +1639,7 @@ func TestDetectRiskyQueryHandler_VersionWarning(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := DetectRiskyQueryHandler(testParserVersion, "" /* defaultTargetVersion */)
+			handler := DetectRiskySQLHandler(testParserVersion, "" /* defaultTargetVersion */)
 			args := map[string]any{"sql": plpgsqlVersionWarningSQL}
 			if tc.targetVersion != "" {
 				args["target_version"] = tc.targetVersion

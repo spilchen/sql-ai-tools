@@ -279,7 +279,7 @@ tools" pattern is more agent-friendly than hiding capabilities.
 
 ### Rule-Based Analysis
 
-`detect_risky_query` and `summarize_sql` are deterministic static analysis
+`detect_risky_sql` and `summarize_sql` are deterministic static analysis
 tools built over AST, catalog metadata, and plan output. No LLM needed for
 safety-critical judgment.
 
@@ -416,7 +416,7 @@ This is a complete hackathon deliverable.
 | Feature | Priority | Rationale |
 |---------|----------|-----------|
 | Builtins registry stubs | High | Unblocks function name validation, overload resolution, return type inference. Auto-generate metadata-only stubs for ~876+ functions |
-| `detect_risky_query` tool | Medium | Level 1 AST-only rules: DELETE without WHERE, DROP TABLE, UPDATE without WHERE. Structured output with reason codes and severity |
+| `detect_risky_sql` tool | Medium | Level 1 AST-only rules: DELETE without WHERE, DROP TABLE, UPDATE without WHERE. Structured output with reason codes and severity |
 | `summarize_sql` tool | Medium | Statement classification + structured summary (operation, tables, columns, predicates) |
 | YAML config file | Low | Glob-based schema-to-query file mapping for projects |
 | `simulate_sql` tool | Low | Transaction-rollback wrapper for execute-without-side-effects |

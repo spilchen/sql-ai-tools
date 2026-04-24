@@ -6,7 +6,7 @@
 // Package mcp builds the crdb-sql Model Context Protocol server.
 //
 // The server registers a health-check tool (ping), five Tier 1 SQL
-// tools (parse_sql, validate_sql, format_sql, detect_risky_query,
+// tools (parse_sql, validate_sql, format_sql, detect_risky_sql,
 // summarize_sql), two Tier 2 catalog tools (list_tables,
 // describe_table) that operate on inline CREATE TABLE schemas, and
 // four Tier 3 connected tools (explain_sql, explain_schema_change,
@@ -112,7 +112,7 @@ func WithBuiltQuarter(q versionroute.Quarter) Option {
 // (or, in the future, sse/http) themselves.
 //
 // Per-call routing wiring: the nine parser-dependent tool handlers
-// (parse_sql, validate_sql, format_sql, detect_risky_query,
+// (parse_sql, validate_sql, format_sql, detect_risky_sql,
 // summarize_sql, explain_sql, explain_schema_change, simulate_sql,
 // execute_sql) are wrapped with withRouting so a target_version
 // whose quarter differs from the running binary forwards to a
@@ -157,7 +157,7 @@ func NewServer(
 	s.AddTool(tools.ParseSQLTool(), route(tools.ParseSQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.ValidateSQLTool(), route(tools.ValidateSQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.FormatSQLTool(), route(tools.FormatSQLHandler(parserVersion, defaultTargetVersion)))
-	s.AddTool(tools.DetectRiskyQueryTool(), route(tools.DetectRiskyQueryHandler(parserVersion, defaultTargetVersion)))
+	s.AddTool(tools.DetectRiskySQLTool(), route(tools.DetectRiskySQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.SummarizeSQLTool(), route(tools.SummarizeSQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.ExplainSQLTool(), route(tools.ExplainSQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.ExplainSchemaChangeTool(), route(tools.ExplainSchemaChangeHandler(parserVersion, defaultTargetVersion)))

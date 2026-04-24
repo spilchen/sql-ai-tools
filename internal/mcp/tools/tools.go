@@ -5,7 +5,7 @@
 
 // Package tools provides MCP tool handler constructors for the SQL
 // tools. The Tier 1 (zero-config) tools are parse_sql, validate_sql,
-// format_sql, detect_risky_query, and summarize_sql; the Tier 2
+// format_sql, detect_risky_sql, and summarize_sql; the Tier 2
 // (schema_file) tools are list_tables and describe_table; the Tier 3
 // (connected) tools are explain_sql, explain_schema_change, and
 // execute_sql, which require a per-call DSN since the MCP server
@@ -40,7 +40,7 @@ const (
 	ParseSQLToolName            = "parse_sql"
 	ValidateSQLToolName         = "validate_sql"
 	FormatSQLToolName           = "format_sql"
-	DetectRiskyQueryToolName    = "detect_risky_query"
+	DetectRiskySQLToolName      = "detect_risky_sql"
 	SummarizeSQLToolName        = "summarize_sql"
 	ExplainSQLToolName          = "explain_sql"
 	ExplainSchemaChangeToolName = "explain_schema_change"

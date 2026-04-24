@@ -45,7 +45,7 @@ registers in [`internal/mcp/server.go`](internal/mcp/server.go) and
 | `validate_sql` / `validate` | 1-2 | Parse + type-check + (with `--schema`) name-resolve. Returns structured errors with positions, available names, and "did you mean?" suggestions. |
 | `format_sql` / `format` | 1 | Canonicalize SQL with optional syntax highlighting. Auto-strips `cockroach sql` shell prompts from pasted input. |
 | `parse_sql` / `parse` | 1 | Statement classification (DDL/DML/DCL/TCL), tag, fingerprint, parser version. |
-| `detect_risky_query` / `risk` | 1 | AST-only risk assessment with reason codes and fix hints (DELETE without WHERE, missing-WHERE UPDATE, DDL hygiene, etc.). |
+| `detect_risky_sql` / `risk` | 1 | AST-only risk assessment with reason codes and fix hints (DELETE without WHERE, missing-WHERE UPDATE, DDL hygiene, etc.). |
 | `summarize_sql` / `summarize` | 1 | Structured per-statement summary (tables touched, operations). |
 | `list_tables` / `list-tables` | 2-3 | Tables from loaded `--schema` files or a live `--dsn` cluster. |
 | `describe_table` / `describe` | 2-3 | Columns, types, nullability, primary key, indexes. |

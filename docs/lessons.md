@@ -383,7 +383,7 @@ command-line flags may be sufficient, deferring config to Day 4 polish.
 
 ---
 
-### 15. Build detect_risky_query as deterministic static analysis over AST
+### 15. Build detect_risky_sql as deterministic static analysis over AST
 
 | Field | Value |
 |-------|-------|
@@ -478,7 +478,7 @@ Core tools ordered as a discoverable workflow:
 4. `explain_sql` — EXPLAIN output for DML (tier 3)
 5. `explain_schema_change` — EXPLAIN (DDL) with SHAPE mode (tier 3)
 6. `list_tables` / `describe_table` — catalog introspection (tier 2-3)
-7. `detect_risky_query` — static risk analysis (stretch goal)
+7. `detect_risky_sql` — static risk analysis (stretch goal)
 
 ### Safety Model
 
@@ -571,7 +571,7 @@ returns structured JSON with phases, backfill operations, and estimated steps.
 | Deliverable | Priority |
 |-------------|----------|
 | Builtins registry stubs | High — unblocks function validation |
-| `detect_risky_query` tool | Medium — Level 1 AST-only rules |
+| `detect_risky_sql` tool | Medium — Level 1 AST-only rules |
 | `summarize_sql` tool | Medium — statement classification + summary |
 | YAML config file | Low — glob-based schema mapping |
 | `simulate_sql` tool | Low — transaction-rollback wrapper |
