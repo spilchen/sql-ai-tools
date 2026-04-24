@@ -4,21 +4,6 @@ Agent-friendly SQL tooling for CockroachDB. An MCP server and CLI that wraps
 CockroachDB's parser, type system, and error infrastructure in a structured,
 agent-consumable interface.
 
-## How this fits with `cockroachdb/claude-plugin`
-
-`sql-ai-tools` is the **offline, parser-grade validation layer**: parse,
-type-check, and name-resolve CRDB SQL without a cluster, with structured
-fix-suggestion errors. It complements
-[`cockroachdb/claude-plugin`](https://github.com/cockroachdb/claude-plugin),
-which is the **distribution and execution layer** — a Claude-Code plugin
-bundling sub-agents, skills, hooks, and proxied MCP backends (MCP Toolbox,
-CockroachDB Cloud MCP) for live cluster work.
-
-The two projects are complementary, not competing: `claude-plugin` requires
-a live cluster for every tool; `sql-ai-tools` works on a plane. See
-[`docs/claude_plugin_comparison.md`](docs/claude_plugin_comparison.md) for
-the full breakdown.
-
 ## Problem
 
 AI agents write SQL for CockroachDB constantly — and get it wrong in subtle
@@ -66,23 +51,39 @@ registers in [`internal/mcp/server.go`](internal/mcp/server.go) and
 
 ## Installation
 
-### Prerequisites
+### Option A — Release tarball (recommended)
 
-- Go 1.26+ (Go's `toolchain` directive will auto-download the matching
-  toolchain on first build if your local install is older but compatible).
+Each release archive bundles **both** the latest backend (`crdb-sql`)
+and the per-quarter sibling (`crdb-sql-v261`, …) so `--target-version`
+routing works out of the box. No Go toolchain needed.
 
-### Option A — Build from source (canonical)
+```bash
+# Pick your platform: linux_amd64, linux_arm64, darwin_amd64, darwin_arm64
+curl -L https://github.com/spilchen/sql-ai-tools/releases/latest/download/crdb-sql_0.1.0_linux_amd64.tar.gz \
+  | tar xz
+sudo mv crdb-sql crdb-sql-v261 /usr/local/bin/
+```
+
+Verify checksums against `checksums.txt` from the same release page if
+you care about supply-chain integrity.
+
+### Option B — Build from source
+
+Requires Go 1.26+ (Go's `toolchain` directive auto-downloads a matching
+toolchain on first build if your local install is older but
+compatible).
 
 ```bash
 git clone https://github.com/spilchen/sql-ai-tools.git
 cd sql-ai-tools
-make build
+make build-all
 ```
 
-Produces `bin/crdb-sql`. Add `bin/` to your `PATH` or copy the binary
-somewhere on it.
+Produces `bin/crdb-sql` and the per-quarter siblings. Add `bin/` to
+your `PATH` or copy the binaries somewhere on it. Use `make build`
+instead if you only need the latest backend.
 
-### Option B — `go install`
+### Option C — `go install`
 
 ```bash
 go install github.com/spilchen/sql-ai-tools/cmd/crdb-sql@latest
@@ -94,8 +95,7 @@ siblings shipped in the release archives — those are needed when you
 pass `--target-version` for an older quarter. Without the matching
 sibling on `$PATH`, `crdb-sql` prints a discovery hint to stderr and
 exits with status 2 rather than silently falling back to the wrong
-parser. Install the matching `crdb-sql-vXXX` from a release archive
-when you need an older quarter.
+parser. Prefer Option A if you ever expect to target an older quarter.
 
 ### Verify
 
@@ -328,18 +328,19 @@ TLS knobs without knowing the libpq URI form:
 `crdb-sql mcp` runs the binary as a Model Context Protocol server over
 stdio. Every tool in the catalog above is registered.
 
-Register the binary with Claude Code. After Option A (build from
-source), point at the build output directly:
-
-```bash
-claude mcp add crdb-sql -- "$(pwd)/bin/crdb-sql" mcp
-```
-
-After Option B (`go install`), use the bare command name (the
-installed binary is on `$PATH` via `$GOBIN`):
+Register the binary with Claude Code. After Option A (release tarball)
+or Option C (`go install`) — both leave the binary on `$PATH` — use
+the bare command name:
 
 ```bash
 claude mcp add crdb-sql -- crdb-sql mcp
+```
+
+After Option B (build from source), point at the build output
+directly (assuming `bin/` is not on your `$PATH`):
+
+```bash
+claude mcp add crdb-sql -- "$(pwd)/bin/crdb-sql" mcp
 ```
 
 The leading `--` is required so the `mcp` argument is forwarded to
@@ -391,6 +392,21 @@ make fmt     # auto-format sources
 
 `make lint` is the CI gate. `go fmt` violations do not block `make build`,
 so configure your editor to run `gofmt`/`goimports` on save.
+
+## How this fits with `cockroachdb/claude-plugin`
+
+`sql-ai-tools` is the **offline, parser-grade validation layer**: parse,
+type-check, and name-resolve CRDB SQL without a cluster, with structured
+fix-suggestion errors. It complements
+[`cockroachdb/claude-plugin`](https://github.com/cockroachdb/claude-plugin),
+which is the **distribution and execution layer** — a Claude-Code plugin
+bundling sub-agents, skills, hooks, and proxied MCP backends (MCP Toolbox,
+CockroachDB Cloud MCP) for live cluster work.
+
+The two projects are complementary, not competing: `claude-plugin` requires
+a live cluster for every tool; `sql-ai-tools` works on a plane. See
+[`docs/claude_plugin_comparison.md`](docs/claude_plugin_comparison.md) for
+the full breakdown.
 
 ## Project status
 
