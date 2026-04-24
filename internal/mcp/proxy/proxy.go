@@ -16,17 +16,19 @@
 // dispatch share one source of truth for "where do my siblings
 // live?" and "what backend do I need for v26.1?".
 //
-// SpawnRouter is the first cut from issue #129: spawn the sibling
-// per call, run the MCP initialize handshake, forward one tools/call,
-// tear it down. The latency cost (process startup + handshake on
-// every routed call) is documented; warm pooling is tracked in #145.
+// PoolRouter (pool.go) is the production implementation: one warm
+// child per quarter, lazy spawn on first call, idle eviction after
+// a configurable window, transparent re-spawn on transport failure.
+// It implements issue #145 and replaces the spawn-per-call first
+// cut from #129. NoopRouter is the default when no Router is
+// installed; it surfaces a "routing not enabled" tool error rather
+// than silently dispatching locally.
 package proxy
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -59,10 +61,10 @@ import (
 //     error. The wrapper forwards these verbatim so the client
 //     sees the same shape it would for a local tool error.
 //
-// SpawnRouter (and any future Router that constructs results
-// itself) must NOT touch output.Envelope — those results bypass
-// the local handler's envelope stamping entirely, so the saved
-// "preserve env.Errors" rule does not apply here.
+// A Router that constructs results itself (NoopRouter,
+// missingBackendResult) must NOT touch output.Envelope — those
+// results bypass the local handler's envelope stamping entirely, so
+// the saved "preserve env.Errors" rule does not apply here.
 type Router interface {
 	Dispatch(
 		ctx context.Context, want versionroute.Quarter, req mcp.CallToolRequest,
@@ -96,68 +98,31 @@ func (NoopRouter) Dispatch(
 // same flake floor.
 const defaultInitTimeout = 10 * time.Second
 
-// SpawnRouter implements Router by spawning a sibling backend as a
-// child MCP server over stdio per call: locate the backend via
-// versionroute.FindBackend, exec it with `mcp` as the subcommand,
-// run the MCP initialize handshake, forward the single tools/call,
-// and tear the child down via client.Close.
+// spawnAndInit launches the sibling at path as a child MCP server
+// over stdio, runs the MCP initialize handshake against it under
+// initTimeout, and returns the connected client. On any error the
+// returned client is nil and the child has been torn down (no leak).
 //
-// This is the spawn-per-call first cut described in issue #129. The
-// per-call cost is one process spawn plus one MCP handshake on top
-// of the actual tool work; warm pooling that amortizes both is
-// tracked in #145, with a benchmark in #146.
-type SpawnRouter struct {
-	// initTimeout caps the MCP initialize handshake on each spawned
-	// child. The per-tool-call timeout flows from the ctx the
-	// caller supplies to Dispatch.
-	initTimeout time.Duration
-}
-
-// NewSpawnRouter returns a SpawnRouter with the package's default
-// init timeout. Production callers (cmd/mcp.go) use this; tests that
-// need a tighter handshake budget can construct SpawnRouter
-// directly.
-func NewSpawnRouter() *SpawnRouter {
-	return &SpawnRouter{initTimeout: defaultInitTimeout}
-}
-
-// Dispatch spawns the sibling matching want, performs the MCP
-// initialize handshake, forwards req, and returns the sibling's
-// CallToolResult. See the Router interface comment for the
-// transport-vs-tool error distinction.
-func (r *SpawnRouter) Dispatch(
-	ctx context.Context, want versionroute.Quarter, req mcp.CallToolRequest,
-) (*mcp.CallToolResult, error) {
-	path, found := versionroute.FindBackend(want)
-	if !found {
-		return missingBackendResult(want), nil
-	}
-
-	// nil env hands the parent's full environment to the child so any
-	// per-tool environment knobs (DSNs, COCKROACH_BIN for explain_sql,
-	// etc.) reach the sibling unchanged. The child also inherits
-	// stderr, so its diagnostics are visible alongside the parent's —
-	// load-bearing for debugging routed-call failures. Same reasoning
-	// as internal/mcp/integration_test.go newMCPClient.
+// nil env in NewStdioMCPClient hands the parent's full environment
+// to the child so any per-tool environment knobs (DSNs,
+// COCKROACH_BIN for explain_sql, etc.) reach the sibling unchanged.
+// The child also inherits stderr, so its diagnostics are visible
+// alongside the parent's — load-bearing for debugging routed-call
+// failures. Same reasoning as internal/mcp/integration_test.go's
+// newMCPClient.
+//
+// want is only used to compose a clear error message ("initialize
+// crdb-sql-v261 (/usr/local/bin/crdb-sql-v261): ..."); path is the
+// resolved binary location.
+func spawnAndInit(
+	ctx context.Context, want versionroute.Quarter, path string, initTimeout time.Duration,
+) (*client.Client, error) {
 	c, err := client.NewStdioMCPClient(path, nil /* env */, "mcp")
 	if err != nil {
 		return nil, fmt.Errorf("spawn %s: %w", path, err)
 	}
-	defer func() {
-		// Surface close errors to stderr rather than swallow them:
-		// a Close failure typically means the sibling crashed or
-		// hung mid-call, and silently dropping that signal hides
-		// process-leak regressions. Use stderr (not the envelope)
-		// because Dispatch has already returned its result by the
-		// time this fires.
-		if err := c.Close(); err != nil {
-			fmt.Fprintf(os.Stderr,
-				"crdb-sql mcp proxy: close sibling %s (%s): %v\n",
-				want.BackendName(), path, err)
-		}
-	}()
 
-	initCtx, cancel := context.WithTimeout(ctx, r.initTimeout)
+	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
 	var initReq mcp.InitializeRequest
 	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
@@ -166,25 +131,30 @@ func (r *SpawnRouter) Dispatch(
 		Version: "0.0.0",
 	}
 	if _, err := c.Initialize(initCtx, initReq); err != nil {
+		// Tear the child down so a failed handshake does not leak a
+		// running subprocess. Surface any close-time error by
+		// joining it with the original — the operator needs both:
+		// what failed (init) and any cascading shutdown trouble.
+		closeErr := c.Close()
 		// Distinguish "init budget exhausted" from "init failed for
 		// some other reason" so the operator-facing message names
 		// the budget rather than leaving the cause as a generic
 		// "context deadline exceeded".
+		var wrapped error
 		if errors.Is(err, context.DeadlineExceeded) {
-			return nil, fmt.Errorf(
+			wrapped = fmt.Errorf(
 				"initialize %s (%s): exceeded init timeout %s: %w",
-				want.BackendName(), path, r.initTimeout, err)
+				want.BackendName(), path, initTimeout, err)
+		} else {
+			wrapped = fmt.Errorf("initialize %s (%s): %w",
+				want.BackendName(), path, err)
 		}
-		return nil, fmt.Errorf("initialize %s (%s): %w",
-			want.BackendName(), path, err)
+		if closeErr != nil {
+			return nil, errors.Join(wrapped, fmt.Errorf("close after failed init: %w", closeErr))
+		}
+		return nil, wrapped
 	}
-
-	res, err := c.CallTool(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("forward tools/call to %s (%s): %w",
-			want.BackendName(), path, err)
-	}
-	return res, nil
+	return c, nil
 }
 
 // missingBackendResult builds a tool-error CallToolResult whose

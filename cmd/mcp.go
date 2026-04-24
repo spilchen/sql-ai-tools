@@ -6,6 +6,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -36,11 +37,14 @@ via "claude mcp add"); the process exits when the client closes stdin.
 Per-call target_version routing: any tool call whose target_version
 maps to a different parser quarter than this binary's bundled parser
 is forwarded to the matching sibling backend (crdb-sql-vXXX) on
-$PATH. The first cut spawns one sibling subprocess per routed call;
-expect ~tens-of-ms overhead per call vs. local handlers (benchmark
-tracked in #146; warm pooling in #145).`,
+$PATH. Routed calls go through a warm sibling-process pool — the
+first call to a target version pays one process spawn plus the MCP
+initialize handshake; subsequent calls reuse the warm child until it
+has been idle for ~5 minutes. The pool drains cleanly when the MCP
+client closes stdin (the normal exit path); SIGTERM/SIGKILL of the
+parent skips the drain and orphans any warm sibling children.`,
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(_ *cobra.Command, _ []string) (retErr error) {
 			// Resolve the parser version up front so a stamped release
 			// build with a missing dep fails fast — same hard-fail
 			// behavior the version subcommand uses, rather than letting
@@ -49,9 +53,23 @@ tracked in #146; warm pooling in #145).`,
 			if err != nil {
 				return err
 			}
+			pool := proxy.NewPoolRouter()
+			// Defer pool shutdown so warm sibling children get their
+			// stdin closed (clean exit) when the MCP client closes
+			// our stdin and ServeStdio unwinds. Without this every
+			// pooled sibling would survive the parent. Join any
+			// shutdown error onto the named return so cobra's exit
+			// code reflects "siblings refused to drain" — silently
+			// logging to stderr would let an orphan-process problem
+			// escape with exit 0.
+			defer func() {
+				if cerr := pool.Close(); cerr != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("pool shutdown: %w", cerr))
+				}
+			}()
 			s := internalmcp.NewServer(
 				Version, parserVer, state.targetVersion,
-				internalmcp.WithRouter(proxy.NewSpawnRouter()),
+				internalmcp.WithRouter(pool),
 			)
 			// Wrap the transport error so a failure in the stdio loop
 			// surfaces through cobra's "Error:" line as obviously
