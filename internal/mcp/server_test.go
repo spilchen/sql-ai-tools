@@ -87,7 +87,7 @@ func (s *spyRouter) Dispatch(
 }
 
 // TestNewServerRoutesAllParserDependentToolsAndOnlyThem pins the
-// wiring contract from server.go's doc: the nine parser-dependent
+// wiring contract from server.go's doc: the eight parser-dependent
 // handlers must be wrapped with withRouting, and the three that do
 // not take target_version must NOT be wrapped. A future refactor
 // that drops `route(...)` from one AddTool line — or wraps a tool
@@ -108,7 +108,6 @@ func TestNewServerRoutesAllParserDependentToolsAndOnlyThem(t *testing.T) {
 		tools.DetectRiskySQLToolName,
 		tools.SummarizeSQLToolName,
 		tools.ExplainSQLToolName,
-		tools.ExplainSchemaChangeToolName,
 		tools.SimulateSQLToolName,
 		tools.ExecuteSQLToolName,
 	}
@@ -187,7 +186,6 @@ func TestNewServerRegistersTools(t *testing.T) {
 		tools.FormatSQLToolName,
 		tools.DetectRiskySQLToolName,
 		tools.ExplainSQLToolName,
-		tools.ExplainSchemaChangeToolName,
 		tools.SimulateSQLToolName,
 		tools.ListTablesToolName,
 		tools.DescribeTableToolName,

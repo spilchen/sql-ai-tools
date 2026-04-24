@@ -154,3 +154,52 @@ func TestSanitizeConnErrPassthroughPreservesIdentity(t *testing.T) {
 	require.Same(t, original, got,
 		"errors without credentials should be returned unchanged")
 }
+
+// TestExplainAnyParseTimeRejections covers the dispatcher's pre-cluster
+// validation: malformed input, empty input, multi-statement input, and
+// statement classes the dispatcher has no EXPLAIN route for. None of
+// these reach the cluster, so the test runs without a live DSN.
+func TestExplainAnyParseTimeRejections(t *testing.T) {
+	tests := []struct {
+		name           string
+		sql            string
+		expectedErrMsg string
+	}{
+		{
+			name:           "syntax error",
+			sql:            "SELEKT 1",
+			expectedErrMsg: "parse explain input",
+		},
+		{
+			name:           "empty input",
+			sql:            "",
+			expectedErrMsg: "no statements parsed",
+		},
+		{
+			name:           "multi-statement rejected",
+			sql:            "SELECT 1; SELECT 2",
+			expectedErrMsg: "explain accepts a single statement",
+		},
+		{
+			name:           "tcl has no route",
+			sql:            "BEGIN",
+			expectedErrMsg: "no route for statement type",
+		},
+		{
+			name:           "dcl has no route",
+			sql:            "GRANT SELECT ON t TO bob",
+			expectedErrMsg: "no route for statement type",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := NewManager("postgres://localhost:26257/defaultdb")
+			_, err := mgr.ExplainAny(context.Background(), tc.sql)
+			require.Error(t, err)
+			require.ErrorContains(t, err, tc.expectedErrMsg)
+			require.Nil(t, mgr.conn,
+				"parse-time rejections must not open a connection")
+		})
+	}
+}

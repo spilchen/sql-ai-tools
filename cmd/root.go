@@ -181,7 +181,6 @@ to a secure cluster" section for examples.`,
 	root.AddCommand(newRiskCmd(state))
 	root.AddCommand(newSummarizeCmd(state))
 	root.AddCommand(newExplainCmd(state))
-	root.AddCommand(newExplainDDLCmd(state))
 	root.AddCommand(newSimulateCmd(state))
 	root.AddCommand(newExecCmd(state))
 	root.AddCommand(newMCPCmd(state))

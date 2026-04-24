@@ -137,110 +137,18 @@ func TestExplainSQLHandlerConnectionFailureSurfacesEnvelopeError(t *testing.T) {
 	require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
 }
 
-// TestExplainSchemaChangeHandlerParameterValidation covers the
-// tool-level error path for explain_schema_change. Cluster round-trips
-// are not exercised here; an end-to-end smoke is documented in the
-// issue verification plan.
-func TestExplainSchemaChangeHandlerParameterValidation(t *testing.T) {
-	tests := []struct {
-		name string
-		args map[string]any
-	}{
-		{name: "missing both params", args: map[string]any{}},
-		{name: "missing dsn", args: map[string]any{"sql": "ALTER TABLE t ADD COLUMN x INT"}},
-		{name: "missing sql", args: map[string]any{"dsn": "postgres://h:26257/db"}},
-		{name: "empty sql", args: map[string]any{"sql": "", "dsn": "postgres://h:26257/db"}},
-		{name: "empty dsn", args: map[string]any{"sql": "ALTER TABLE t ADD COLUMN x INT", "dsn": ""}},
-		{name: "wrong type sql", args: map[string]any{"sql": 1, "dsn": "postgres://h:26257/db"}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
-			req := mcpgo.CallToolRequest{}
-			req.Params.Arguments = tc.args
-
-			res, err := handler(context.Background(), req)
-			require.NoError(t, err)
-			require.NotNil(t, res)
-			require.True(t, res.IsError, "expected tool-level error")
-		})
-	}
-}
-
-// TestExplainSchemaChangeHandlerRejectsMalformedTargetVersion confirms
-// per-call target_version validation runs before the cluster dial,
-// matching the explain_sql behavior.
-func TestExplainSchemaChangeHandlerRejectsMalformedTargetVersion(t *testing.T) {
-	handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
-	req := mcpgo.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
-		"sql":            "ALTER TABLE t ADD COLUMN x INT",
-		"dsn":            "postgres://nope:1/db?connect_timeout=1",
-		"target_version": "garbage",
-	}
-
-	res, err := handler(context.Background(), req)
-	require.NoError(t, err)
-	require.True(t, res.IsError, "malformed target_version must surface as a tool error")
-}
-
-// TestExplainSchemaChangeToolAdvertisesTargetVersionParam pins that
-// the MCP schema for explain_schema_change lists target_version among
-// its parameters so clients can discover the override surface from
-// tool metadata.
-func TestExplainSchemaChangeToolAdvertisesTargetVersionParam(t *testing.T) {
-	tool := ExplainSchemaChangeTool()
-	props := tool.InputSchema.Properties
-	require.Contains(t, props, TargetVersionParamName,
-		"explain_schema_change schema must advertise the target_version property")
-}
-
-// TestExplainSchemaChangeHandlerSafetyRejectionSurfacesEnvelopeError
-// verifies that the safety allowlist rejects DDL in the default
-// read_only mode and the rejection lands as an envelope error (not a
-// tool-level error), with no cluster contact. The previous "connect
-// failure" assertion was retired when issue #21 added the safety
-// gate: a DDL inner statement now stops at the AST classifier before
-// any pgwire round-trip.
-func TestExplainSchemaChangeHandlerSafetyRejectionSurfacesEnvelopeError(t *testing.T) {
-	handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
-	req := mcpgo.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
-		"sql": "ALTER TABLE t ADD COLUMN x INT",
-		// DSN points at an unreachable host on purpose: if the safety
-		// check ever stops short-circuiting, this test will fail with
-		// a connect error instead of the safety_violation we expect,
-		// surfacing the regression loudly.
-		"dsn": "postgres://nope:1/db?connect_timeout=1",
-	}
-
-	res, err := handler(context.Background(), req)
-	require.NoError(t, err)
-	env := requireEnvelope(t, res)
-	require.Equal(t, output.TierConnected, env.Tier)
-	require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus,
-		"safety rejection must short-circuit before any cluster contact")
-	require.Len(t, env.Errors, 1)
-	require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
-	require.Equal(t, "ALTER TABLE", env.Errors[0].Context["tag"])
-	require.Equal(t, "read_only", env.Errors[0].Context["mode"])
-}
-
-// TestExplainSchemaChangeHandlerModeWiring exercises the per-mode
-// admit/reject contract through the MCP tool surface: that the mode
-// parameter actually flows into safety.Check with OpExplainDDL, and
-// that the new safe_write/full_access classifiers added in #152 are
-// reachable from the tool layer (not just unit-tested in isolation).
+// TestExplainSQLHandlerDDLAutoDispatchModeWiring exercises the
+// per-mode admit/reject contract for the DDL branch of explain_sql's
+// auto-dispatch (issue #167 folded the former explain_schema_change
+// admission rules into OpExplain). A regression that drops the mode
+// parameter, hard-codes read_only, or inverts the admit/reject
+// decision shows up as a code/context mismatch here.
 //
-// The unreachable DSN serves the same purpose as in the surrounding
-// safety-rejection tests: an admit case must reach the connect step
-// and surface a "connect to CockroachDB" envelope error, while a
-// reject case must short-circuit with a CodeSafetyViolation. A
-// regression that drops the mode parameter, hard-codes read_only, or
-// inverts the admit/reject decision shows up as a code/context
-// mismatch here.
-func TestExplainSchemaChangeHandlerModeWiring(t *testing.T) {
+// The unreachable DSN forces an admit case to land as a connect
+// envelope error (distinct from CodeSafetyViolation), while a reject
+// case short-circuits with CodeSafetyViolation before any cluster
+// contact.
+func TestExplainSQLHandlerDDLAutoDispatchModeWiring(t *testing.T) {
 	tests := []struct {
 		name              string
 		mode              string
@@ -250,16 +158,23 @@ func TestExplainSchemaChangeHandlerModeWiring(t *testing.T) {
 		expectedReasonSub string
 	}{
 		{
-			name:          "safe_write admits ddl",
+			name:          "safe_write admits ddl via auto-dispatch",
 			mode:          "safe_write",
 			sql:           "ALTER TABLE t ADD COLUMN x INT",
 			expectedAdmit: true,
 		},
 		{
-			name:          "full_access admits ddl",
+			name:          "full_access admits ddl via auto-dispatch",
 			mode:          "full_access",
 			sql:           "DROP TABLE users",
 			expectedAdmit: true,
+		},
+		{
+			name:              "read_only rejects ddl with escalation hint",
+			mode:              "read_only",
+			sql:               "ALTER TABLE t ADD COLUMN x INT",
+			expectedTag:       "ALTER TABLE",
+			expectedReasonSub: "rerun with --mode=safe_write or --mode=full_access",
 		},
 		{
 			name:              "safe_write rejects grant as privilege change",
@@ -268,25 +183,11 @@ func TestExplainSchemaChangeHandlerModeWiring(t *testing.T) {
 			expectedTag:       "GRANT",
 			expectedReasonSub: "privilege/role changes require --mode=full_access",
 		},
-		{
-			name:              "safe_write rejects select as non-ddl",
-			mode:              "safe_write",
-			sql:               "SELECT 1",
-			expectedTag:       "SELECT",
-			expectedReasonSub: "explain_ddl requires a DDL statement",
-		},
-		{
-			name:              "full_access rejects select as non-ddl",
-			mode:              "full_access",
-			sql:               "SELECT 1",
-			expectedTag:       "SELECT",
-			expectedReasonSub: "explain_ddl requires a DDL statement",
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
+			handler := ExplainSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
 			req := mcpgo.CallToolRequest{}
 			req.Params.Arguments = map[string]any{
 				"sql":  tc.sql,
@@ -301,9 +202,6 @@ func TestExplainSchemaChangeHandlerModeWiring(t *testing.T) {
 			require.NotEmpty(t, env.Errors)
 
 			if tc.expectedAdmit {
-				// Safety admitted; the unreachable DSN forces a
-				// connect failure, which lands as an envelope error
-				// distinct from CodeSafetyViolation.
 				require.NotEqual(t, output.CodeSafetyViolation, env.Errors[0].Code,
 					"safety must admit; expected connect failure, got safety_violation")
 				require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
@@ -313,7 +211,7 @@ func TestExplainSchemaChangeHandlerModeWiring(t *testing.T) {
 			require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
 			require.Equal(t, tc.expectedTag, env.Errors[0].Context["tag"])
 			require.Equal(t, tc.mode, env.Errors[0].Context["mode"])
-			require.Equal(t, "explain_ddl", env.Errors[0].Context["operation"])
+			require.Equal(t, "explain", env.Errors[0].Context["operation"])
 			require.Contains(t, env.Errors[0].Message, tc.expectedReasonSub)
 		})
 	}
@@ -1734,12 +1632,11 @@ func TestResolveTLSParams(t *testing.T) {
 // the dsn URI string.
 func TestExplainSQLToolAdvertisesTLSParams(t *testing.T) {
 	tools := map[string]mcpgo.Tool{
-		"explain_sql":           ExplainSQLTool(),
-		"explain_schema_change": ExplainSchemaChangeTool(),
-		"execute_sql":           ExecuteSQLTool(),
-		"simulate_sql":          SimulateSQLTool(),
-		"list_tables":           ListTablesTool(),
-		"describe_table":        DescribeTableTool(),
+		"explain_sql":    ExplainSQLTool(),
+		"execute_sql":    ExecuteSQLTool(),
+		"simulate_sql":   SimulateSQLTool(),
+		"list_tables":    ListTablesTool(),
+		"describe_table": DescribeTableTool(),
 	}
 	for name, tool := range tools {
 		t.Run(name, func(t *testing.T) {

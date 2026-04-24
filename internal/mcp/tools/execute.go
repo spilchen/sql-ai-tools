@@ -113,8 +113,8 @@ func ExecuteSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 			env.Errors = append(env.Errors, safety.Envelope(violation))
 			// safety.Envelope carries no Position today, so translate is
 			// a no-op — but run it to stay future-proof if safety later
-			// attaches positions, matching the pattern in explain.go,
-			// explain_schema_change.go, and simulate.go.
+			// attaches positions, matching the pattern in explain.go
+			// and simulate.go.
 			translateErrorPositions(&env, safetyBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}

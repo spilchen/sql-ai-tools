@@ -4,8 +4,8 @@
 // included in the /LICENSE file.
 
 // Package safety implements the Tier 3 statement allowlist that gates
-// every cluster-bound command in crdb-sql (today: explain,
-// explain-ddl). Defense-in-depth at the MCP/CLI layer: even if the
+// every cluster-bound command in crdb-sql (today: explain, simulate,
+// execute). Defense-in-depth at the MCP/CLI layer: even if the
 // downstream cluster's role would permit a write, a SELECT-only Mode
 // rejects the statement before any pgwire round-trip.
 //
@@ -25,10 +25,12 @@
 //
 // Design doc reference: §Safety Model (read_only is the default,
 // safe_write and full_access are opt-in escalations). Issue #21
-// wired read_only end-to-end; issues #29, #151, and #152 wired
-// safe_write/full_access for OpExecute, OpExplain, and OpExplainDDL
-// respectively. OpSimulate still reports "not yet implemented" for
-// safe_write/full_access — wiring it is follow-up work.
+// wired read_only end-to-end; issues #29, #151, #152, and #167 wired
+// safe_write/full_access for OpExecute and OpExplain (where #167
+// folded the former OpExplainDDL admission rules into OpExplain so
+// explain_sql auto-dispatches DDL to EXPLAIN (DDL, SHAPE)). OpSimulate
+// still reports "not yet implemented" for safe_write/full_access —
+// wiring it is follow-up work.
 package safety
 
 import "fmt"
@@ -40,9 +42,10 @@ type Mode string
 
 // Mode values. ModeReadOnly is the default for every Tier 3 command;
 // the other two are recognised by ParseMode and admitted by Check
-// for OpExecute (#29), OpExplain (#151), and OpExplainDDL (#152).
-// For OpSimulate, safe_write and full_access still report "not yet
-// implemented".
+// for OpExecute (#29) and OpExplain (#151, #152, #167 — OpExplain
+// auto-dispatches DDL to EXPLAIN (DDL, SHAPE) under safe_write/
+// full_access). For OpSimulate, safe_write and full_access still
+// report "not yet implemented".
 const (
 	ModeReadOnly   Mode = "read_only"
 	ModeSafeWrite  Mode = "safe_write"

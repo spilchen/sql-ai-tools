@@ -108,8 +108,7 @@ simulate → execute.
 | `parse_sql` | SQL string | Statement type (DDL/DML/DCL/TCL), tag, fingerprint, parser version | 1 |
 | `list_tables` | — | Table names from loaded schema or live catalog | 2-3 |
 | `describe_table` | Table name | Columns, types, constraints, indexes | 2-3 |
-| `explain_sql` | SQL string | EXPLAIN output as structured JSON | 3 |
-| `explain_schema_change` | DDL string | Schema changer plan with phases, elements, operations | 3 |
+| `explain_sql` | SQL string | EXPLAIN output as structured JSON. Auto-dispatches: SELECT/DML through plain `EXPLAIN`, DDL through `EXPLAIN (DDL, SHAPE)` (schema-changer plan with phases, elements, operations). Result keyed by `strategy`. | 3 |
 | `detect_risky_sql` | SQL string | Risk assessment with reason codes, severity, fix hints | 1-3 |
 | `simulate_sql` | SQL string | Per-statement EXPLAIN-based simulation (ANALYZE for SELECT, plain EXPLAIN for DML writes, EXPLAIN (DDL, SHAPE) + table stats for DDL); no inner statement is executed at the cluster level | 3 |
 | `execute_sql` | SQL string | Query results with safety guardrails | 3 |
@@ -120,8 +119,7 @@ simulate → execute.
 crdb-sql validate [--schema FILE] [--output json|text] [-e SQL | FILE | stdin]
 crdb-sql format [--color] [-e SQL | FILE | stdin]  # auto-strips cockroach sql shell prompts
 crdb-sql parse [-e SQL | FILE | stdin]
-crdb-sql explain [--dsn DSN] [-e SQL]
-crdb-sql explain-ddl [--dsn DSN] [-e DDL]
+crdb-sql explain [--dsn DSN] [-e SQL]   # auto-dispatches DDL via EXPLAIN (DDL, SHAPE)
 crdb-sql check [--dsn DSN] [--schema FILE] [-e SQL | FILE]
 ```
 
@@ -428,17 +426,18 @@ Tools that require a higher capability tier return structured
 | `safe_write` | No | Above + INSERT, UPDATE, DELETE, UPSERT | `SET LOCAL sql_safe_updates = on` (cluster rejects bare UPDATE/DELETE), row-scan truncation, statement timeouts |
 | `full_access` | No | Anything that parses (DDL, DCL, etc.) | Row-scan truncation, statement timeouts (audit log planned) |
 
-Mode wiring per Tier 3 surface (issues #29, #151, and #152 land
-`execute_sql`, `explain_sql`, and `explain_schema_change`
-respectively; `simulate_sql` still reports "not yet implemented"
-for `safe_write` / `full_access` — wiring it is follow-up work):
+Mode wiring per Tier 3 surface (issues #29, #151, #152, and #167
+land `execute_sql` and `explain_sql` — issue #167 folded the former
+`explain_schema_change` admission rules into `explain_sql` so DDL
+auto-dispatches to `EXPLAIN (DDL, SHAPE)` under safe_write/full_access;
+`simulate_sql` still reports "not yet implemented" for `safe_write`
+/ `full_access` — wiring it is follow-up work):
 
-| Tool                    | `read_only` | `safe_write` | `full_access` |
-|-------------------------|-------------|--------------|---------------|
-| `execute_sql` / `exec`  | ✅          | ✅           | ✅            |
-| `explain_sql`           | ✅          | ✅           | ✅            |
-| `explain_schema_change` | ✅          | ✅           | ✅            |
-| `simulate_sql`          | ✅          | ⏳           | ⏳            |
+| Tool                   | `read_only` | `safe_write` | `full_access` |
+|------------------------|-------------|--------------|---------------|
+| `execute_sql` / `exec` | ✅          | ✅           | ✅            |
+| `explain_sql`          | ✅          | ✅           | ✅            |
+| `simulate_sql`         | ✅          | ⏳           | ⏳            |
 
 **LIMIT injection** (read_only only): `safety.MaybeInjectLimit` parses
 the SQL and, when the input is a single bare `SELECT` whose result is

@@ -146,8 +146,7 @@ warning so the modification is visible.`,
 				// safety.Envelope carries no Position today, so the
 				// branch below is a no-op. Run it to stay future-proof
 				// if safety later attaches positions, matching the
-				// pattern used by cmd/explain.go, cmd/explain_ddl.go,
-				// and cmd/simulate.go.
+				// pattern used by cmd/explain.go and cmd/simulate.go.
 				if strip.Removed {
 					safetyErr.Position = diag.AdjustPosition(safetyErr.Position, originalSQL, strip.Translate)
 				}

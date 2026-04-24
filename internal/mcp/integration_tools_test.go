@@ -43,7 +43,6 @@ var expectedTools = []string{
 	tools.DetectRiskySQLToolName,
 	tools.SummarizeSQLToolName,
 	tools.ExplainSQLToolName,
-	tools.ExplainSchemaChangeToolName,
 	tools.SimulateSQLToolName,
 	tools.ExecuteSQLToolName,
 	tools.ListTablesToolName,
