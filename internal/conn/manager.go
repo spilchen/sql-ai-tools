@@ -18,10 +18,13 @@ package conn
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
 
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/parser"
+	"github.com/cockroachdb/cockroachdb-parser/pkg/sql/sem/tree"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -346,6 +349,80 @@ func (m *Manager) runExplainDDL(ctx context.Context, sql string) (DDLExplainResu
 		return DDLExplainResult{}, fmt.Errorf("parse EXPLAIN (DDL, SHAPE) output: %w", err)
 	}
 	return DDLExplainResult{Statement: statement, Operations: operations, RawText: text}, nil
+}
+
+// ExplainAnyResult is the discriminated union returned by ExplainAny.
+// Strategy names which EXPLAIN flavor the dispatcher chose; on a
+// successful call exactly one populated pointer is returned
+// (mirroring SimulateStep's per-step result shape so agents that
+// already parse simulate output know how to read this).
+//
+//	strategy = "explain"     → Plan is set    (ExplainResult), DDLPlan is nil.
+//	strategy = "explain_ddl" → DDLPlan is set (DDLExplainResult), Plan is nil.
+//
+// On failure ExplainAny returns the zero value plus a non-nil error,
+// so renderers should only read Plan / DDLPlan after checking err.
+type ExplainAnyResult struct {
+	Strategy Strategy          `json:"strategy"`
+	Plan     *ExplainResult    `json:"plan,omitempty"`
+	DDLPlan  *DDLExplainResult `json:"ddl_plan,omitempty"`
+}
+
+// ExplainAny dispatches a single SQL statement to the right EXPLAIN
+// flavor and returns the result keyed by Strategy. SELECT and DML
+// route to plain `EXPLAIN <stmt>` (Manager.Explain); DDL routes to
+// `EXPLAIN (DDL, SHAPE) <stmt>` (Manager.ExplainDDL). Neither path
+// executes the wrapped statement.
+//
+// Caller contract:
+//   - sql must contain exactly one statement. Multi-statement input is
+//     rejected with a clear error so the caller migrates to Simulate
+//     instead of silently dropping all but the first.
+//   - safety.Check(safety.OpExplain, ...) must have run upstream.
+//     ExplainAny does not re-validate statement classes; a TCL/DCL
+//     input that bypasses the safety gate surfaces here as a "no
+//     route" error, which matches simulate's defense-in-depth posture
+//     rather than misrouting to one of the two backend methods.
+//
+// On any error ExplainAny returns the zero result; the underlying
+// Manager.Explain / Manager.ExplainDDL handle their own
+// connection-recovery sequence so a per-call failure does not leave
+// the Manager in a half-open state.
+func (m *Manager) ExplainAny(ctx context.Context, sql string) (ExplainAnyResult, error) {
+	stmts, err := parser.Parse(sql)
+	if err != nil {
+		return ExplainAnyResult{}, fmt.Errorf("parse explain input: %w", err)
+	}
+	if len(stmts) == 0 {
+		return ExplainAnyResult{}, errors.New("no statements parsed")
+	}
+	if len(stmts) > 1 {
+		return ExplainAnyResult{}, fmt.Errorf(
+			"explain accepts a single statement, got %d (use simulate for multi-statement input)",
+			len(stmts))
+	}
+	ast := stmts[0].AST
+	switch ast.StatementType() {
+	case tree.TypeDDL:
+		ddl, err := m.ExplainDDL(ctx, sql)
+		if err != nil {
+			return ExplainAnyResult{}, err
+		}
+		return ExplainAnyResult{Strategy: StrategyExplainDDL, DDLPlan: &ddl}, nil
+	case tree.TypeDML:
+		plan, err := m.Explain(ctx, sql)
+		if err != nil {
+			return ExplainAnyResult{}, err
+		}
+		return ExplainAnyResult{Strategy: StrategyExplain, Plan: &plan}, nil
+	default:
+		// TCL (BEGIN/COMMIT/ROLLBACK), DCL (GRANT/REVOKE), and other
+		// shapes have no EXPLAIN form. The safety gate at OpExplain
+		// rejects DCL upstream, but a bypass should fail loudly here
+		// rather than misroute to one of the two backend methods.
+		return ExplainAnyResult{}, fmt.Errorf(
+			"explain has no route for statement type %s", ast.StatementTag())
+	}
 }
 
 // Close closes the underlying connection if one was established.

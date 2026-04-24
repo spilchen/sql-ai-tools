@@ -49,8 +49,7 @@ registers in [`internal/mcp/server.go`](internal/mcp/server.go) and
 | `summarize_sql` / `summarize` | 1 | Structured per-statement summary (tables touched, operations). |
 | `list_tables` / `list-tables` | 2-3 | Tables from loaded `--schema` files or a live `--dsn` cluster. |
 | `describe_table` / `describe` | 2-3 | Columns, types, nullability, primary key, indexes. |
-| `explain_sql` / `explain` | 3 | EXPLAIN output as structured JSON. `--mode read_only` (default) admits the read-only set; `--mode safe_write` additionally admits DML so the planner returns a plan for inner writes; `--mode full_access` admits anything that parses (the cluster-side read-only txn wrapper still surfaces SQLSTATE 25006 for inner DDL). Requires `--dsn`. |
-| `explain_schema_change` / `explain-ddl` | 3 | EXPLAIN (DDL, SHAPE) — schema-change plan with phases and operations. The default `read_only` mode rejects every DDL (since DDL modifies schema), so this command requires `--mode safe_write` (admits DDL but rejects DCL/cluster-admin/non-DDL) or `--mode full_access` (admits any DDL that parses). Requires `--dsn`. |
+| `explain_sql` / `explain` | 3 | Plan a single statement without executing it. Auto-dispatches by statement class: SELECT/DML through plain `EXPLAIN` (operator tree), DDL through `EXPLAIN (DDL, SHAPE)` (schema-changer plan with phases and operations). The JSON envelope keys the result by `strategy` (`explain` or `explain_ddl`). `--mode read_only` (default) admits the read-only set; `--mode safe_write` additionally admits DML AND DDL (the auto-dispatched DDL-SHAPE flavor is non-executing); `--mode full_access` admits anything that parses. The cheap default Tier-3 entry point — escalate to `simulate_sql` only when you need measured runtime stats or a row-count probe. Requires `--dsn`. |
 | `simulate_sql` / `simulate` | 3 | Side-effect-free by construction: dispatches each statement to a non-mutating EXPLAIN flavor — SELECT runs through `EXPLAIN ANALYZE` inside `BEGIN READ ONLY` (the read does execute, but writes are blocked at the cluster), DML through plain `EXPLAIN` (planner-only, write never applied), DDL through `EXPLAIN (DDL, SHAPE)` (planner-only). Requires `--dsn`. |
 | `execute_sql` / `exec` | 3 | Run SQL against the cluster behind the safety allowlist. `--mode read_only` (default) admits the same set as `explain`; `--mode safe_write` additionally admits DML; `--mode full_access` admits anything that parses. Schema/privilege/cluster-admin ops require `full_access`. Requires `--dsn`. |
 
@@ -270,10 +269,12 @@ as structured JSON, and `crdb-sql simulate --dsn ... -e "..."` runs a
 side-effect-free dispatch (see the catalog row for the exact rules).
 For actual writes, `crdb-sql exec --dsn ... --mode safe_write -e
 "..."` runs SQL behind the safety allowlist; the default
-`--mode read_only` admits the same shape as `explain`. `crdb-sql
-explain-ddl --dsn ... --mode safe_write -e "ALTER TABLE ..."`
-returns the declarative schema-change plan — read_only rejects DDL
-by design, so this command requires safe_write or full_access.
+`--mode read_only` admits the same shape as `explain`. The same
+`explain` subcommand also auto-dispatches DDL: `crdb-sql explain
+--dsn ... --mode safe_write -e "ALTER TABLE ..."` routes through
+`EXPLAIN (DDL, SHAPE)` and returns the declarative schema-change
+plan — read_only rejects DDL by design, so DDL inputs require
+safe_write or full_access.
 
 ### Connecting to a secure cluster
 
@@ -394,11 +395,11 @@ so configure your editor to run `gofmt`/`goimports` on save.
 ## Project status
 
 Tier 1 and Tier 2 are usable today. Tier 3 connected tools (`ping`,
-`list-tables`, `describe`, `explain`, `explain-ddl`, `simulate`,
-`exec`) work; `exec`, `explain`, and `explain-ddl` honour all three
-safety modes (`read_only`, `safe_write`, `full_access`). `simulate`
-is the remaining Tier 3 surface whose `safe_write`/`full_access`
-wiring is still follow-up work.
+`list-tables`, `describe`, `explain`, `simulate`, `exec`) work;
+`exec` and `explain` (which auto-dispatches DDL via `EXPLAIN (DDL,
+SHAPE)`) honour all three safety modes (`read_only`, `safe_write`,
+`full_access`). `simulate` is the remaining Tier 3 surface whose
+`safe_write`/`full_access` wiring is still follow-up work.
 
 See [`docs/`](docs/) for the design document, hackathon plan, and
 research lessons that inform the architecture.

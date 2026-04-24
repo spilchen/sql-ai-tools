@@ -15,23 +15,21 @@ import (
 
 // Operation identifies the cluster-bound surface that is about to run
 // the user's SQL. The allowlist applies a different rule per
-// (Mode, Operation) pair — for example, OpExplainDDL must accept DDL
-// (otherwise the underlying EXPLAIN (DDL, SHAPE) would always error),
-// while OpExplain must reject it (because the inner statement of plain
-// EXPLAIN is what defines the read/write character of the call).
-// OpSimulate dispatches each statement through a non-executing EXPLAIN
-// flavour, so it admits DDL/DML/SELECT under read_only without ever
-// reaching cluster execution. OpExecute, in contrast, admits the
-// read-only set under read_only, adds DML under safe_write, and
-// admits anything that parses under full_access — the full per-mode
-// matrix in the design doc.
+// (Mode, Operation) pair. OpExplain wraps a single statement in the
+// right EXPLAIN flavor (plain `EXPLAIN` for SELECT/DML, `EXPLAIN
+// (DDL, SHAPE)` for DDL); read_only rejects DDL there, safe_write
+// admits it. OpSimulate dispatches each statement through a
+// non-executing EXPLAIN flavour, so it admits DDL/DML/SELECT under
+// read_only without ever reaching cluster execution. OpExecute, in
+// contrast, admits the read-only set under read_only, adds DML under
+// safe_write, and admits anything that parses under full_access — the
+// full per-mode matrix in the design doc.
 type Operation int
 
 // Operation values. New surfaces extend this enum; the existing rules
 // stay untouched.
 const (
 	OpExplain Operation = iota + 1
-	OpExplainDDL
 	OpSimulate
 	OpExecute
 )
@@ -42,8 +40,6 @@ func (op Operation) String() string {
 	switch op {
 	case OpExplain:
 		return "explain"
-	case OpExplainDDL:
-		return "explain_ddl"
 	case OpSimulate:
 		return "simulate"
 	case OpExecute:
@@ -112,8 +108,8 @@ const (
 	KindUnimplemented
 
 	// KindBadOpInput labels rejections caused by the user passing the
-	// wrong shape of input for the operation — currently only
-	// non-DDL statements to OpExplainDDL.
+	// wrong shape of input for the operation — currently TCL/DCL
+	// statements to OpSimulate, which has no EXPLAIN route for them.
 	KindBadOpInput
 )
 
@@ -143,8 +139,9 @@ type Violation struct {
 	Mode Mode
 
 	// Op is the cluster-bound surface that triggered the check. Lets
-	// agents distinguish "explain rejected DROP TABLE" from
-	// "explain-ddl rejected SELECT", which point at different fixes.
+	// agents distinguish "explain rejected DROP TABLE under read_only"
+	// from "execute rejected INSERT under read_only", which point at
+	// different fixes.
 	Op Operation
 
 	// Kind is the structural reason for the rejection. Used by
@@ -233,10 +230,12 @@ func CheckParsed(mode Mode, op Operation, stmts statements.Statements) *Violatio
 // Mode coverage is intentionally scoped per Operation:
 //
 //   - read_only is wired for every Op via classifyReadOnly.
-//   - safe_write and full_access are wired for OpExecute (issue #29),
-//     OpExplain (issue #151), and OpExplainDDL (issue #152).
-//     OpSimulate in those modes still returns the "not yet
-//     implemented" violation; wiring it is follow-up work.
+//   - safe_write and full_access are wired for OpExecute (issue #29)
+//     and OpExplain (issues #151, #152, #167 — the OpExplain
+//     classifiers admit DDL since explain_sql auto-dispatches DDL to
+//     EXPLAIN (DDL, SHAPE)). OpSimulate in those modes still returns
+//     the "not yet implemented" violation; wiring it is follow-up
+//     work.
 func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 	switch mode {
 	case ModeReadOnly:
@@ -247,8 +246,6 @@ func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 			return classifySafeWriteExecute(stmt)
 		case OpExplain:
 			return classifySafeWriteExplain(stmt)
-		case OpExplainDDL:
-			return classifySafeWriteExplainDDL(stmt)
 		}
 		return notYetImplemented(mode, op, stmt)
 	case ModeFullAccess:
@@ -257,8 +254,6 @@ func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 			return classifyFullAccessExecute(stmt)
 		case OpExplain:
 			return classifyFullAccessExplain(stmt)
-		case OpExplainDDL:
-			return classifyFullAccessExplainDDL(stmt)
 		}
 		return notYetImplemented(mode, op, stmt)
 	default:
@@ -291,24 +286,19 @@ func notYetImplemented(mode Mode, op Operation, stmt tree.Statement) *Violation 
 // Operation because the cluster-side wrapper changes what "read-only"
 // means for the inner statement:
 //
-//   - OpExplain runs `EXPLAIN <inner>`. EXPLAIN does not execute the
-//     inner statement, but agents still benefit from the inner-stmt
-//     guard: it prevents nested EXPLAIN/EXPLAIN ANALYZE wrappers from
-//     bypassing the AST allowlist (since tree.CanWriteData and
-//     tree.CanModifySchema do not descend into *Explain/*ExplainAnalyze
-//     AST nodes — an `EXPLAIN ANALYZE INSERT ...` would otherwise look
-//     read-only at the top level). For the same reason, we reject any
-//     inner statement that itself writes data or modifies schema. The
-//     final allowlist matches the design doc's read-only set
-//     (SELECT/SHOW/etc.).
-//
-//   - OpExplainDDL runs `EXPLAIN (DDL, SHAPE) <inner>`. The inner
-//     statement must be DDL by construction, so a SELECT here is a
-//     user error. But because read_only mode is meant to forbid all
-//     schema modification, we reject DDL too — leaving OpExplainDDL
-//     effectively unusable in read_only mode. Users must escalate to
-//     safe_write or full_access to use explain-ddl. The reason text
-//     names the escalation path so the rejection is actionable.
+//   - OpExplain runs the right EXPLAIN flavor for the inner statement
+//     (plain `EXPLAIN <inner>` for SELECT/DML, `EXPLAIN (DDL, SHAPE)
+//     <inner>` for DDL). EXPLAIN does not execute the inner statement,
+//     but agents still benefit from the inner-stmt guard: it prevents
+//     nested EXPLAIN/EXPLAIN ANALYZE wrappers from bypassing the AST
+//     allowlist (since tree.CanWriteData and tree.CanModifySchema do
+//     not descend into *Explain/*ExplainAnalyze AST nodes — an `EXPLAIN
+//     ANALYZE INSERT ...` would otherwise look read-only at the top
+//     level). For the same reason, we reject any inner statement that
+//     itself writes data or modifies schema. The final allowlist
+//     matches the design doc's read-only set (SELECT/SHOW/etc.); DDL
+//     under read_only is rejected with an actionable hint pointing at
+//     safe_write/full_access.
 func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 	tag := stmt.StatementTag()
 	switch op {
@@ -402,9 +392,19 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 			}
 		}
 		if tree.CanModifySchema(stmt) {
+			reason := "statement modifies schema; read_only mode forbids it"
+			if op == OpExplain {
+				// Explain auto-dispatches DDL to EXPLAIN (DDL, SHAPE),
+				// which compiles a plan without executing it. The mode
+				// gate still rejects DDL under read_only (read_only
+				// forbids all schema modification, planned or not), but
+				// the reason names the escalation path so the
+				// rejection is actionable.
+				reason = "statement modifies schema; rerun with --mode=safe_write or --mode=full_access"
+			}
 			return &Violation{
 				Tag:    tag,
-				Reason: "statement modifies schema; read_only mode forbids it",
+				Reason: reason,
 				Mode:   ModeReadOnly,
 				Op:     op,
 				Kind:   KindSchema,
@@ -420,27 +420,6 @@ func classifyReadOnly(op Operation, stmt tree.Statement) *Violation {
 			}
 		}
 		return nil
-	case OpExplainDDL:
-		if stmt.StatementType() != tree.TypeDDL {
-			return &Violation{
-				Tag:    tag,
-				Reason: "explain_ddl requires a DDL statement",
-				Mode:   ModeReadOnly,
-				Op:     op,
-				Kind:   KindBadOpInput,
-			}
-		}
-		// Inner stmt is DDL, so it modifies schema. read_only mode
-		// forbids all schema modification, including planning.
-		// Surface the escalation path in the reason so the rejection
-		// is actionable.
-		return &Violation{
-			Tag:    tag,
-			Reason: "explain_ddl modifies schema; rerun with --mode=safe_write or --mode=full_access",
-			Mode:   ModeReadOnly,
-			Op:     op,
-			Kind:   KindSchema,
-		}
 	case OpSimulate:
 		// Reject nested EXPLAIN wrappers explicitly. The dispatcher
 		// classifies the inner statement to pick a route, but
@@ -557,20 +536,21 @@ func classifySafeWriteExecute(stmt tree.Statement) *Violation {
 }
 
 // classifySafeWriteExplain is the safe_write rule for OpExplain. The
-// admission set mirrors classifySafeWriteExecute — read-only set plus
-// DML, with DDL and DCL still gated to full_access — so an agent can
-// switch between `explain` and `execute` for the same statement
-// without re-discovering the per-mode matrix.
+// admission set is the read-only set plus DML plus DDL — DDL is
+// admitted (unlike classifySafeWriteExecute) because explain_sql
+// auto-dispatches DDL to `EXPLAIN (DDL, SHAPE)`, which compiles a plan
+// without executing the wrapped DDL. DCL and tenant management still
+// gate to full_access since they reshape cluster-level state regardless
+// of the EXPLAIN wrapper.
 //
-// Plain EXPLAIN (without ANALYZE) does not execute the wrapped
-// statement; the cluster-side BEGIN READ ONLY wrapper in
-// Manager.runExplain is the runtime defense-in-depth. The AST gate
-// here still exists because it is the only layer that can reject DDL
-// before any cluster contact, and because the nested-EXPLAIN guard
-// must also live here (CanWriteData/CanModifySchema do not descend
-// into *Explain/*ExplainAnalyze nodes, so a wrapped INSERT would
-// otherwise be admitted as ordinary DML and the runtime read-only
-// txn would be the only thing catching it).
+// Neither plain EXPLAIN nor EXPLAIN (DDL, SHAPE) executes the wrapped
+// statement. The cluster-side wrappers in Manager.runExplain (BEGIN
+// READ ONLY) and Manager.runExplainDDL (statement_timeout) are the
+// runtime defense-in-depth. The AST gate here still exists because it
+// is the only layer that can reject before any cluster contact, and
+// because the nested-EXPLAIN guard must live here (CanWriteData /
+// CanModifySchema do not descend into *Explain/*ExplainAnalyze nodes,
+// so a wrapped INSERT would otherwise be admitted as ordinary DML).
 func classifySafeWriteExplain(stmt tree.Statement) *Violation {
 	tag := stmt.StatementTag()
 	switch stmt.(type) {
@@ -593,15 +573,6 @@ func classifySafeWriteExplain(stmt tree.Statement) *Violation {
 			Mode:   ModeSafeWrite,
 			Op:     OpExplain,
 			Kind:   KindClusterAdmin,
-		}
-	}
-	if tree.CanModifySchema(stmt) {
-		return &Violation{
-			Tag:    tag,
-			Reason: "statement modifies schema; rerun with --mode=full_access",
-			Mode:   ModeSafeWrite,
-			Op:     OpExplain,
-			Kind:   KindSchema,
 		}
 	}
 	return nil
@@ -738,107 +709,11 @@ func classifyFullAccessExecute(_ tree.Statement) *Violation {
 }
 
 // classifyFullAccessExplain is the full_access rule for OpExplain.
-// Mirrors classifyFullAccessExecute: anything that parses is admitted.
-// Defense-in-depth at runtime is the BEGIN READ ONLY wrapper in
-// Manager.runExplain, which surfaces SQLSTATE 25006 if the planner
-// would otherwise treat the inner statement as a write — the same
-// shape EXPLAIN ANALYZE INSERT already returns under read_only today.
+// Mirrors classifyFullAccessExecute: anything that parses is admitted,
+// including DDL (which auto-dispatches to EXPLAIN (DDL, SHAPE), a
+// non-executing planner call). Defense-in-depth at runtime is the
+// BEGIN READ ONLY wrapper in Manager.runExplain for SELECT/DML and
+// the statement_timeout in Manager.runExplainDDL for DDL.
 func classifyFullAccessExplain(_ tree.Statement) *Violation {
-	return nil
-}
-
-// classifySafeWriteExplainDDL is the safe_write rule for OpExplainDDL.
-// Unlike classifySafeWriteExecute, schema modification is the *intent*
-// of the operation: EXPLAIN (DDL, SHAPE) compiles a DDL plan without
-// executing it, so safe_write admits DDL while still rejecting:
-//
-//   - Nested EXPLAIN wrappers — same defense-in-depth as elsewhere:
-//     the inner stmt is invisible to CanWriteData/CanModifySchema, and
-//     the dispatcher would reject it anyway.
-//   - Privilege/role changes (DCL) — GRANT/REVOKE/CREATE ROLE etc.
-//     escape the "DDL only" framing of explain-ddl and require the
-//     explicit full_access opt-in.
-//   - Cluster-admin DCL and tenant-management DML — same reasoning as
-//     classifySafeWriteExecute: cluster-level state changes need
-//     full_access regardless of operation.
-//   - Non-DDL inputs — EXPLAIN (DDL, SHAPE) only knows how to plan
-//     DDL, so a SELECT/DML here is a user error worth catching before
-//     any cluster contact.
-//
-// Note that DDL is admitted here even though classifySafeWriteExecute
-// rejects it; that asymmetry is the point of OpExplainDDL existing as
-// a separate operation.
-func classifySafeWriteExplainDDL(stmt tree.Statement) *Violation {
-	tag := stmt.StatementTag()
-	switch stmt.(type) {
-	case *tree.Explain, *tree.ExplainAnalyze:
-		return &Violation{
-			Tag:    tag,
-			Reason: "nested EXPLAIN is not permitted; pass the inner statement directly",
-			Mode:   ModeSafeWrite,
-			Op:     OpExplainDDL,
-			Kind:   KindNestedExplain,
-		}
-	}
-	if v := classifyDCL(stmt, tag, ModeSafeWrite, OpExplainDDL); v != nil {
-		return v
-	}
-	if isTenantMgmtDMLStmt(stmt) {
-		return &Violation{
-			Tag:    tag,
-			Reason: clusterAdminReason(stmt, ModeSafeWrite),
-			Mode:   ModeSafeWrite,
-			Op:     OpExplainDDL,
-			Kind:   KindClusterAdmin,
-		}
-	}
-	if stmt.StatementType() != tree.TypeDDL {
-		return &Violation{
-			Tag:    tag,
-			Reason: "explain_ddl requires a DDL statement",
-			Mode:   ModeSafeWrite,
-			Op:     OpExplainDDL,
-			Kind:   KindBadOpInput,
-		}
-	}
-	return nil
-}
-
-// classifyFullAccessExplainDDL is the full_access rule for OpExplainDDL.
-// Mirrors classifyFullAccessExecute's "anything that parses" stance,
-// but still enforces the operation's input contract: EXPLAIN
-// (DDL, SHAPE) has no route for non-DDL statements, and the BadOpInput
-// rejection here gives a more actionable error than the cluster-side
-// failure that would otherwise reach the user. Nested EXPLAIN is also
-// rejected for the same defense-in-depth reasons as elsewhere.
-//
-// Note the asymmetry vs classifySafeWriteExplainDDL: full_access
-// deliberately skips the classifyDCL and isTenantMgmtDMLStmt gates,
-// so privilege/role changes and tenant-management statements fall
-// through to the non-DDL gate and reject as KindBadOpInput rather
-// than KindPrivilege/KindClusterAdmin. That matches
-// classifyFullAccessExecute's "trust the explicit opt-in" posture
-// while still surfacing a sensible error at the AST layer.
-func classifyFullAccessExplainDDL(stmt tree.Statement) *Violation {
-	tag := stmt.StatementTag()
-	switch stmt.(type) {
-	case *tree.Explain, *tree.ExplainAnalyze:
-		return &Violation{
-			Tag:    tag,
-			Reason: "nested EXPLAIN is not permitted; pass the inner statement directly",
-			Mode:   ModeFullAccess,
-			Op:     OpExplainDDL,
-			Kind:   KindNestedExplain,
-		}
-	}
-	if stmt.StatementType() != tree.TypeDDL {
-		return &Violation{
-			Tag:    tag,
-			Reason: "explain_ddl requires a DDL statement",
-			Mode:   ModeFullAccess,
-			Op:     OpExplainDDL,
-			Kind:   KindBadOpInput,
-		}
-	}
 	return nil
 }

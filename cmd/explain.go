@@ -22,20 +22,23 @@ import (
 )
 
 // newExplainCmd builds the `crdb-sql explain` subcommand. It runs
-// `EXPLAIN <stmt>` against the cluster identified by --dsn (or the
-// CRDB_DSN env var) and renders the resulting plan tree.
+// the appropriate EXPLAIN flavor against the cluster identified by
+// --dsn (or the CRDB_DSN env var) and renders the resulting plan.
 //
 // Input modes mirror format/parse/validate: -e for inline SQL, a
 // positional file argument, or stdin. Output modes mirror ping: text
-// (the raw EXPLAIN tabular rows) and json (structured envelope with
-// header, plan tree, and raw rows).
+// (the raw EXPLAIN tabular rows for SELECT/DML, the raw SHAPE output
+// for DDL) and json (structured envelope keyed by `strategy`).
 //
 // This is a Tier 3 (connected) command. The --mode flag (default
 // read_only) and --timeout flag (default 30s) gate the cluster call:
 // the safety allowlist (internal/safety) rejects DML/DDL inner
-// statements before any pgwire round-trip, and the read-only
-// transaction wrapper inside conn.Manager applies the statement
-// timeout for defense-in-depth.
+// statements before any pgwire round-trip when read_only is in
+// effect, and the cluster-side transaction wrapper inside conn.Manager
+// applies the statement timeout for defense-in-depth. Auto-dispatch
+// picks the EXPLAIN flavor based on the statement class: SELECT/DML
+// runs through plain `EXPLAIN`, DDL runs through `EXPLAIN (DDL,
+// SHAPE)`. Neither flavor executes the wrapped statement.
 func newExplainCmd(state *rootState) *cobra.Command {
 	var (
 		expr    string
@@ -46,18 +49,23 @@ func newExplainCmd(state *rootState) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "explain [file]",
 		Short: "Run EXPLAIN against the cluster and return the plan as structured JSON",
-		Long: `Connect to a CockroachDB cluster and run EXPLAIN against the supplied
-DML statement. The wrapped statement is not executed. Input is read from
-the -e flag (inline SQL), a positional file argument, or stdin. The
-connection string is read from --dsn or CRDB_DSN (flag wins).
+		Long: `Connect to a CockroachDB cluster and run the appropriate EXPLAIN
+flavor for the supplied statement. The wrapped statement is not
+executed. Input is read from the -e flag (inline SQL), a positional
+file argument, or stdin. The connection string is read from --dsn or
+CRDB_DSN (flag wins).
+
+Auto-dispatch by statement class:
+  - SELECT / DML  → plain EXPLAIN (operator tree, header, raw rows)
+  - DDL           → EXPLAIN (DDL, SHAPE) (declarative schema-changer
+                    plan, canonicalized statement, raw text)
 
 The --mode flag selects the safety policy applied before the cluster
 call. Default is "read_only", which permits SELECT, SHOW, and other
 non-mutating statements. "safe_write" additionally admits DML
-(INSERT/UPDATE/DELETE/UPSERT) so the planner can return a plan for
-the inner write. "full_access" admits any parsed statement; the
-cluster's read-only transaction wrapper still surfaces SQLSTATE 25006
-for inner DDL the planner refuses to plan under read-only.
+(INSERT/UPDATE/DELETE/UPSERT) AND DDL — the auto-dispatched EXPLAIN
+(DDL, SHAPE) plans the schema change without executing it.
+"full_access" admits any parsed statement.
 
 Pasted output from a cockroach sql REPL session is auto-cleaned: primary
 prompts (user@host:port/db>) and continuation prompts (->) are stripped
@@ -118,7 +126,7 @@ warning so the modification is visible.`,
 			mgr := conn.NewManager(state.dsn, conn.WithStatementTimeout(timeout))
 			defer mgr.Close(cmd.Context()) //nolint:errcheck // best-effort cleanup
 
-			result, err := mgr.Explain(cmd.Context(), sql)
+			result, err := mgr.ExplainAny(cmd.Context(), sql)
 			if err != nil {
 				clusterErr := diag.FromClusterError(err, sql)
 				if strip.Removed {
@@ -136,21 +144,47 @@ warning so the modification is visible.`,
 			baseEnv.Data = data
 
 			return r.Render(baseEnv, func(w io.Writer) error {
-				for _, row := range result.RawRows {
-					if _, werr := fmt.Fprintln(w, row); werr != nil {
-						return werr
-					}
-				}
-				return nil
+				return renderExplainAny(w, result)
 			})
 		},
 	}
 
-	cmd.Flags().StringVarP(&expr, "expression", "e", "", "inline SQL to explain")
+	cmd.Flags().StringVarP(&expr, "expression", "e", "", "inline SQL to explain (SELECT, DML, or DDL)")
 	cmd.Flags().StringVar(&mode, "mode", string(safety.DefaultMode),
 		"safety mode: read_only (default), safe_write, full_access")
 	cmd.Flags().DurationVar(&timeout, "timeout", conn.DefaultStatementTimeout,
 		"statement timeout for the wrapped EXPLAIN call")
 
 	return cmd
+}
+
+// renderExplainAny writes the text-mode rendering of an ExplainAny
+// result to w. Each strategy round-trips the cluster's native EXPLAIN
+// output verbatim — for SELECT/DML, the tabular operator tree as
+// `cockroach sql` would print it; for DDL, the multi-line SHAPE
+// output. A regression here would diverge from the expectation that
+// `crdb-sql explain ... | diff <(cockroach sql -e "EXPLAIN ...")` is
+// a no-op.
+//
+// The conn.Strategy enum is shared with simulate (it carries
+// StrategyExplainAnalyze too, which simulate uses for SELECT
+// dispatch). ExplainAny only ever populates StrategyExplain or
+// StrategyExplainDDL; an unexpected value here means the dispatcher
+// grew a branch the renderer doesn't know how to draw, and we fail
+// loud rather than nil-deref result.Plan.
+func renderExplainAny(w io.Writer, result conn.ExplainAnyResult) error {
+	switch result.Strategy {
+	case conn.StrategyExplain:
+		for _, row := range result.Plan.RawRows {
+			if _, err := fmt.Fprintln(w, row); err != nil {
+				return err
+			}
+		}
+		return nil
+	case conn.StrategyExplainDDL:
+		_, err := io.WriteString(w, result.DDLPlan.RawText)
+		return err
+	default:
+		return fmt.Errorf("explain: unknown strategy %q", result.Strategy)
+	}
 }

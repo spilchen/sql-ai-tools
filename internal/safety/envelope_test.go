@@ -38,17 +38,17 @@ func TestEnvelope(t *testing.T) {
 }
 
 func TestEnvelopeExplainDDLSuggestion(t *testing.T) {
-	// classifyReadOnly's OpExplainDDL branch tags every reachable
-	// rejection as KindSchema (KindBadOpInput is short-circuited at
-	// the top of escalationTargetFor). safe_write is the smallest
-	// mode that admits DDL on the explain-ddl path
-	// (classifySafeWriteExplainDDL). This pins that contract — a
-	// regression suggesting full_access here would skip the
-	// least-privilege step.
+	// Under read_only/OpExplain, a KindSchema rejection escalates to
+	// safe_write — the smallest mode that admits DDL on the
+	// auto-dispatching explain_sql path (classifySafeWriteExplain
+	// admits DDL since #167). This is asymmetric with OpExecute, where
+	// KindSchema jumps to full_access because safe_write/OpExecute
+	// rejects DDL. A regression suggesting full_access here would skip
+	// the least-privilege step.
 	e := safety.Envelope(&safety.Violation{
 		Tag:  "CREATE TABLE",
 		Mode: safety.ModeReadOnly,
-		Op:   safety.OpExplainDDL,
+		Op:   safety.OpExplain,
 		Kind: safety.KindSchema,
 	})
 	require.Len(t, e.Suggestions, 1)
@@ -71,102 +71,90 @@ func TestEnvelopeNoSuggestionForUnimplementedModes(t *testing.T) {
 }
 
 func TestEnvelopeExecuteAndExplainSuggestions(t *testing.T) {
-	// OpExecute and OpExplain share the same escalation matrix
-	// (issue #151 wired OpExplain to mirror OpExecute's per-Kind
-	// behavior). The matrix is asymmetric: a write under read_only
-	// escalates to safe_write (the smallest bump), but schema changes
-	// and DCL under read_only must jump to full_access because
-	// safe_write itself rejects them. A safe_write rejection of
-	// schema/DCL escalates to full_access — there's no intermediate
-	// stop. The decision is driven by Violation.Kind, not by the
-	// human-readable Reason text, so wording tweaks in the classifier
-	// cannot silently break the escalation contract.
-	//
-	// Running the same matrix against both ops pins that any future
-	// refactor that diverges OpExplain from OpExecute would surface
-	// here — losing the parallel would silently break agents that
-	// switch between the two surfaces for the same statement.
+	// OpExecute and OpExplain share the escalation matrix for most
+	// Kinds: writes go to safe_write, DCL/cluster-admin rejections jump
+	// to full_access. They diverge for KindSchema because OpExplain
+	// auto-dispatches DDL to EXPLAIN (DDL, SHAPE) and admits DDL under
+	// safe_write (#167), while OpExecute reserves schema mutation for
+	// full_access. The decision is driven by Violation.Kind (and Op
+	// where they diverge), not by the human-readable Reason text, so
+	// wording tweaks in the classifier cannot silently break the
+	// escalation contract.
 	cases := []struct {
 		name                string
 		mode                safety.Mode
+		op                  safety.Operation
 		kind                safety.ViolationKind
 		expectedReplacement safety.Mode
 	}{
-		{
-			name:                "write under read_only suggests safe_write",
-			mode:                safety.ModeReadOnly,
-			kind:                safety.KindWrite,
-			expectedReplacement: safety.ModeSafeWrite,
-		},
-		{
-			name:                "schema change under read_only suggests full_access",
-			mode:                safety.ModeReadOnly,
-			kind:                safety.KindSchema,
-			expectedReplacement: safety.ModeFullAccess,
-		},
-		{
-			name:                "privilege change under read_only suggests full_access",
-			mode:                safety.ModeReadOnly,
-			kind:                safety.KindPrivilege,
-			expectedReplacement: safety.ModeFullAccess,
-		},
-		{
-			name:                "cluster admin under read_only suggests full_access",
-			mode:                safety.ModeReadOnly,
-			kind:                safety.KindClusterAdmin,
-			expectedReplacement: safety.ModeFullAccess,
-		},
-		{
-			name:                "schema change under safe_write suggests full_access",
-			mode:                safety.ModeSafeWrite,
-			kind:                safety.KindSchema,
-			expectedReplacement: safety.ModeFullAccess,
-		},
-		{
-			name:                "privilege change under safe_write suggests full_access",
-			mode:                safety.ModeSafeWrite,
-			kind:                safety.KindPrivilege,
-			expectedReplacement: safety.ModeFullAccess,
-		},
-		{
-			name:                "cluster admin under safe_write suggests full_access",
-			mode:                safety.ModeSafeWrite,
-			kind:                safety.KindClusterAdmin,
-			expectedReplacement: safety.ModeFullAccess,
-		},
+		// Shared rows.
+		{name: "execute write under read_only suggests safe_write",
+			mode: safety.ModeReadOnly, op: safety.OpExecute, kind: safety.KindWrite,
+			expectedReplacement: safety.ModeSafeWrite},
+		{name: "explain write under read_only suggests safe_write",
+			mode: safety.ModeReadOnly, op: safety.OpExplain, kind: safety.KindWrite,
+			expectedReplacement: safety.ModeSafeWrite},
+		{name: "execute privilege under read_only suggests full_access",
+			mode: safety.ModeReadOnly, op: safety.OpExecute, kind: safety.KindPrivilege,
+			expectedReplacement: safety.ModeFullAccess},
+		{name: "explain privilege under read_only suggests full_access",
+			mode: safety.ModeReadOnly, op: safety.OpExplain, kind: safety.KindPrivilege,
+			expectedReplacement: safety.ModeFullAccess},
+		{name: "execute cluster admin under read_only suggests full_access",
+			mode: safety.ModeReadOnly, op: safety.OpExecute, kind: safety.KindClusterAdmin,
+			expectedReplacement: safety.ModeFullAccess},
+		{name: "explain cluster admin under read_only suggests full_access",
+			mode: safety.ModeReadOnly, op: safety.OpExplain, kind: safety.KindClusterAdmin,
+			expectedReplacement: safety.ModeFullAccess},
+		{name: "execute privilege under safe_write suggests full_access",
+			mode: safety.ModeSafeWrite, op: safety.OpExecute, kind: safety.KindPrivilege,
+			expectedReplacement: safety.ModeFullAccess},
+		{name: "explain privilege under safe_write suggests full_access",
+			mode: safety.ModeSafeWrite, op: safety.OpExplain, kind: safety.KindPrivilege,
+			expectedReplacement: safety.ModeFullAccess},
+		{name: "execute cluster admin under safe_write suggests full_access",
+			mode: safety.ModeSafeWrite, op: safety.OpExecute, kind: safety.KindClusterAdmin,
+			expectedReplacement: safety.ModeFullAccess},
+		{name: "explain cluster admin under safe_write suggests full_access",
+			mode: safety.ModeSafeWrite, op: safety.OpExplain, kind: safety.KindClusterAdmin,
+			expectedReplacement: safety.ModeFullAccess},
+
+		// Divergent: OpExecute schema → full_access (safe_write rejects
+		// DDL on execute), OpExplain schema → safe_write (auto-dispatch
+		// admits DDL).
+		{name: "execute schema under read_only suggests full_access",
+			mode: safety.ModeReadOnly, op: safety.OpExecute, kind: safety.KindSchema,
+			expectedReplacement: safety.ModeFullAccess},
+		{name: "explain schema under read_only suggests safe_write",
+			mode: safety.ModeReadOnly, op: safety.OpExplain, kind: safety.KindSchema,
+			expectedReplacement: safety.ModeSafeWrite},
+		{name: "execute schema under safe_write suggests full_access",
+			mode: safety.ModeSafeWrite, op: safety.OpExecute, kind: safety.KindSchema,
+			expectedReplacement: safety.ModeFullAccess},
 	}
 
-	ops := []struct {
-		name string
-		op   safety.Operation
-	}{
-		{name: "execute", op: safety.OpExecute},
-		{name: "explain", op: safety.OpExplain},
-	}
-
-	for _, op := range ops {
-		for _, tc := range cases {
-			t.Run(op.name+"/"+tc.name, func(t *testing.T) {
-				e := safety.Envelope(&safety.Violation{
-					Tag:  "ANY",
-					Mode: tc.mode,
-					Op:   op.op,
-					Kind: tc.kind,
-				})
-				require.Len(t, e.Suggestions, 1)
-				require.Equal(t, string(tc.expectedReplacement), e.Suggestions[0].Replacement)
-				require.Equal(t, "safety_mode_escalation", e.Suggestions[0].Reason)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := safety.Envelope(&safety.Violation{
+				Tag:  "ANY",
+				Mode: tc.mode,
+				Op:   tc.op,
+				Kind: tc.kind,
 			})
-		}
+			require.Len(t, e.Suggestions, 1)
+			require.Equal(t, string(tc.expectedReplacement), e.Suggestions[0].Replacement)
+			require.Equal(t, "safety_mode_escalation", e.Suggestions[0].Reason)
+		})
 	}
 }
 
 func TestEnvelopeNoSuggestionForUnactionableKinds(t *testing.T) {
 	// Some rejections cannot be unblocked by mode escalation —
 	// nested EXPLAIN wrappers, the empty-input defensive case,
-	// unknown-mode programmer errors, and explain-DDL-with-non-DDL.
-	// suggestionsFor must return no escalation hint for these so
-	// agents don't burn a retry on a mode that won't help.
+	// unknown-mode programmer errors, and bad-input-shape rejections
+	// (e.g. simulate's TCL/DCL no-route case). suggestionsFor must
+	// return no escalation hint for these so agents don't burn a
+	// retry on a mode that won't help.
 	tests := []struct {
 		name string
 		mode safety.Mode
@@ -175,7 +163,7 @@ func TestEnvelopeNoSuggestionForUnactionableKinds(t *testing.T) {
 	}{
 		{name: "nested explain", mode: safety.ModeReadOnly, op: safety.OpExecute, kind: safety.KindNestedExplain},
 		{name: "empty input", mode: safety.ModeReadOnly, op: safety.OpExecute, kind: safety.KindOther},
-		{name: "explain_ddl wrong input shape", mode: safety.ModeReadOnly, op: safety.OpExplainDDL, kind: safety.KindBadOpInput},
+		{name: "simulate no-route input", mode: safety.ModeReadOnly, op: safety.OpSimulate, kind: safety.KindBadOpInput},
 	}
 
 	for _, tc := range tests {

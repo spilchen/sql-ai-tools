@@ -88,10 +88,10 @@ func suggestionsFor(v *Violation) []output.Suggestion {
 //
 // Unactionable Kinds short-circuit at the top: nested-EXPLAIN
 // wrappers, the empty-input defensive case, unimplemented (mode, op)
-// pairs, and explain-DDL wrong-input-shape rejections all need the
-// caller to fix the input or wait for upstream work, not to bump the
-// mode. Producing a hint anyway would burn an agent's retry on a
-// path that cannot succeed.
+// pairs, and bad-input-shape rejections all need the caller to fix
+// the input or wait for upstream work, not to bump the mode.
+// Producing a hint anyway would burn an agent's retry on a path that
+// cannot succeed.
 func escalationTargetFor(v *Violation) (Mode, bool) {
 	switch v.Kind {
 	case KindNestedExplain, KindUnimplemented, KindBadOpInput, KindOther:
@@ -101,33 +101,34 @@ func escalationTargetFor(v *Violation) (Mode, bool) {
 	case ModeReadOnly:
 		switch v.Op {
 		case OpExplain, OpExecute:
-			// OpExplain and OpExecute share the same escalation
-			// matrix because their safe_write/full_access
-			// classifiers admit the same per-Kind set: writes go to
-			// safe_write, schema/DCL skip straight to full_access.
-			// Suggesting safe_write for a KindSchema rejection here
-			// would loop the agent — the safe_write classifier also
-			// rejects schema mutations.
+			// OpExplain and OpExecute share the same escalation matrix
+			// for the non-DDL Kinds (writes go to safe_write, DCL goes
+			// to full_access). They diverge for KindSchema: OpExplain
+			// auto-dispatches DDL to EXPLAIN (DDL, SHAPE) and so
+			// admits DDL under safe_write, while OpExecute reserves
+			// schema mutation for full_access. Picking the smallest
+			// mode that admits the call avoids looping the agent on a
+			// retry that the next-tier classifier would also reject.
 			switch v.Kind {
 			case KindWrite:
 				return ModeSafeWrite, true
-			case KindSchema, KindPrivilege, KindClusterAdmin:
+			case KindSchema:
+				if v.Op == OpExplain {
+					return ModeSafeWrite, true
+				}
+				return ModeFullAccess, true
+			case KindPrivilege, KindClusterAdmin:
 				return ModeFullAccess, true
 			}
-		case OpExplainDDL:
-			// classifyReadOnly's OpExplainDDL branch tags every
-			// rejection that reaches here as KindSchema (the DDL
-			// itself); KindBadOpInput from non-DDL inputs is
-			// short-circuited at the top of this function. safe_write
-			// is the smallest mode that admits DDL on the
-			// explain-ddl path (per classifySafeWriteExplainDDL),
-			// so the smallest-bump principle picks it.
-			return ModeSafeWrite, true
 		}
 	case ModeSafeWrite:
 		switch v.Op {
 		case OpExplain, OpExecute:
-			// Same shared matrix as the read_only arm above.
+			// Same shared matrix as the read_only arm above. Note
+			// classifySafeWriteExplain admits DDL for OpExplain, so
+			// KindSchema cannot reach here for OpExplain — the entry
+			// is only relevant to OpExecute, which still gates DDL to
+			// full_access.
 			switch v.Kind {
 			case KindSchema, KindPrivilege, KindClusterAdmin:
 				return ModeFullAccess, true

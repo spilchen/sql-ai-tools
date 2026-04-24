@@ -9,8 +9,8 @@
 // tools (parse_sql, validate_sql, format_sql, detect_risky_sql,
 // summarize_sql), two Tier 2 catalog tools (list_tables,
 // describe_table) that operate on inline CREATE TABLE schemas, and
-// four Tier 3 connected tools (explain_sql, explain_schema_change,
-// simulate_sql, execute_sql) that run against a live cluster.
+// three Tier 3 connected tools (explain_sql, simulate_sql,
+// execute_sql) that run against a live cluster.
 // validate_sql is dual-tier: it runs Tier 1 by default and lifts to
 // Tier 2 (name resolution) when the caller supplies inline schemas.
 // Keeping construction pure (no transport, no I/O) lets the cmd layer
@@ -111,13 +111,13 @@ func WithBuiltQuarter(q versionroute.Quarter) Option {
 // returned server has no transport bound; callers wire it to stdio
 // (or, in the future, sse/http) themselves.
 //
-// Per-call routing wiring: the nine parser-dependent tool handlers
+// Per-call routing wiring: the eight parser-dependent tool handlers
 // (parse_sql, validate_sql, format_sql, detect_risky_sql,
-// summarize_sql, explain_sql, explain_schema_change, simulate_sql,
-// execute_sql) are wrapped with withRouting so a target_version
-// whose quarter differs from the running binary forwards to a
-// sibling backend. The three tools that don't take target_version
-// (ping, list_tables, describe_table) are registered unwrapped.
+// summarize_sql, explain_sql, simulate_sql, execute_sql) are wrapped
+// with withRouting so a target_version whose quarter differs from the
+// running binary forwards to a sibling backend. The three tools that
+// don't take target_version (ping, list_tables, describe_table) are
+// registered unwrapped.
 func NewServer(
 	crdbSQLVersion, parserVersion, defaultTargetVersion string, opts ...Option,
 ) *server.MCPServer {
@@ -160,7 +160,6 @@ func NewServer(
 	s.AddTool(tools.DetectRiskySQLTool(), route(tools.DetectRiskySQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.SummarizeSQLTool(), route(tools.SummarizeSQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.ExplainSQLTool(), route(tools.ExplainSQLHandler(parserVersion, defaultTargetVersion)))
-	s.AddTool(tools.ExplainSchemaChangeTool(), route(tools.ExplainSchemaChangeHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.SimulateSQLTool(), route(tools.SimulateSQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.ExecuteSQLTool(), route(tools.ExecuteSQLHandler(parserVersion, defaultTargetVersion)))
 	s.AddTool(tools.ListTablesTool(), tools.ListTablesHandler(parserVersion))

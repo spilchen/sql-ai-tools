@@ -126,7 +126,6 @@ func TestPreprocessTier3ToolsEmitWarningOnMessyPaste(t *testing.T) {
 		handler func(context.Context, mcpgo.CallToolRequest) (*mcpgo.CallToolResult, error)
 	}{
 		{name: "explain_sql", handler: ExplainSQLHandler(testParserVersion, "")},
-		{name: "explain_schema_change", handler: ExplainSchemaChangeHandler(testParserVersion, "")},
 		{name: "simulate_sql", handler: SimulateSQLHandler(testParserVersion, "")},
 		{name: "execute_sql", handler: ExecuteSQLHandler(testParserVersion, "")},
 	}
@@ -198,8 +197,7 @@ func TestPreprocessIsNoOpForNonPasteInput(t *testing.T) {
 // capability_required (name resolution skipped). A regression that
 // reverted the append-based envelope handling to assignment would
 // drop one of the two — exactly the bug the override-to-append
-// migration in the explain/explain_schema_change/simulate handlers
-// was meant to prevent.
+// migration in the explain/simulate handlers was meant to prevent.
 func TestPreprocessValidateSQLKeepsCapabilityRequired(t *testing.T) {
 	handler := ValidateSQLHandler(testParserVersion, "")
 	env := callHandlerWithSQL(t, handler, messySQL)
@@ -221,8 +219,8 @@ func TestPreprocessValidateSQLKeepsCapabilityRequired(t *testing.T) {
 // surface BOTH the input_preprocessed warning AND the underlying
 // connect failure. The override-to-append migration in this PR
 // changed `env.Errors = []output.Error{...}` to `append(...)` in
-// explain/explain_schema_change/simulate; this test would catch a
-// future regression that re-introduced overwrite semantics.
+// explain/simulate; this test would catch a future regression that
+// re-introduced overwrite semantics.
 func TestPreprocessTier3PreservesConnectFailure(t *testing.T) {
 	tools := []struct {
 		name    string

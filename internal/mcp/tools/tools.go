@@ -7,9 +7,11 @@
 // tools. The Tier 1 (zero-config) tools are parse_sql, validate_sql,
 // format_sql, detect_risky_sql, and summarize_sql; the Tier 2
 // (schema_file) tools are list_tables and describe_table; the Tier 3
-// (connected) tools are explain_sql, explain_schema_change, and
-// execute_sql, which require a per-call DSN since the MCP server
-// holds no per-session connection state.
+// (connected) tools are explain_sql, simulate_sql, and execute_sql,
+// which require a per-call DSN since the MCP server holds no
+// per-session connection state. explain_sql auto-dispatches DDL to
+// EXPLAIN (DDL, SHAPE) and SELECT/DML to plain EXPLAIN, so a single
+// tool covers the full "plan without executing" surface.
 //
 // Each handler returns the same output.Envelope JSON shape that the CLI
 // emits under --output=json, so MCP clients get structured errors,
@@ -37,17 +39,16 @@ import (
 
 // Registered MCP tool names.
 const (
-	ParseSQLToolName            = "parse_sql"
-	ValidateSQLToolName         = "validate_sql"
-	FormatSQLToolName           = "format_sql"
-	DetectRiskySQLToolName      = "detect_risky_sql"
-	SummarizeSQLToolName        = "summarize_sql"
-	ExplainSQLToolName          = "explain_sql"
-	ExplainSchemaChangeToolName = "explain_schema_change"
-	SimulateSQLToolName         = "simulate_sql"
-	ExecuteSQLToolName          = "execute_sql"
-	ListTablesToolName          = "list_tables"
-	DescribeTableToolName       = "describe_table"
+	ParseSQLToolName       = "parse_sql"
+	ValidateSQLToolName    = "validate_sql"
+	FormatSQLToolName      = "format_sql"
+	DetectRiskySQLToolName = "detect_risky_sql"
+	SummarizeSQLToolName   = "summarize_sql"
+	ExplainSQLToolName     = "explain_sql"
+	SimulateSQLToolName    = "simulate_sql"
+	ExecuteSQLToolName     = "execute_sql"
+	ListTablesToolName     = "list_tables"
+	DescribeTableToolName  = "describe_table"
 )
 
 // TargetVersionParamName is the optional MCP tool parameter name that
@@ -83,12 +84,13 @@ const ModeParamName = "mode"
 // mode parameter so every Tier 3 tool documents the argument
 // identically. The accepted set is the same across tools, but the
 // modes that any given tool actually admits depend on the tool:
-// execute_sql, explain_sql, and explain_schema_change all wire
-// safe_write and full_access today. For explain_schema_change,
-// read_only rejects every DDL — use safe_write or full_access
-// instead. The per-tool wording stays accurate via the envelope's
-// safety_violation Reason.
-const ModeParamDescription = `Optional safety mode applied before any cluster contact. Defaults to "read_only", which permits non-mutating statements only. "safe_write" additionally admits INSERT/UPDATE/DELETE; "full_access" admits any parsed statement. For explain_schema_change, "read_only" rejects every DDL — use "safe_write" or "full_access" instead.`
+// execute_sql and explain_sql wire safe_write and full_access today.
+// For explain_sql, "read_only" rejects DDL — use "safe_write" or
+// "full_access" to plan a DDL statement (the auto-dispatch routes it
+// to EXPLAIN (DDL, SHAPE), which compiles a plan without executing
+// the wrapped DDL). The per-tool wording stays accurate via the
+// envelope's safety_violation Reason.
+const ModeParamDescription = `Optional safety mode applied before any cluster contact. Defaults to "read_only", which permits non-mutating statements only. "safe_write" additionally admits INSERT/UPDATE/DELETE; "full_access" admits any parsed statement. For explain_sql, "read_only" rejects DDL — use "safe_write" or "full_access" to plan a DDL statement (auto-dispatched to EXPLAIN (DDL, SHAPE)).`
 
 // StatementTimeoutParamName is the optional MCP tool parameter name
 // that lets a client override the per-call SET LOCAL statement_timeout

@@ -76,245 +76,37 @@ func TestCheckReadOnlyExplain(t *testing.T) {
 	}
 }
 
-func TestCheckReadOnlyExplainDDL(t *testing.T) {
-	// In read_only mode, OpExplainDDL rejects everything: DDL because
-	// it modifies schema, non-DDL because explain-ddl requires a DDL
-	// inner stmt. The two reject reasons differ — that distinction is
-	// the load-bearing assertion below.
+func TestCheckReadOnlyExplainDDLEscalationHint(t *testing.T) {
+	// Under read_only, OpExplain rejects DDL with a reason text that
+	// names the escalation path so the rejection is actionable. The
+	// hint is load-bearing for agents migrating off the deleted
+	// explain_schema_change tool, where the equivalent text lived on
+	// OpExplainDDL.
 	tests := []struct {
-		name           string
-		sql            string
-		expectedReason string
+		name string
+		sql  string
 	}{
-		{
-			name:           "ddl rejected with escalation hint",
-			sql:            "ALTER TABLE x ADD COLUMN y INT",
-			expectedReason: "rerun with --mode=safe_write or --mode=full_access",
-		},
-		{
-			name:           "create table rejected with escalation hint",
-			sql:            "CREATE TABLE x (id INT PRIMARY KEY)",
-			expectedReason: "rerun with --mode=safe_write or --mode=full_access",
-		},
-		{
-			name:           "select rejected as non-ddl",
-			sql:            "SELECT 1",
-			expectedReason: "explain_ddl requires a DDL statement",
-		},
-		{
-			name:           "insert rejected as non-ddl",
-			sql:            "INSERT INTO t VALUES (1)",
-			expectedReason: "explain_ddl requires a DDL statement",
-		},
+		{name: "alter table", sql: "ALTER TABLE x ADD COLUMN y INT"},
+		{name: "create table", sql: "CREATE TABLE x (id INT PRIMARY KEY)"},
+		{name: "drop table", sql: "DROP TABLE x"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			v, err := safety.Check(safety.ModeReadOnly, safety.OpExplainDDL, tc.sql)
+			v, err := safety.Check(safety.ModeReadOnly, safety.OpExplain, tc.sql)
 			require.NoError(t, err)
 			require.NotNil(t, v)
-			require.Contains(t, v.Reason, tc.expectedReason)
-		})
-	}
-}
-
-func TestCheckSafeWriteExplainDDL(t *testing.T) {
-	// safe_write admits DDL — the whole point of OpExplainDDL is to
-	// plan a schema change without executing it, so the safe_write/DDL
-	// asymmetry with classifySafeWriteExecute is intentional. DCL,
-	// cluster admin, tenant management, nested EXPLAIN, and non-DDL
-	// inputs are still rejected.
-	tests := []struct {
-		name           string
-		sql            string
-		expectedReject bool
-		expectedKind   safety.ViolationKind
-		expectedReason string
-	}{
-		{name: "alter table add column admitted",
-			sql: "ALTER TABLE x ADD COLUMN y INT"},
-		{name: "create table admitted",
-			sql: "CREATE TABLE x (id INT PRIMARY KEY)"},
-		{name: "drop table admitted",
-			sql: "DROP TABLE x"},
-		{name: "create index admitted",
-			sql: "CREATE INDEX i ON t (c)"},
-
-		{name: "select rejected as non-ddl",
-			sql:            "SELECT 1",
-			expectedReject: true,
-			expectedKind:   safety.KindBadOpInput,
-			expectedReason: "explain_ddl requires a DDL statement"},
-		{name: "insert rejected as non-ddl",
-			sql:            "INSERT INTO t VALUES (1)",
-			expectedReject: true,
-			expectedKind:   safety.KindBadOpInput,
-			expectedReason: "explain_ddl requires a DDL statement"},
-
-		// classifyDCL fires before the non-DDL gate so privilege/role
-		// changes get the privilege-specific Reason rather than the
-		// generic "requires a DDL statement" message — mirrors the
-		// Reason taxonomy on classifySafeWriteExecute.
-		{name: "grant rejected as privilege change",
-			sql:            "GRANT SELECT ON t TO bob",
-			expectedReject: true,
-			expectedKind:   safety.KindPrivilege,
-			expectedReason: "privilege/role changes require --mode=full_access"},
-		{name: "revoke rejected as privilege change",
-			sql:            "REVOKE SELECT ON t FROM bob",
-			expectedReject: true,
-			expectedKind:   safety.KindPrivilege,
-			expectedReason: "privilege/role changes require --mode=full_access"},
-
-		{name: "configure zone rejected as cluster admin",
-			sql:            "ALTER TABLE t CONFIGURE ZONE USING num_replicas = 5",
-			expectedReject: true,
-			expectedKind:   safety.KindClusterAdmin,
-			expectedReason: "zone configuration changes require full_access"},
-		{name: "set cluster setting rejected as cluster admin",
-			sql:            "SET CLUSTER SETTING sql.defaults.distsql = 'on'",
-			expectedReject: true,
-			expectedKind:   safety.KindClusterAdmin,
-			expectedReason: "cluster setting changes require full_access"},
-		{name: "set tracing rejected as cluster admin",
-			sql:            "SET TRACING = on",
-			expectedReject: true,
-			expectedKind:   safety.KindClusterAdmin,
-			expectedReason: "tracing changes require full_access"},
-		// CREATE VIRTUAL CLUSTER is the TypeDCL tenant-lifecycle node;
-		// pin it alongside the TypeDML tenant nodes below so the
-		// classifyDCL → cluster-admin route is exercised on this path.
-		{name: "create tenant rejected as cluster admin",
-			sql:            "CREATE VIRTUAL CLUSTER 'foo'",
-			expectedReject: true,
-			expectedKind:   safety.KindClusterAdmin,
-			expectedReason: "tenant management requires full_access"},
-
-		// Tenant-management DML nodes (parser quirk — see
-		// isTenantMgmtDMLStmt) must reject under safe_write/OpExplainDDL
-		// with the tenant-management Reason. Without the dedicated
-		// guard AlterTenantCapability would slip past every check
-		// (CanWriteData/CanModifySchema both false) and be admitted.
-		{name: "alter tenant capability rejected as cluster admin",
-			sql:            "ALTER VIRTUAL CLUSTER 'foo' GRANT CAPABILITY can_admin_split",
-			expectedReject: true,
-			expectedKind:   safety.KindClusterAdmin,
-			expectedReason: "tenant management requires full_access"},
-		{name: "alter tenant replication rejected as cluster admin",
-			sql:            "ALTER VIRTUAL CLUSTER 'foo' PAUSE REPLICATION",
-			expectedReject: true,
-			expectedKind:   safety.KindClusterAdmin,
-			expectedReason: "tenant management requires full_access"},
-		{name: "create tenant from replication rejected as cluster admin",
-			sql:            "CREATE VIRTUAL CLUSTER 'foo' FROM REPLICATION OF 'bar' ON 'connstr'",
-			expectedReject: true,
-			expectedKind:   safety.KindClusterAdmin,
-			expectedReason: "tenant management requires full_access"},
-
-		{name: "nested explain rejected",
-			sql:            "EXPLAIN ALTER TABLE t ADD COLUMN x INT",
-			expectedReject: true,
-			expectedKind:   safety.KindNestedExplain,
-			expectedReason: "nested EXPLAIN"},
-		{name: "nested explain analyze rejected",
-			sql:            "EXPLAIN ANALYZE ALTER TABLE t ADD COLUMN x INT",
-			expectedReject: true,
-			expectedKind:   safety.KindNestedExplain,
-			expectedReason: "nested EXPLAIN"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			v, err := safety.Check(safety.ModeSafeWrite, safety.OpExplainDDL, tc.sql)
-			require.NoError(t, err)
-			if !tc.expectedReject {
-				require.Nil(t, v, "expected statement to be admitted")
-				return
-			}
-			require.NotNil(t, v)
-			require.Equal(t, safety.ModeSafeWrite, v.Mode)
-			require.Equal(t, safety.OpExplainDDL, v.Op)
-			require.Equal(t, tc.expectedKind, v.Kind)
-			require.Contains(t, v.Reason, tc.expectedReason)
-		})
-	}
-}
-
-func TestCheckFullAccessExplainDDL(t *testing.T) {
-	// full_access on OpExplainDDL admits any DDL that parses; unlike
-	// classifyFullAccessExecute, the operation's input contract still
-	// applies (EXPLAIN (DDL, SHAPE) has no route for non-DDL), and
-	// nested EXPLAIN is still rejected as defense-in-depth.
-	tests := []struct {
-		name           string
-		sql            string
-		expectedReject bool
-		expectedKind   safety.ViolationKind
-		expectedReason string
-	}{
-		{name: "alter table add column admitted",
-			sql: "ALTER TABLE x ADD COLUMN y INT"},
-		{name: "create table admitted",
-			sql: "CREATE TABLE x (id INT PRIMARY KEY)"},
-		{name: "drop table admitted",
-			sql: "DROP TABLE x"},
-		{name: "create index admitted",
-			sql: "CREATE INDEX i ON t (c)"},
-
-		// GRANT and SELECT both fall through to the non-DDL gate
-		// because full_access skips the DCL classifier — that mirrors
-		// classifyFullAccessExecute's "anything that parses" stance,
-		// constrained by the OpExplainDDL input contract.
-		{name: "grant rejected as non-ddl",
-			sql:            "GRANT SELECT ON t TO bob",
-			expectedReject: true,
-			expectedKind:   safety.KindBadOpInput,
-			expectedReason: "explain_ddl requires a DDL statement"},
-		{name: "select rejected as non-ddl",
-			sql:            "SELECT 1",
-			expectedReject: true,
-			expectedKind:   safety.KindBadOpInput,
-			expectedReason: "explain_ddl requires a DDL statement"},
-		{name: "insert rejected as non-ddl",
-			sql:            "INSERT INTO t VALUES (1)",
-			expectedReject: true,
-			expectedKind:   safety.KindBadOpInput,
-			expectedReason: "explain_ddl requires a DDL statement"},
-
-		{name: "nested explain rejected",
-			sql:            "EXPLAIN ALTER TABLE t ADD COLUMN x INT",
-			expectedReject: true,
-			expectedKind:   safety.KindNestedExplain,
-			expectedReason: "nested EXPLAIN"},
-		{name: "nested explain analyze rejected",
-			sql:            "EXPLAIN ANALYZE ALTER TABLE t ADD COLUMN x INT",
-			expectedReject: true,
-			expectedKind:   safety.KindNestedExplain,
-			expectedReason: "nested EXPLAIN"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			v, err := safety.Check(safety.ModeFullAccess, safety.OpExplainDDL, tc.sql)
-			require.NoError(t, err)
-			if !tc.expectedReject {
-				require.Nil(t, v, "expected statement to be admitted")
-				return
-			}
-			require.NotNil(t, v)
-			require.Equal(t, safety.ModeFullAccess, v.Mode)
-			require.Equal(t, safety.OpExplainDDL, v.Op)
-			require.Equal(t, tc.expectedKind, v.Kind)
-			require.Contains(t, v.Reason, tc.expectedReason)
+			require.Equal(t, safety.KindSchema, v.Kind)
+			require.Contains(t, v.Reason, "rerun with --mode=safe_write or --mode=full_access")
 		})
 	}
 }
 
 func TestCheckRejectsUnimplementedModes(t *testing.T) {
 	// safe_write and full_access for the simulate surface still
-	// report "not yet implemented" — OpExecute (issue #29), OpExplain
-	// (issue #151), and OpExplainDDL (issue #152) are wired today;
-	// OpSimulate is tracked separately as follow-up work.
+	// report "not yet implemented" — OpExecute (issue #29) and
+	// OpExplain (issues #151, #152, #167) are wired today; OpSimulate
+	// is tracked separately as follow-up work.
 	tests := []struct {
 		name string
 		mode safety.Mode
@@ -567,11 +359,14 @@ func TestCheckFullAccessExecute(t *testing.T) {
 }
 
 func TestCheckSafeWriteExplain(t *testing.T) {
-	// safe_write for OpExplain mirrors safe_write for OpExecute: the
-	// read-only set plus DML is admitted; DDL and DCL still escalate to
-	// full_access. Plain EXPLAIN does not execute the wrapped statement,
-	// but the AST gate is still the first line of defense — see the
-	// docstring on classifySafeWriteExplain.
+	// safe_write for OpExplain admits the read-only set plus DML plus
+	// DDL — the DDL admission is the asymmetry vs classifySafeWriteExecute
+	// (see issue #167). DCL and tenant management still escalate to
+	// full_access because they reshape cluster-level state regardless
+	// of the EXPLAIN wrapper. Neither plain EXPLAIN nor EXPLAIN (DDL,
+	// SHAPE) executes the wrapped statement, but the AST gate is still
+	// the first line of defense — see the docstring on
+	// classifySafeWriteExplain.
 	tests := []struct {
 		name           string
 		sql            string
@@ -588,21 +383,16 @@ func TestCheckSafeWriteExplain(t *testing.T) {
 		{name: "unqualified update admitted at AST layer",
 			sql: "UPDATE t SET x = 1"},
 
-		{name: "create table rejected with full_access hint",
-			sql:            "CREATE TABLE x (id INT PRIMARY KEY)",
-			expectedReject: true,
-			expectedKind:   safety.KindSchema,
-			expectedReason: "rerun with --mode=full_access"},
-		{name: "drop table rejected",
-			sql:            "DROP TABLE users",
-			expectedReject: true,
-			expectedKind:   safety.KindSchema,
-			expectedReason: "rerun with --mode=full_access"},
-		{name: "truncate rejected as schema",
-			sql:            "TRUNCATE TABLE t",
-			expectedReject: true,
-			expectedKind:   safety.KindSchema,
-			expectedReason: "rerun with --mode=full_access"},
+		// DDL is admitted under safe_write because explain_sql
+		// auto-dispatches DDL to EXPLAIN (DDL, SHAPE), which compiles
+		// a plan without executing it. This admission is the entire
+		// point of folding OpExplainDDL into OpExplain (issue #167).
+		{name: "create table admitted", sql: "CREATE TABLE x (id INT PRIMARY KEY)"},
+		{name: "drop table admitted", sql: "DROP TABLE users"},
+		{name: "alter table admitted", sql: "ALTER TABLE x ADD COLUMN y INT"},
+		{name: "create index admitted", sql: "CREATE INDEX i ON t (c)"},
+		{name: "truncate admitted", sql: "TRUNCATE TABLE t"},
+
 		{name: "grant rejected as privilege change",
 			sql:            "GRANT SELECT ON t TO bob",
 			expectedReject: true,
@@ -871,8 +661,8 @@ func TestOperationStringIncludesSimulate(t *testing.T) {
 	// Pin every value so a future enum addition that forgets to
 	// extend the switch (returning "unknown") fails loudly.
 	require.Equal(t, "explain", safety.OpExplain.String())
-	require.Equal(t, "explain_ddl", safety.OpExplainDDL.String())
 	require.Equal(t, "simulate", safety.OpSimulate.String())
+	require.Equal(t, "execute", safety.OpExecute.String())
 }
 
 func TestCheckRejectsNestedExplain(t *testing.T) {

@@ -26,8 +26,8 @@ import (
 func ExplainSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		ExplainSQLToolName,
-		mcp.WithDescription("Run EXPLAIN against a CockroachDB cluster and return the plan as structured JSON. The wrapped statement is not executed (this is plain EXPLAIN, not EXPLAIN ANALYZE). Returns the operator tree, header (distribution/vectorized), and the raw tabular rows. Syntax errors include \"did you mean?\" suggestions when the offending token resembles a SQL keyword. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
-		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL DML statement to explain")),
+		mcp.WithDescription("Plan a single SQL statement against a CockroachDB cluster without executing it. Auto-dispatches by statement class: SELECT/DML through plain `EXPLAIN`, DDL through `EXPLAIN (DDL, SHAPE)`. Returns a discriminated JSON result keyed by `strategy` — `explain` carries the operator tree + header + raw rows; `explain_ddl` carries the schema-changer operations list + canonicalized statement + raw text. The cheap default Tier-3 entry point: escalate to `simulate_sql` only when you need measured runtime stats (EXPLAIN ANALYZE) or per-table SHOW STATISTICS row counts on a DDL plan. Syntax errors include \"did you mean?\" suggestions when the offending token resembles a SQL keyword. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
+		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL statement to plan (SELECT, DML, or DDL — auto-dispatched to the right EXPLAIN flavor)")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 		mcp.WithString(ModeParamName, mcp.Description(ModeParamDescription)),
@@ -112,7 +112,7 @@ func ExplainSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
 		clusterBefore := len(env.Errors)
-		result, err := mgr.Explain(ctx, sql)
+		result, err := mgr.ExplainAny(ctx, sql)
 		if err != nil {
 			env.Errors = append(env.Errors, diag.FromClusterError(err, sql))
 			translateErrorPositions(&env, clusterBefore, originalSQL, strip)

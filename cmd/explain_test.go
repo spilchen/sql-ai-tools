@@ -15,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/spilchen/sql-ai-tools/internal/conn"
 	"github.com/spilchen/sql-ai-tools/internal/output"
 )
 
@@ -180,6 +181,74 @@ func TestExplainCmdSafetyRejection(t *testing.T) {
 	}
 }
 
+// TestExplainCmdDDLAutoDispatchModeWiring covers the DDL branch of
+// the auto-dispatch on the CLI surface. Under read_only, DDL is
+// rejected with the actionable escalation hint that replaced the
+// dropped explain-ddl subcommand's reason text. Under safe_write or
+// full_access, the safety gate admits the DDL and the unreachable DSN
+// forces a connect failure — distinct from CodeSafetyViolation — which
+// is exactly the boundary we want to pin (mode wiring vs. safety
+// short-circuit).
+func TestExplainCmdDDLAutoDispatchModeWiring(t *testing.T) {
+	tests := []struct {
+		name              string
+		mode              string
+		sql               string
+		expectedAdmit     bool
+		expectedTag       string
+		expectedReasonSub string
+	}{
+		{
+			name:              "read_only rejects ddl with escalation hint",
+			mode:              "read_only",
+			sql:               "ALTER TABLE t ADD COLUMN x INT",
+			expectedTag:       "ALTER TABLE",
+			expectedReasonSub: "rerun with --mode=safe_write or --mode=full_access",
+		},
+		{
+			name:          "safe_write admits ddl via auto-dispatch",
+			mode:          "safe_write",
+			sql:           "ALTER TABLE t ADD COLUMN x INT",
+			expectedAdmit: true,
+		},
+		{
+			name:          "full_access admits ddl via auto-dispatch",
+			mode:          "full_access",
+			sql:           "DROP TABLE users",
+			expectedAdmit: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CRDB_DSN", "")
+			stdout, err := runExplain(t, "", "--output", "json",
+				"--dsn", "postgres://nope:1/db?connect_timeout=1",
+				"--mode", tc.mode,
+				"-e", tc.sql)
+			require.ErrorIs(t, err, output.ErrRendered)
+
+			var env output.Envelope
+			require.NoError(t, json.Unmarshal(stdout.Bytes(), &env))
+			require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
+			require.NotEmpty(t, env.Errors)
+
+			if tc.expectedAdmit {
+				require.NotEqual(t, output.CodeSafetyViolation, env.Errors[0].Code,
+					"safety must admit; expected connect failure, got safety_violation")
+				require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
+				return
+			}
+			require.Len(t, env.Errors, 1)
+			require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
+			require.Equal(t, tc.expectedTag, env.Errors[0].Context["tag"])
+			require.Equal(t, tc.mode, env.Errors[0].Context["mode"])
+			require.Equal(t, "explain", env.Errors[0].Context["operation"])
+			require.Contains(t, env.Errors[0].Message, tc.expectedReasonSub)
+		})
+	}
+}
+
 // TestExplainCmdInvalidMode verifies that --mode rejects unknown
 // values with an actionable error that lists the valid choices,
 // before any input reading or cluster contact.
@@ -196,6 +265,59 @@ func TestExplainCmdInvalidMode(t *testing.T) {
 	require.Len(t, env.Errors, 1)
 	require.Contains(t, env.Errors[0].Message, "invalid safety mode")
 	require.Contains(t, env.Errors[0].Message, "read_only")
+}
+
+// TestRenderExplainAny pins the per-strategy text-mode rendering
+// contract: StrategyExplain writes one line per RawRows entry,
+// StrategyExplainDDL writes RawText verbatim, and an unknown
+// strategy fails loud rather than nil-dereferencing result.Plan
+// (the conn.Strategy enum is shared with simulate and carries values
+// ExplainAny does not populate).
+func TestRenderExplainAny(t *testing.T) {
+	tests := []struct {
+		name           string
+		result         conn.ExplainAnyResult
+		expectedOut    string
+		expectedErrSub string
+	}{
+		{
+			name: "explain renders raw rows one per line",
+			result: conn.ExplainAnyResult{
+				Strategy: conn.StrategyExplain,
+				Plan:     &conn.ExplainResult{RawRows: []string{"distribution: local", "vectorized: true"}},
+			},
+			expectedOut: "distribution: local\nvectorized: true\n",
+		},
+		{
+			name: "explain ddl renders raw text verbatim",
+			result: conn.ExplainAnyResult{
+				Strategy: conn.StrategyExplainDDL,
+				DDLPlan:  &conn.DDLExplainResult{RawText: "Schema change plan for ALTER TABLE x;\n  • execute ..."},
+			},
+			expectedOut: "Schema change plan for ALTER TABLE x;\n  • execute ...",
+		},
+		{
+			name: "unknown strategy fails loud",
+			result: conn.ExplainAnyResult{
+				Strategy: conn.StrategyExplainAnalyze,
+			},
+			expectedErrSub: "unknown strategy",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := renderExplainAny(&buf, tc.result)
+			if tc.expectedErrSub != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.expectedErrSub)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.expectedOut, buf.String())
+		})
+	}
 }
 
 // TestExplainCmdRejectsExtraArgs verifies that more than one positional

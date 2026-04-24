@@ -260,6 +260,51 @@ func TestIntegrationManagerExplainRunsInReadOnlyTxn(t *testing.T) {
 		"rejection must carry SQLSTATE 25006 (read_only_sql_transaction)")
 }
 
+// TestIntegrationManagerExplainAnyDispatch exercises the dispatcher
+// branches of Manager.ExplainAny against a real cluster: a SELECT
+// routes to plain EXPLAIN (Strategy="explain", Plan populated), and a
+// DDL routes to EXPLAIN (DDL, SHAPE) (Strategy="explain_ddl", DDLPlan
+// populated). A regression that swapped the dispatch arms or left the
+// wrong field nil would surface here.
+func TestIntegrationManagerExplainAnyDispatch(t *testing.T) {
+	cluster := cockroachtest.Shared(t)
+	mgr := conn.NewManager(cluster.DSN)
+	t.Cleanup(func() { _ = mgr.Close(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	mustExec(t, ctx, cluster.DSN,
+		"CREATE TABLE IF NOT EXISTS explain_any_users (id INT PRIMARY KEY, name STRING)")
+
+	t.Run("select routes to plain explain", func(t *testing.T) {
+		// `SELECT 1` (no table reference) is the smallest SELECT
+		// that does not emit CRDB's "missing stats" attribute line.
+		// parseExplainTree currently rejects that line shape; the
+		// dispatcher branch is what we want to exercise here, so a
+		// table-free probe keeps the assertion focused. A SELECT
+		// against a real table with populated stats would also work.
+		got, err := mgr.ExplainAny(ctx, "SELECT 1")
+		require.NoError(t, err)
+		require.Equal(t, conn.StrategyExplain, got.Strategy)
+		require.NotNil(t, got.Plan, "SELECT must populate Plan")
+		require.Nil(t, got.DDLPlan, "SELECT must leave DDLPlan nil")
+		require.NotEmpty(t, got.Plan.RawRows, "EXPLAIN should emit at least one row")
+	})
+
+	t.Run("ddl routes to explain ddl shape", func(t *testing.T) {
+		got, err := mgr.ExplainAny(ctx,
+			"ALTER TABLE explain_any_users ADD COLUMN age INT")
+		require.NoError(t, err)
+		require.Equal(t, conn.StrategyExplainDDL, got.Strategy)
+		require.NotNil(t, got.DDLPlan, "DDL must populate DDLPlan")
+		require.Nil(t, got.Plan, "DDL must leave Plan nil")
+		require.NotEmpty(t, got.DDLPlan.Operations,
+			"every schema change has at least one operation")
+		require.Contains(t, got.DDLPlan.Statement, "ALTER TABLE")
+	})
+}
+
 // TestIntegrationManagerExplainDDLEnforcesStatementTimeout mirrors
 // TestIntegrationManagerExplainEnforcesStatementTimeout for the DDL
 // path. runExplainDDL has a duplicated SET LOCAL statement_timeout

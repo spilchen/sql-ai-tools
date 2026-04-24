@@ -124,19 +124,22 @@ func TestPreprocessTier3CLISubcommandsEmitWarning(t *testing.T) {
 		args []string
 	}{
 		{name: "explain", args: []string{"explain", "--dsn", "postgres://flaghost:26257/db?connect_timeout=1"}},
-		{name: "explain-ddl", args: []string{"explain-ddl", "--mode", "safe_write",
-			"--dsn", "postgres://flaghost:26257/db?connect_timeout=1"}},
+		{name: "explain ddl auto-dispatch",
+			args: []string{"explain", "--mode", "safe_write",
+				"--dsn", "postgres://flaghost:26257/db?connect_timeout=1"}},
 		{name: "simulate", args: []string{"simulate", "--dsn", "postgres://flaghost:26257/db?connect_timeout=1"}},
 		{name: "exec", args: []string{"exec", "--dsn", "postgres://flaghost:26257/db?connect_timeout=1"}},
 	}
-	// explain-ddl rejects SELECT under any mode, so feed it a DDL paste.
+	// The DDL auto-dispatch case feeds a DDL paste so the safety
+	// gate admits it under safe_write and the preprocess warning
+	// sits alongside the connect failure.
 	const ddlMessy = "root@localhost:26257/movr> ALTER TABLE rides\n" +
 		"                        -> ADD COLUMN flagged BOOL DEFAULT false;\n"
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			input := messySQL
-			if tc.name == "explain-ddl" {
+			if tc.name == "explain ddl auto-dispatch" {
 				input = ddlMessy
 			}
 			env := runCmdJSON(t, input, tc.args...)
