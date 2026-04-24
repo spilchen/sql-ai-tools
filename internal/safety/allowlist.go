@@ -107,9 +107,8 @@ const (
 
 	// KindUnimplemented labels (mode, op) pairs that the package
 	// recognises at the flag layer but does not yet wire (today:
-	// safe_write/full_access for OpExplain and OpSimulate). The fix
-	// is for the upstream feature to land, not for the user to
-	// escalate.
+	// safe_write/full_access for OpSimulate only). The fix is for
+	// the upstream feature to land, not for the user to escalate.
 	KindUnimplemented
 
 	// KindBadOpInput labels rejections caused by the user passing the
@@ -234,12 +233,10 @@ func CheckParsed(mode Mode, op Operation, stmts statements.Statements) *Violatio
 // Mode coverage is intentionally scoped per Operation:
 //
 //   - read_only is wired for every Op via classifyReadOnly.
-//   - safe_write and full_access are wired for OpExecute (issue #29)
-//     and OpExplainDDL (issue #152). OpExplain and OpSimulate in
-//     those modes still return the "not yet implemented" violation;
-//     wiring them is follow-up work so the other surfaces' mode
-//     story stays stable while the wired surfaces adopt the full
-//     safety model.
+//   - safe_write and full_access are wired for OpExecute (issue #29),
+//     OpExplain (issue #151), and OpExplainDDL (issue #152).
+//     OpSimulate in those modes still returns the "not yet
+//     implemented" violation; wiring it is follow-up work.
 func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 	switch mode {
 	case ModeReadOnly:
@@ -248,6 +245,8 @@ func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 		switch op {
 		case OpExecute:
 			return classifySafeWriteExecute(stmt)
+		case OpExplain:
+			return classifySafeWriteExplain(stmt)
 		case OpExplainDDL:
 			return classifySafeWriteExplainDDL(stmt)
 		}
@@ -256,6 +255,8 @@ func classify(mode Mode, op Operation, stmt tree.Statement) *Violation {
 		switch op {
 		case OpExecute:
 			return classifyFullAccessExecute(stmt)
+		case OpExplain:
+			return classifyFullAccessExplain(stmt)
 		case OpExplainDDL:
 			return classifyFullAccessExplainDDL(stmt)
 		}
@@ -555,6 +556,57 @@ func classifySafeWriteExecute(stmt tree.Statement) *Violation {
 	return nil
 }
 
+// classifySafeWriteExplain is the safe_write rule for OpExplain. The
+// admission set mirrors classifySafeWriteExecute — read-only set plus
+// DML, with DDL and DCL still gated to full_access — so an agent can
+// switch between `explain` and `execute` for the same statement
+// without re-discovering the per-mode matrix.
+//
+// Plain EXPLAIN (without ANALYZE) does not execute the wrapped
+// statement; the cluster-side BEGIN READ ONLY wrapper in
+// Manager.runExplain is the runtime defense-in-depth. The AST gate
+// here still exists because it is the only layer that can reject DDL
+// before any cluster contact, and because the nested-EXPLAIN guard
+// must also live here (CanWriteData/CanModifySchema do not descend
+// into *Explain/*ExplainAnalyze nodes, so a wrapped INSERT would
+// otherwise be admitted as ordinary DML and the runtime read-only
+// txn would be the only thing catching it).
+func classifySafeWriteExplain(stmt tree.Statement) *Violation {
+	tag := stmt.StatementTag()
+	switch stmt.(type) {
+	case *tree.Explain, *tree.ExplainAnalyze:
+		return &Violation{
+			Tag:    tag,
+			Reason: "nested EXPLAIN is not permitted; pass the inner statement directly",
+			Mode:   ModeSafeWrite,
+			Op:     OpExplain,
+			Kind:   KindNestedExplain,
+		}
+	}
+	if v := classifyDCL(stmt, tag, ModeSafeWrite, OpExplain); v != nil {
+		return v
+	}
+	if isTenantMgmtDMLStmt(stmt) {
+		return &Violation{
+			Tag:    tag,
+			Reason: clusterAdminReason(stmt, ModeSafeWrite),
+			Mode:   ModeSafeWrite,
+			Op:     OpExplain,
+			Kind:   KindClusterAdmin,
+		}
+	}
+	if tree.CanModifySchema(stmt) {
+		return &Violation{
+			Tag:    tag,
+			Reason: "statement modifies schema; rerun with --mode=full_access",
+			Mode:   ModeSafeWrite,
+			Op:     OpExplain,
+			Kind:   KindSchema,
+		}
+	}
+	return nil
+}
+
 // classifyDCL produces the Violation for a TypeDCL statement, or nil
 // if stmt isn't TypeDCL. It splits CRDB's overloaded TypeDCL set
 // (privilege/role changes vs. cluster admin / tenant lifecycle) so
@@ -682,6 +734,16 @@ func clusterAdminReason(stmt tree.Statement, mode Mode) string {
 // already rejected upstream by Check's defensive guard, so we have no
 // special case to handle here.
 func classifyFullAccessExecute(_ tree.Statement) *Violation {
+	return nil
+}
+
+// classifyFullAccessExplain is the full_access rule for OpExplain.
+// Mirrors classifyFullAccessExecute: anything that parses is admitted.
+// Defense-in-depth at runtime is the BEGIN READ ONLY wrapper in
+// Manager.runExplain, which surfaces SQLSTATE 25006 if the planner
+// would otherwise treat the inner statement as a write — the same
+// shape EXPLAIN ANALYZE INSERT already returns under read_only today.
+func classifyFullAccessExplain(_ tree.Statement) *Violation {
 	return nil
 }
 

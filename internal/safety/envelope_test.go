@@ -37,56 +37,43 @@ func TestEnvelope(t *testing.T) {
 	require.NotEmpty(t, e.Context["reason"])
 }
 
-func TestEnvelopeSuggestionsByOp(t *testing.T) {
-	// Both OpExplain and OpExplainDDL escalation suggestions point at
-	// safe_write — the lowest-privilege mode that admits the call per
-	// design doc §Safety Model. Jumping to full_access would violate
-	// principle of least privilege, and the test pins the symmetry so
-	// a future change can't accidentally regress only one op.
-	//
-	// Kind is set explicitly to KindSchema (the most common explain
-	// rejection class) so the test exercises the same code path a
-	// real classifyReadOnly call would produce — Violations from
-	// production code never have Kind=0.
-	tests := []struct {
-		name string
-		op   safety.Operation
-	}{
-		{name: "explain", op: safety.OpExplain},
-		{name: "explain_ddl", op: safety.OpExplainDDL},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			e := safety.Envelope(&safety.Violation{
-				Tag:  "ANY",
-				Mode: safety.ModeReadOnly,
-				Op:   tc.op,
-				Kind: safety.KindSchema,
-			})
-			require.Len(t, e.Suggestions, 1)
-			require.Equal(t, string(safety.ModeSafeWrite), e.Suggestions[0].Replacement)
-			require.Equal(t, "safety_mode_escalation", e.Suggestions[0].Reason)
-		})
-	}
+func TestEnvelopeExplainDDLSuggestion(t *testing.T) {
+	// classifyReadOnly's OpExplainDDL branch tags every reachable
+	// rejection as KindSchema (KindBadOpInput is short-circuited at
+	// the top of escalationTargetFor). safe_write is the smallest
+	// mode that admits DDL on the explain-ddl path
+	// (classifySafeWriteExplainDDL). This pins that contract — a
+	// regression suggesting full_access here would skip the
+	// least-privilege step.
+	e := safety.Envelope(&safety.Violation{
+		Tag:  "CREATE TABLE",
+		Mode: safety.ModeReadOnly,
+		Op:   safety.OpExplainDDL,
+		Kind: safety.KindSchema,
+	})
+	require.Len(t, e.Suggestions, 1)
+	require.Equal(t, string(safety.ModeSafeWrite), e.Suggestions[0].Replacement)
+	require.Equal(t, "safety_mode_escalation", e.Suggestions[0].Reason)
 }
 
 func TestEnvelopeNoSuggestionForUnimplementedModes(t *testing.T) {
-	// OpExplain in safe_write/full_access still reports "not yet
-	// implemented" (the explain-side mode wiring is tracked
-	// separately). No escalation makes sense — the user has to wait
-	// — so no suggestion is offered.
+	// OpSimulate in safe_write/full_access still reports "not yet
+	// implemented" (the OpSimulate mode wiring is tracked
+	// separately). No escalation makes sense — the user has to
+	// wait — so no suggestion is offered.
 	e := safety.Envelope(&safety.Violation{
 		Tag:  "SELECT",
 		Mode: safety.ModeSafeWrite,
-		Op:   safety.OpExplain,
+		Op:   safety.OpSimulate,
 		Kind: safety.KindUnimplemented,
 	})
 	require.Empty(t, e.Suggestions)
 }
 
-func TestEnvelopeExecuteSuggestions(t *testing.T) {
-	// OpExecute escalation is asymmetric: a write under read_only
+func TestEnvelopeExecuteAndExplainSuggestions(t *testing.T) {
+	// OpExecute and OpExplain share the same escalation matrix
+	// (issue #151 wired OpExplain to mirror OpExecute's per-Kind
+	// behavior). The matrix is asymmetric: a write under read_only
 	// escalates to safe_write (the smallest bump), but schema changes
 	// and DCL under read_only must jump to full_access because
 	// safe_write itself rejects them. A safe_write rejection of
@@ -94,7 +81,12 @@ func TestEnvelopeExecuteSuggestions(t *testing.T) {
 	// stop. The decision is driven by Violation.Kind, not by the
 	// human-readable Reason text, so wording tweaks in the classifier
 	// cannot silently break the escalation contract.
-	tests := []struct {
+	//
+	// Running the same matrix against both ops pins that any future
+	// refactor that diverges OpExplain from OpExecute would surface
+	// here — losing the parallel would silently break agents that
+	// switch between the two surfaces for the same statement.
+	cases := []struct {
 		name                string
 		mode                safety.Mode
 		kind                safety.ViolationKind
@@ -144,18 +136,28 @@ func TestEnvelopeExecuteSuggestions(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			e := safety.Envelope(&safety.Violation{
-				Tag:  "ANY",
-				Mode: tc.mode,
-				Op:   safety.OpExecute,
-				Kind: tc.kind,
+	ops := []struct {
+		name string
+		op   safety.Operation
+	}{
+		{name: "execute", op: safety.OpExecute},
+		{name: "explain", op: safety.OpExplain},
+	}
+
+	for _, op := range ops {
+		for _, tc := range cases {
+			t.Run(op.name+"/"+tc.name, func(t *testing.T) {
+				e := safety.Envelope(&safety.Violation{
+					Tag:  "ANY",
+					Mode: tc.mode,
+					Op:   op.op,
+					Kind: tc.kind,
+				})
+				require.Len(t, e.Suggestions, 1)
+				require.Equal(t, string(tc.expectedReplacement), e.Suggestions[0].Replacement)
+				require.Equal(t, "safety_mode_escalation", e.Suggestions[0].Reason)
 			})
-			require.Len(t, e.Suggestions, 1)
-			require.Equal(t, string(tc.expectedReplacement), e.Suggestions[0].Replacement)
-			require.Equal(t, "safety_mode_escalation", e.Suggestions[0].Reason)
-		})
+		}
 	}
 }
 

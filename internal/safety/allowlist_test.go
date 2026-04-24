@@ -311,17 +311,15 @@ func TestCheckFullAccessExplainDDL(t *testing.T) {
 }
 
 func TestCheckRejectsUnimplementedModes(t *testing.T) {
-	// safe_write and full_access for the not-yet-wired surfaces still
-	// report "not yet implemented". OpExecute (issue #29) and
-	// OpExplainDDL (issue #152) wire those modes today; OpExplain and
-	// OpSimulate are tracked separately as follow-up work.
+	// safe_write and full_access for the simulate surface still
+	// report "not yet implemented" — OpExecute (issue #29), OpExplain
+	// (issue #151), and OpExplainDDL (issue #152) are wired today;
+	// OpSimulate is tracked separately as follow-up work.
 	tests := []struct {
 		name string
 		mode safety.Mode
 		op   safety.Operation
 	}{
-		{name: "safe_write OpExplain not yet implemented", mode: safety.ModeSafeWrite, op: safety.OpExplain},
-		{name: "full_access OpExplain not yet implemented", mode: safety.ModeFullAccess, op: safety.OpExplain},
 		{name: "safe_write OpSimulate not yet implemented", mode: safety.ModeSafeWrite, op: safety.OpSimulate},
 		{name: "full_access OpSimulate not yet implemented", mode: safety.ModeFullAccess, op: safety.OpSimulate},
 	}
@@ -330,7 +328,7 @@ func TestCheckRejectsUnimplementedModes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			v, err := safety.Check(tc.mode, tc.op, "SELECT 1")
 			require.NoError(t, err)
-			require.NotNil(t, v, "non-read_only modes are not admitted yet for explain ops")
+			require.NotNil(t, v, "non-read_only modes are not admitted yet for these ops")
 			require.Contains(t, v.Reason, "not yet implemented")
 			require.Equal(t, tc.mode, v.Mode)
 		})
@@ -562,6 +560,163 @@ func TestCheckFullAccessExecute(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			v, err := safety.Check(safety.ModeFullAccess, safety.OpExecute, tc.sql)
+			require.NoError(t, err)
+			require.Nil(t, v, "full_access admits any parsed statement")
+		})
+	}
+}
+
+func TestCheckSafeWriteExplain(t *testing.T) {
+	// safe_write for OpExplain mirrors safe_write for OpExecute: the
+	// read-only set plus DML is admitted; DDL and DCL still escalate to
+	// full_access. Plain EXPLAIN does not execute the wrapped statement,
+	// but the AST gate is still the first line of defense — see the
+	// docstring on classifySafeWriteExplain.
+	tests := []struct {
+		name           string
+		sql            string
+		expectedReject bool
+		expectedKind   safety.ViolationKind
+		expectedReason string
+	}{
+		{name: "select admitted", sql: "SELECT 1"},
+		{name: "show admitted", sql: "SHOW TABLES"},
+		{name: "insert admitted", sql: "INSERT INTO t VALUES (1)"},
+		{name: "update admitted", sql: "UPDATE t SET x = 1 WHERE id = 1"},
+		{name: "delete admitted", sql: "DELETE FROM t WHERE id = 1"},
+		{name: "upsert admitted", sql: "UPSERT INTO t VALUES (1)"},
+		{name: "unqualified update admitted at AST layer",
+			sql: "UPDATE t SET x = 1"},
+
+		{name: "create table rejected with full_access hint",
+			sql:            "CREATE TABLE x (id INT PRIMARY KEY)",
+			expectedReject: true,
+			expectedKind:   safety.KindSchema,
+			expectedReason: "rerun with --mode=full_access"},
+		{name: "drop table rejected",
+			sql:            "DROP TABLE users",
+			expectedReject: true,
+			expectedKind:   safety.KindSchema,
+			expectedReason: "rerun with --mode=full_access"},
+		{name: "truncate rejected as schema",
+			sql:            "TRUNCATE TABLE t",
+			expectedReject: true,
+			expectedKind:   safety.KindSchema,
+			expectedReason: "rerun with --mode=full_access"},
+		{name: "grant rejected as privilege change",
+			sql:            "GRANT SELECT ON t TO bob",
+			expectedReject: true,
+			expectedKind:   safety.KindPrivilege,
+			expectedReason: "privilege/role changes require --mode=full_access"},
+		{name: "configure zone rejected as cluster admin",
+			sql:            "ALTER TABLE t CONFIGURE ZONE USING num_replicas = 5",
+			expectedReject: true,
+			expectedKind:   safety.KindClusterAdmin,
+			expectedReason: "zone configuration changes require full_access"},
+		{name: "set cluster setting rejected as cluster admin",
+			sql:            "SET CLUSTER SETTING sql.defaults.distsql = 'on'",
+			expectedReject: true,
+			expectedKind:   safety.KindClusterAdmin,
+			expectedReason: "cluster setting changes require full_access"},
+		{name: "set tracing rejected as cluster admin",
+			sql:            "SET TRACING = on",
+			expectedReject: true,
+			expectedKind:   safety.KindClusterAdmin,
+			expectedReason: "tracing changes require full_access"},
+
+		// Tenant-management DML nodes parallel the OpExecute table —
+		// the parser tags them TypeDML rather than TypeDCL, so without
+		// the isTenantMgmtDMLStmt guard AlterTenantCapability would be
+		// silently admitted (neither CanWriteData nor CanModifySchema)
+		// and the other two would be admitted as ordinary DML and
+		// silently regress to KindWrite — pinning Kind here closes
+		// that loop.
+		{name: "alter tenant capability rejected as cluster admin",
+			sql:            "ALTER VIRTUAL CLUSTER 'foo' GRANT CAPABILITY can_admin_split",
+			expectedReject: true,
+			expectedKind:   safety.KindClusterAdmin,
+			expectedReason: "tenant management requires full_access"},
+		{name: "alter tenant replication rejected as cluster admin",
+			sql:            "ALTER VIRTUAL CLUSTER 'foo' PAUSE REPLICATION",
+			expectedReject: true,
+			expectedKind:   safety.KindClusterAdmin,
+			expectedReason: "tenant management requires full_access"},
+		{name: "create tenant from replication rejected as cluster admin",
+			sql:            "CREATE VIRTUAL CLUSTER 'foo' FROM REPLICATION OF 'bar' ON 'connstr'",
+			expectedReject: true,
+			expectedKind:   safety.KindClusterAdmin,
+			expectedReason: "tenant management requires full_access"},
+
+		// The nested-EXPLAIN guard is what stops EXPLAIN ANALYZE from
+		// laundering writes past the AST gate — without it, the inner
+		// INSERT of an EXPLAIN ANALYZE wrapper would be admitted as
+		// ordinary DML and only the runtime read-only txn would catch
+		// the actual write. Pinning KindNestedExplain matters because
+		// envelope.suggestionsFor short-circuits this Kind to "no
+		// escalation hint" — a regression to KindWrite would tell
+		// agents to retry under a mode that still rejects nested
+		// explain.
+		{name: "explain analyze insert rejected as nested",
+			sql:            "EXPLAIN ANALYZE INSERT INTO t VALUES (1)",
+			expectedReject: true,
+			expectedKind:   safety.KindNestedExplain,
+			expectedReason: "nested EXPLAIN"},
+		{name: "explain wrapper rejected as nested",
+			sql:            "EXPLAIN SELECT 1",
+			expectedReject: true,
+			expectedKind:   safety.KindNestedExplain,
+			expectedReason: "nested EXPLAIN"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := safety.Check(safety.ModeSafeWrite, safety.OpExplain, tc.sql)
+			require.NoError(t, err)
+			if !tc.expectedReject {
+				require.Nil(t, v, "expected statement to be admitted")
+				return
+			}
+			require.NotNil(t, v)
+			require.Equal(t, safety.ModeSafeWrite, v.Mode)
+			require.Equal(t, safety.OpExplain, v.Op)
+			require.Equal(t, tc.expectedKind, v.Kind)
+			require.Contains(t, v.Reason, tc.expectedReason)
+		})
+	}
+}
+
+func TestCheckFullAccessExplain(t *testing.T) {
+	// full_access for OpExplain admits anything that parses, mirroring
+	// classifyFullAccessExecute. Defense-in-depth at runtime is the
+	// BEGIN READ ONLY wrapper in Manager.runExplain — anything the
+	// planner refuses to plan under read-only surfaces as SQLSTATE
+	// 25006 to the caller.
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{name: "select", sql: "SELECT 1"},
+		{name: "insert", sql: "INSERT INTO t VALUES (1)"},
+		{name: "delete", sql: "DELETE FROM t WHERE id = 1"},
+		{name: "create table", sql: "CREATE TABLE x (id INT PRIMARY KEY)"},
+		{name: "drop table", sql: "DROP TABLE users"},
+		{name: "grant", sql: "GRANT SELECT ON t TO bob"},
+		{name: "set cluster setting", sql: "SET CLUSTER SETTING sql.defaults.distsql = 'on'"},
+
+		// Pin the same tenant-DML escape that TestCheckFullAccessExecute
+		// pins for OpExecute — full_access is the explicit opt-in for
+		// these statements, so the allowlist must admit them.
+		{name: "alter tenant capability admitted under full_access",
+			sql: "ALTER VIRTUAL CLUSTER 'foo' GRANT CAPABILITY can_admin_split"},
+		{name: "alter tenant replication admitted under full_access",
+			sql: "ALTER VIRTUAL CLUSTER 'foo' PAUSE REPLICATION"},
+		{name: "create tenant from replication admitted under full_access",
+			sql: "CREATE VIRTUAL CLUSTER 'foo' FROM REPLICATION OF 'bar' ON 'connstr'"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := safety.Check(safety.ModeFullAccess, safety.OpExplain, tc.sql)
 			require.NoError(t, err)
 			require.Nil(t, v, "full_access admits any parsed statement")
 		})

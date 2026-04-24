@@ -100,22 +100,34 @@ func escalationTargetFor(v *Violation) (Mode, bool) {
 	switch v.Mode {
 	case ModeReadOnly:
 		switch v.Op {
-		case OpExplain, OpExplainDDL:
-			// The explain surfaces don't yet wire safe_write /
-			// full_access, but for read_only rejections the path
-			// forward when those land will be safe_write — keep the
-			// hint in place so agents can already discover the lever.
-			return ModeSafeWrite, true
-		case OpExecute:
+		case OpExplain, OpExecute:
+			// OpExplain and OpExecute share the same escalation
+			// matrix because their safe_write/full_access
+			// classifiers admit the same per-Kind set: writes go to
+			// safe_write, schema/DCL skip straight to full_access.
+			// Suggesting safe_write for a KindSchema rejection here
+			// would loop the agent — the safe_write classifier also
+			// rejects schema mutations.
 			switch v.Kind {
 			case KindWrite:
 				return ModeSafeWrite, true
 			case KindSchema, KindPrivilege, KindClusterAdmin:
 				return ModeFullAccess, true
 			}
+		case OpExplainDDL:
+			// classifyReadOnly's OpExplainDDL branch tags every
+			// rejection that reaches here as KindSchema (the DDL
+			// itself); KindBadOpInput from non-DDL inputs is
+			// short-circuited at the top of this function. safe_write
+			// is the smallest mode that admits DDL on the
+			// explain-ddl path (per classifySafeWriteExplainDDL),
+			// so the smallest-bump principle picks it.
+			return ModeSafeWrite, true
 		}
 	case ModeSafeWrite:
-		if v.Op == OpExecute {
+		switch v.Op {
+		case OpExplain, OpExecute:
+			// Same shared matrix as the read_only arm above.
 			switch v.Kind {
 			case KindSchema, KindPrivilege, KindClusterAdmin:
 				return ModeFullAccess, true

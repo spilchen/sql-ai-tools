@@ -53,8 +53,11 @@ connection string is read from --dsn or CRDB_DSN (flag wins).
 
 The --mode flag selects the safety policy applied before the cluster
 call. Default is "read_only", which permits SELECT, SHOW, and other
-non-mutating statements. "safe_write" and "full_access" are reserved
-for follow-up issues and currently reject every statement.`,
+non-mutating statements. "safe_write" additionally admits DML
+(INSERT/UPDATE/DELETE/UPSERT) so the planner can return a plan for
+the inner write. "full_access" admits any parsed statement; the
+cluster's read-only transaction wrapper still surfaces SQLSTATE 25006
+for inner DDL the planner refuses to plan under read-only.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			r, baseEnv, err := newEnvelope(state, output.TierConnected, cmd)

@@ -428,15 +428,17 @@ Tools that require a higher capability tier return structured
 | `safe_write` | No | Above + INSERT, UPDATE, DELETE, UPSERT | `SET LOCAL sql_safe_updates = on` (cluster rejects bare UPDATE/DELETE), row-scan truncation, statement timeouts |
 | `full_access` | No | Anything that parses (DDL, DCL, etc.) | Row-scan truncation, statement timeouts (audit log planned) |
 
-Mode wiring per Tier 3 surface (issue #29 lands `execute_sql`; the
-explain surfaces still report "not yet implemented" for `safe_write` /
-`full_access` — wiring them is follow-up work):
+Mode wiring per Tier 3 surface (issues #29, #151, and #152 land
+`execute_sql`, `explain_sql`, and `explain_schema_change`
+respectively; `simulate_sql` still reports "not yet implemented"
+for `safe_write` / `full_access` — wiring it is follow-up work):
 
-| Tool                   | `read_only` | `safe_write` | `full_access` |
-|------------------------|-------------|--------------|---------------|
-| `execute_sql` / `exec` | ✅          | ✅           | ✅            |
-| `explain_sql`          | ✅          | ⏳           | ⏳            |
-| `explain_schema_change`| ✅          | ⏳           | ⏳            |
+| Tool                    | `read_only` | `safe_write` | `full_access` |
+|-------------------------|-------------|--------------|---------------|
+| `execute_sql` / `exec`  | ✅          | ✅           | ✅            |
+| `explain_sql`           | ✅          | ✅           | ✅            |
+| `explain_schema_change` | ✅          | ✅           | ✅            |
+| `simulate_sql`          | ✅          | ⏳           | ⏳            |
 
 **LIMIT injection** (read_only only): `safety.MaybeInjectLimit` parses
 the SQL and, when the input is a single bare `SELECT` whose result is
