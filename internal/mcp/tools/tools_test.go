@@ -227,6 +227,98 @@ func TestExplainSchemaChangeHandlerSafetyRejectionSurfacesEnvelopeError(t *testi
 	require.Equal(t, "read_only", env.Errors[0].Context["mode"])
 }
 
+// TestExplainSchemaChangeHandlerModeWiring exercises the per-mode
+// admit/reject contract through the MCP tool surface: that the mode
+// parameter actually flows into safety.Check with OpExplainDDL, and
+// that the new safe_write/full_access classifiers added in #152 are
+// reachable from the tool layer (not just unit-tested in isolation).
+//
+// The unreachable DSN serves the same purpose as in the surrounding
+// safety-rejection tests: an admit case must reach the connect step
+// and surface a "connect to CockroachDB" envelope error, while a
+// reject case must short-circuit with a CodeSafetyViolation. A
+// regression that drops the mode parameter, hard-codes read_only, or
+// inverts the admit/reject decision shows up as a code/context
+// mismatch here.
+func TestExplainSchemaChangeHandlerModeWiring(t *testing.T) {
+	tests := []struct {
+		name              string
+		mode              string
+		sql               string
+		expectedAdmit     bool
+		expectedTag       string
+		expectedReasonSub string
+	}{
+		{
+			name:          "safe_write admits ddl",
+			mode:          "safe_write",
+			sql:           "ALTER TABLE t ADD COLUMN x INT",
+			expectedAdmit: true,
+		},
+		{
+			name:          "full_access admits ddl",
+			mode:          "full_access",
+			sql:           "DROP TABLE users",
+			expectedAdmit: true,
+		},
+		{
+			name:              "safe_write rejects grant as privilege change",
+			mode:              "safe_write",
+			sql:               "GRANT SELECT ON t TO bob",
+			expectedTag:       "GRANT",
+			expectedReasonSub: "privilege/role changes require --mode=full_access",
+		},
+		{
+			name:              "safe_write rejects select as non-ddl",
+			mode:              "safe_write",
+			sql:               "SELECT 1",
+			expectedTag:       "SELECT",
+			expectedReasonSub: "explain_ddl requires a DDL statement",
+		},
+		{
+			name:              "full_access rejects select as non-ddl",
+			mode:              "full_access",
+			sql:               "SELECT 1",
+			expectedTag:       "SELECT",
+			expectedReasonSub: "explain_ddl requires a DDL statement",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := ExplainSchemaChangeHandler(testParserVersion, "" /* defaultTargetVersion */)
+			req := mcpgo.CallToolRequest{}
+			req.Params.Arguments = map[string]any{
+				"sql":  tc.sql,
+				"dsn":  "postgres://nope:1/db?connect_timeout=1",
+				"mode": tc.mode,
+			}
+
+			res, err := handler(context.Background(), req)
+			require.NoError(t, err)
+			env := requireEnvelope(t, res)
+			require.Equal(t, output.ConnectionDisconnected, env.ConnectionStatus)
+			require.NotEmpty(t, env.Errors)
+
+			if tc.expectedAdmit {
+				// Safety admitted; the unreachable DSN forces a
+				// connect failure, which lands as an envelope error
+				// distinct from CodeSafetyViolation.
+				require.NotEqual(t, output.CodeSafetyViolation, env.Errors[0].Code,
+					"safety must admit; expected connect failure, got safety_violation")
+				require.Contains(t, env.Errors[0].Message, "connect to CockroachDB")
+				return
+			}
+			require.Len(t, env.Errors, 1)
+			require.Equal(t, output.CodeSafetyViolation, env.Errors[0].Code)
+			require.Equal(t, tc.expectedTag, env.Errors[0].Context["tag"])
+			require.Equal(t, tc.mode, env.Errors[0].Context["mode"])
+			require.Equal(t, "explain_ddl", env.Errors[0].Context["operation"])
+			require.Contains(t, env.Errors[0].Message, tc.expectedReasonSub)
+		})
+	}
+}
+
 // TestExplainSQLHandlerSafetyRejection verifies that the read_only
 // allowlist intercepts mutating inner statements before any cluster
 // contact, in the MCP surface. Mirror of the CLI safety-rejection
