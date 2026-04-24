@@ -30,7 +30,7 @@ import (
 func SimulateSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		SimulateSQLToolName,
-		mcp.WithDescription(`Simulate one or more SQL statements without applying them. Each parsed statement is dispatched to a non-executing EXPLAIN flavor: SELECT runs through EXPLAIN ANALYZE (real runtime stats; reads have no side effects), INSERT/UPDATE/DELETE/UPSERT runs through plain EXPLAIN (planner estimates only — the write is never applied), and DDL runs through EXPLAIN (DDL, SHAPE) plus a SHOW STATISTICS row-count annotation per affected table. Multi-statement input returns one entry per statement in parse order.`),
+		mcp.WithDescription("Simulate one or more SQL statements without applying them. Each parsed statement is dispatched to a non-executing EXPLAIN flavor: SELECT runs through EXPLAIN ANALYZE (real runtime stats; reads have no side effects), INSERT/UPDATE/DELETE/UPSERT runs through plain EXPLAIN (planner estimates only — the write is never applied), and DDL runs through EXPLAIN (DDL, SHAPE) plus a SHOW STATISTICS row-count annotation per affected table. Multi-statement input returns one entry per statement in parse order. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL statement(s) to simulate. Multi-statement input is split per ';' and each statement is dispatched independently.")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
@@ -81,18 +81,25 @@ func SimulateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 
 		env := connectedEnvelope(parserVersion, target)
 
+		originalSQL := sql
+		strip := preprocessSQL(&env, sql)
+		sql = strip.Stripped
+
 		// Safety check runs before any cluster contact: a rejection
 		// surfaces in env.Errors with connection_status=disconnected,
 		// matching the CLI's behaviour. Parse errors propagate via
 		// diag.FromParseError so the agent gets the SQLSTATE-tagged
 		// syntax diagnostic, not a misleading safety violation.
+		safetyBefore := len(env.Errors)
 		violation, err := safety.Check(mode, safety.OpSimulate, sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
+			translateErrorPositions(&env, safetyBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 		if violation != nil {
-			env.Errors = []output.Error{safety.Envelope(violation)}
+			env.Errors = append(env.Errors, safety.Envelope(violation))
+			translateErrorPositions(&env, safetyBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 
@@ -104,9 +111,11 @@ func SimulateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 		mgr := conn.NewManager(mergedDSN, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
+		clusterBefore := len(env.Errors)
 		result, err := mgr.Simulate(ctx, sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromClusterError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromClusterError(err, sql))
+			translateErrorPositions(&env, clusterBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 

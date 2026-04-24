@@ -23,7 +23,7 @@ import (
 func ParseSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		ParseSQLToolName,
-		mcp.WithDescription("Parse and classify SQL statements. Returns an envelope with statement type (DDL/DML/DCL/TCL), tag, and original SQL for each statement in the input."),
+		mcp.WithDescription("Parse and classify SQL statements. Returns an envelope with statement type (DDL/DML/DCL/TCL), tag, and original SQL for each statement in the input. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to parse (may contain multiple semicolon-separated statements)")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
@@ -48,9 +48,15 @@ func ParseSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHand
 
 		env := baseEnvelope(parserVersion, target)
 
+		originalSQL := sql
+		strip := preprocessSQL(&env, sql)
+		sql = strip.Stripped
+
+		before := len(env.Errors)
 		parsed, err := parser.Parse(sql)
 		if err != nil {
 			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
+			translateErrorPositions(&env, before, originalSQL, strip)
 			return envelopeResult(env)
 		}
 		stmts := sqlparse.ClassifyParsed(parsed)

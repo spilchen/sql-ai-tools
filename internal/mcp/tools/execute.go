@@ -34,7 +34,7 @@ const defaultExecuteMaxRows = 1000
 func ExecuteSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		ExecuteSQLToolName,
-		mcp.WithDescription(`Execute SQL against a CockroachDB cluster with safety guardrails. Returns rows, columns, and the command tag in a structured envelope. The mode parameter selects the safety policy: read_only (default) admits non-mutating statements only; safe_write also admits INSERT/UPDATE/DELETE; full_access admits any parsed statement. For read_only SELECTs without a LIMIT, max_rows is injected so the cluster does not stream an unbounded result.`),
+		mcp.WithDescription("Execute SQL against a CockroachDB cluster with safety guardrails. Returns rows, columns, and the command tag in a structured envelope. The mode parameter selects the safety policy: read_only (default) admits non-mutating statements only; safe_write also admits INSERT/UPDATE/DELETE; full_access admits any parsed statement. For read_only SELECTs without a LIMIT, max_rows is injected so the cluster does not stream an unbounded result. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL statement to execute")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
@@ -84,25 +84,38 @@ func ExecuteSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 
 		env := connectedEnvelope(parserVersion, target)
 
+		originalSQL := sql
+		strip := preprocessSQL(&env, sql)
+		sql = strip.Stripped
+
 		// Parse once up front so version.Inspect, safety.CheckParsed,
 		// and safety.MaybeInjectLimitParsed share a single AST. Append
 		// (not assign) into env.Errors so a pre-stamped warning from
-		// connectedEnvelope (e.g. target_version_mismatch) survives a
-		// downstream parse / safety / cluster failure.
+		// connectedEnvelope (e.g. target_version_mismatch) or
+		// preprocessSQL (input_preprocessed) survives a downstream
+		// parse / safety / cluster failure.
 		//
 		// Order matters: version.Inspect and safety.CheckParsed are
 		// read-only walks; safety.MaybeInjectLimitParsed mutates
 		// stmts[0].AST.Limit in place when injection fires, so the
 		// inspectors must run first.
+		parseBefore := len(env.Errors)
 		parsed, err := parser.Parse(sql)
 		if err != nil {
 			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
+			translateErrorPositions(&env, parseBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 		env.Errors = append(env.Errors, version.Inspect(parsed, target, nil)...)
 
+		safetyBefore := len(env.Errors)
 		if violation := safety.CheckParsed(mode, safety.OpExecute, parsed); violation != nil {
 			env.Errors = append(env.Errors, safety.Envelope(violation))
+			// safety.Envelope carries no Position today, so translate is
+			// a no-op — but run it to stay future-proof if safety later
+			// attaches positions, matching the pattern in explain.go,
+			// explain_schema_change.go, and simulate.go.
+			translateErrorPositions(&env, safetyBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 
@@ -126,12 +139,33 @@ func ExecuteSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 		mgr := conn.NewManager(mergedDSN, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
+		clusterBefore := len(env.Errors)
 		result, err := mgr.Execute(ctx, rewritten, conn.ExecuteOptions{
 			Mode:    mode,
 			MaxRows: maxRows,
 		})
 		if err != nil {
-			env.Errors = append(env.Errors, diag.FromClusterError(err, rewritten))
+			clusterErr := diag.FromClusterError(err, rewritten)
+			// When LIMIT injection fires, rewritten is the canonicalized
+			// AST re-serialized by tree.AsStringWithFlags — not stripped
+			// SQL with an appended clause. Pgwire positions index into
+			// rewritten, so strip.Translate (which maps stripped offsets
+			// to original) cannot honestly translate them. Drop the
+			// Position rather than report a confidently-wrong line/column.
+			if injected {
+				clusterErr.Position = nil
+				if clusterErr.Context == nil {
+					clusterErr.Context = make(map[string]any, 1)
+				}
+				clusterErr.Context[output.ContextPositionOmittedReason] = output.ReasonLimitInjectionRewroteSQL
+			}
+			env.Errors = append(env.Errors, clusterErr)
+			// Translate any other appended errors (none today, but the
+			// loop is the right place for future diagnostics that share
+			// the stripped frame). The injected-cluster-error case above
+			// has already nilled its Position so the translate is a no-op
+			// for it.
+			translateErrorPositions(&env, clusterBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 

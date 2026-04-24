@@ -26,7 +26,7 @@ import (
 func ExplainSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		ExplainSQLToolName,
-		mcp.WithDescription(`Run EXPLAIN against a CockroachDB cluster and return the plan as structured JSON. The wrapped statement is not executed (this is plain EXPLAIN, not EXPLAIN ANALYZE). Returns the operator tree, header (distribution/vectorized), and the raw tabular rows.`),
+		mcp.WithDescription("Run EXPLAIN against a CockroachDB cluster and return the plan as structured JSON. The wrapped statement is not executed (this is plain EXPLAIN, not EXPLAIN ANALYZE). Returns the operator tree, header (distribution/vectorized), and the raw tabular rows. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL DML statement to explain")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
@@ -76,18 +76,30 @@ func ExplainSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 
 		env := connectedEnvelope(parserVersion, target)
 
+		originalSQL := sql
+		strip := preprocessSQL(&env, sql)
+		sql = strip.Stripped
+
 		// Safety check runs before any cluster contact: a rejection
 		// surfaces in env.Errors with connection_status=disconnected,
 		// matching the CLI's behaviour. Parse errors propagate via
 		// diag.FromParseError so the agent gets the SQLSTATE-tagged
 		// syntax diagnostic, not a misleading safety violation.
+		//
+		// Note: safety.Check / safety.Envelope-built diagnostics carry
+		// no Position field today, so translation is a no-op for the
+		// safety-rejection branch — but we run it anyway to stay
+		// future-proof if safety later attaches positions.
+		safetyBefore := len(env.Errors)
 		violation, err := safety.Check(mode, safety.OpExplain, sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
+			translateErrorPositions(&env, safetyBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 		if violation != nil {
-			env.Errors = []output.Error{safety.Envelope(violation)}
+			env.Errors = append(env.Errors, safety.Envelope(violation))
+			translateErrorPositions(&env, safetyBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 
@@ -99,9 +111,11 @@ func ExplainSQLHandler(parserVersion, defaultTargetVersion string) server.ToolHa
 		mgr := conn.NewManager(mergedDSN, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
+		clusterBefore := len(env.Errors)
 		result, err := mgr.Explain(ctx, sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromClusterError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromClusterError(err, sql))
+			translateErrorPositions(&env, clusterBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 

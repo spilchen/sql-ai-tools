@@ -34,7 +34,7 @@ import (
 func ValidateSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		ValidateSQLToolName,
-		mcp.WithDescription(`Validate SQL for syntax, type, and (with the schemas argument) name errors. Returns an envelope whose data is {"valid": true, "checks": {syntax, type_check, name_resolution}}; each check is "ok" or "skipped". Failures are reported as structured envelope errors with SQLSTATE codes, severity, message, and source position.`),
+		mcp.WithDescription("Validate SQL for syntax, type, and (with the schemas argument) name errors. Returns an envelope whose data is {\"valid\": true, \"checks\": {syntax, type_check, name_resolution}}; each check is \"ok\" or \"skipped\". Failures are reported as structured envelope errors with SQLSTATE codes, severity, message, and source position. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to validate")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 		mcp.WithArray(schemasParam,
@@ -75,9 +75,15 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 			env = schemaFileEnvelope(parserVersion, target)
 		}
 
+		originalSQL := sql
+		strip := preprocessSQL(&env, sql)
+		sql = strip.Stripped
+
+		before := len(env.Errors)
 		stmts, parseErr := parser.Parse(sql)
 		if parseErr != nil {
 			env.Errors = append(env.Errors, diag.FromParseError(parseErr, sql))
+			translateErrorPositions(&env, before, originalSQL, strip)
 			return failureEnvelope(env, validateresult.Checks{
 				Syntax:             validateresult.CheckFailed,
 				TypeCheck:          validateresult.CheckSkipped,
@@ -110,6 +116,7 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 			schemawarn.Append(&env, cat)
 		}
 
+		semBefore := len(env.Errors)
 		semRes, semErrs := semcheck.Run(stmts, sql, cat)
 		checks.TypeCheck = semRes.TypeCheck
 		checks.FunctionResolution = semRes.FunctionResolution
@@ -117,6 +124,7 @@ func ValidateSQLHandler(parserVersion, defaultTargetVersion string) server.ToolH
 
 		if len(semErrs) > 0 {
 			env.Errors = append(env.Errors, semErrs...)
+			translateErrorPositions(&env, semBefore, originalSQL, strip)
 			return failureEnvelope(env, checks)
 		}
 

@@ -32,7 +32,7 @@ import (
 func ExplainSchemaChangeTool() mcp.Tool {
 	return mcp.NewTool(
 		ExplainSchemaChangeToolName,
-		mcp.WithDescription(`Run EXPLAIN (DDL, SHAPE) against a CockroachDB cluster and return the declarative schema-changer plan as structured JSON. The wrapped DDL is not executed — the schema changer only compiles a plan. Returns the operations list (with backfill / merge / validate steps), the canonicalized statement, and the raw text the cluster returned.`),
+		mcp.WithDescription("Run EXPLAIN (DDL, SHAPE) against a CockroachDB cluster and return the declarative schema-changer plan as structured JSON. The wrapped DDL is not executed — the schema changer only compiles a plan. Returns the operations list (with backfill / merge / validate steps), the canonicalized statement, and the raw text the cluster returned. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("DDL statement to plan (e.g. ALTER TABLE ... ADD COLUMN ...)")),
 		mcp.WithString("dsn", mcp.Required(), mcp.Description("CockroachDB connection string (postgres:// URI). For TLS-only clusters, supply sslmode/sslrootcert/sslcert/sslkey either as URI query params or as the matching top-level fields below.")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
@@ -81,13 +81,20 @@ func ExplainSchemaChangeHandler(parserVersion, defaultTargetVersion string) serv
 
 		env := connectedEnvelope(parserVersion, target)
 
+		originalSQL := sql
+		strip := preprocessSQL(&env, sql)
+		sql = strip.Stripped
+
+		safetyBefore := len(env.Errors)
 		violation, err := safety.Check(mode, safety.OpExplainDDL, sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromParseError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromParseError(err, sql))
+			translateErrorPositions(&env, safetyBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 		if violation != nil {
-			env.Errors = []output.Error{safety.Envelope(violation)}
+			env.Errors = append(env.Errors, safety.Envelope(violation))
+			translateErrorPositions(&env, safetyBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 
@@ -99,9 +106,11 @@ func ExplainSchemaChangeHandler(parserVersion, defaultTargetVersion string) serv
 		mgr := conn.NewManager(mergedDSN, conn.WithStatementTimeout(timeout))
 		defer mgr.Close(ctx) //nolint:errcheck // best-effort cleanup
 
+		clusterBefore := len(env.Errors)
 		result, err := mgr.ExplainDDL(ctx, sql)
 		if err != nil {
-			env.Errors = []output.Error{diag.FromClusterError(err, sql)}
+			env.Errors = append(env.Errors, diag.FromClusterError(err, sql))
+			translateErrorPositions(&env, clusterBefore, originalSQL, strip)
 			return envelopeResult(env)
 		}
 
