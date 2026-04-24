@@ -62,6 +62,17 @@ const TargetVersionParamName = "target_version"
 // argument identically.
 const TargetVersionParamDescription = "Optional target CockroachDB version (MAJOR.MINOR or MAJOR.MINOR.PATCH, with optional leading 'v'). Overrides the server-level default for this call."
 
+// SharedParserBehaviorTag is the trailing fragment appended to every
+// parser-only tool's WithDescription. It documents two behaviors that
+// every tool in this group inherits from the shared SQL preprocessing
+// path: keyword "did you mean?" suggestions on syntax errors (see
+// diag.FromParseError) and tolerance of cockroach sql REPL paste
+// artifacts (see preprocessSQL). Hoisting it into one constant keeps
+// the per-tool descriptions short and prevents per-tool drift; the
+// bracketed tag form makes it visually distinct from the use-case
+// prose that precedes it.
+const SharedParserBehaviorTag = "[Shared parser behavior: keyword \"did you mean?\" suggestions on syntax errors; tolerates cockroach sql REPL paste artifacts (root@host prompt + `-> ` continuation).]"
+
 // ModeParamName is the optional MCP tool parameter name that lets a
 // client override the safety mode applied before any cluster contact.
 // Mirrors the CLI's --mode flag. Tier 3 tools that accept it run the
