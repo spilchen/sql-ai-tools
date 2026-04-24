@@ -54,7 +54,7 @@ Components (per `README.md` and `docs/design_doc.md`):
 
 - Tools: `validate_sql`, `format_sql`, `parse_sql`, `list_tables`,
   `describe_table`, `explain_sql`, `explain_schema_change`,
-  `detect_risky_query`, `summarize_sql` (planned: `simulate_sql`,
+  `detect_risky_sql`, `summarize_sql` (planned: `simulate_sql`,
   `execute_sql`).
 - A **three-tier capability model**:
   - **Tier 1 — Zero-config**: parse, format, classify, type-check

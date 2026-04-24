@@ -19,22 +19,22 @@ import (
 	"github.com/spilchen/sql-ai-tools/internal/version"
 )
 
-// DetectRiskyQueryTool returns the MCP tool definition for detect_risky_query.
-func DetectRiskyQueryTool() mcp.Tool {
+// DetectRiskySQLTool returns the MCP tool definition for detect_risky_sql.
+func DetectRiskySQLTool() mcp.Tool {
 	return mcp.NewTool(
-		DetectRiskyQueryToolName,
+		DetectRiskySQLToolName,
 		mcp.WithDescription("Detect risky SQL patterns via AST walk (parser-only; no cluster contact, no statement execution). Flags issues such as DELETE/UPDATE without WHERE, DROP/TRUNCATE, SELECT *, SERIAL or missing primary keys, deep OFFSET pagination, and XA two-phase-commit statements. Returns findings with reason codes, severity, and fix hints. "+SharedParserBehaviorTag),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to analyze for risky patterns")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
 }
 
-// DetectRiskyQueryHandler returns the handler for the detect_risky_query
+// DetectRiskySQLHandler returns the handler for the detect_risky_sql
 // tool. It delegates to risk.Analyze and wraps the result in the standard
 // output.Envelope used by all tools in this package. defaultTargetVersion
 // is the server-level default; per-call target_version arguments
 // override it.
-func DetectRiskyQueryHandler(parserVersion, defaultTargetVersion string) server.ToolHandlerFunc {
+func DetectRiskySQLHandler(parserVersion, defaultTargetVersion string) server.ToolHandlerFunc {
 	return func(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		sql, toolErr := extractSQL(req)
 		if toolErr != nil {

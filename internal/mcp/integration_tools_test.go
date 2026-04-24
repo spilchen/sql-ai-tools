@@ -40,7 +40,7 @@ var expectedTools = []string{
 	tools.ParseSQLToolName,
 	tools.ValidateSQLToolName,
 	tools.FormatSQLToolName,
-	tools.DetectRiskyQueryToolName,
+	tools.DetectRiskySQLToolName,
 	tools.SummarizeSQLToolName,
 	tools.ExplainSQLToolName,
 	tools.ExplainSchemaChangeToolName,
@@ -296,11 +296,11 @@ func TestIntegrationFormatSQL(t *testing.T) {
 	})
 }
 
-// TestIntegrationDetectRiskyQuery asserts the tool returns a non-empty
+// TestIntegrationDetectRiskySQL asserts the tool returns a non-empty
 // findings array for an obvious risky pattern (DROP TABLE) and an
 // empty array for a clean SELECT. Specific rule codes are intentionally
 // not pinned — the rule registry is expected to grow.
-func TestIntegrationDetectRiskyQuery(t *testing.T) {
+func TestIntegrationDetectRiskySQL(t *testing.T) {
 	c := newMCPClient(t)
 
 	tests := []struct {
@@ -314,7 +314,7 @@ func TestIntegrationDetectRiskyQuery(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res := callTool(t, c, tools.DetectRiskyQueryToolName, map[string]any{"sql": tc.sql})
+			res := callTool(t, c, tools.DetectRiskySQLToolName, map[string]any{"sql": tc.sql})
 			env := decodeEnvelope(t, res)
 			assertTier1Envelope(t, env)
 			require.Empty(t, env.Errors)

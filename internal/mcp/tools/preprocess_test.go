@@ -96,7 +96,7 @@ func TestPreprocessTier1ToolsEmitWarningOnMessyPaste(t *testing.T) {
 		{name: "parse_sql", handler: ParseSQLHandler(testParserVersion, "")},
 		{name: "validate_sql", handler: ValidateSQLHandler(testParserVersion, "")},
 		{name: "summarize_sql", handler: SummarizeSQLHandler(testParserVersion, "")},
-		{name: "detect_risky_query", handler: DetectRiskyQueryHandler(testParserVersion, "")},
+		{name: "detect_risky_sql", handler: DetectRiskySQLHandler(testParserVersion, "")},
 		{name: "format_sql", handler: FormatSQLHandler(testParserVersion, "")},
 	}
 	for _, tc := range tools {
