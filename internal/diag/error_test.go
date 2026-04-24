@@ -19,16 +19,18 @@ import (
 
 func TestFromParseError(t *testing.T) {
 	tests := []struct {
-		name             string
-		sql              string
-		expectedCode     string
-		expectedSeverity output.Severity
-		expectedMsgSub   string
-		expectedPos      *output.Position
-		expectedCategory string
+		name                  string
+		sql                   string
+		expectedCode          string
+		expectedSeverity      output.Severity
+		expectedMsgSub        string
+		expectedPos           *output.Position
+		expectedCategory      string
+		expectedSuggestion    string
+		expectedSuggestionEnd int
 	}{
 		{
-			name:             "syntax error at EOF",
+			name:             "syntax error at EOF carries no keyword suggestion",
 			sql:              "SELECT FROM",
 			expectedCode:     "42601",
 			expectedSeverity: output.SeverityError,
@@ -41,7 +43,7 @@ func TestFromParseError(t *testing.T) {
 			expectedCategory: "syntax_error",
 		},
 		{
-			name:             "misspelled keyword",
+			name:             "misspelled keyword at start gets did-you-mean",
 			sql:              "SELECTT 1",
 			expectedCode:     "42601",
 			expectedSeverity: output.SeverityError,
@@ -50,6 +52,55 @@ func TestFromParseError(t *testing.T) {
 				Line:       1,
 				Column:     1,
 				ByteOffset: 0,
+			},
+			expectedCategory:      "syntax_error",
+			expectedSuggestion:    "select",
+			expectedSuggestionEnd: 7,
+		},
+		{
+			// `SELECT * FORM t` is the canonical FORM/FROM demo from
+			// issue #162: the parser errors at FORM (column 10), and
+			// keyword Levenshtein flips it to FROM. We deliberately
+			// avoid `SELECT 1 FORM t` because (as of cockroachdb-parser
+			// v0.26.2) the parser silently accepts FORM as a bare
+			// column alias and errors at `t` instead, sliding the
+			// position past the typo. If a future parser version
+			// rejects bare-alias keywords, that test would also work,
+			// but we don't want a parser bump to silently break the
+			// position assertion below.
+			name:             "misspelled keyword mid-statement gets did-you-mean",
+			sql:              "SELECT * FORM t",
+			expectedCode:     "42601",
+			expectedSeverity: output.SeverityError,
+			expectedMsgSub:   "syntax error",
+			expectedPos: &output.Position{
+				Line:       1,
+				Column:     10,
+				ByteOffset: 9,
+			},
+			expectedCategory:      "syntax_error",
+			expectedSuggestion:    "from",
+			expectedSuggestionEnd: 13,
+		},
+		{
+			// `INSERT FROM t` errors at FROM (byte 7) because INSERT
+			// requires INTO. FROM is itself a keyword, so the
+			// suggestion path must not fire — otherwise we'd hand the
+			// agent a "did you mean FROM?" reply for a token that
+			// already says FROM. Earlier we tried `SELECT FROM t`,
+			// but (as of cockroachdb-parser v0.26.2) it parses cleanly
+			// with an empty projection list (Postgres-compat). A
+			// future parser version may tighten that, in which case
+			// either fixture would do.
+			name:             "exact-match keyword token suppresses suggestion",
+			sql:              "INSERT FROM t",
+			expectedCode:     "42601",
+			expectedSeverity: output.SeverityError,
+			expectedMsgSub:   "syntax error",
+			expectedPos: &output.Position{
+				Line:       1,
+				Column:     8,
+				ByteOffset: 7,
 			},
 			expectedCategory: "syntax_error",
 		},
@@ -86,6 +137,55 @@ func TestFromParseError(t *testing.T) {
 				require.NotNil(t, diagErr.Position)
 				require.Equal(t, *tc.expectedPos, *diagErr.Position)
 			}
+
+			if tc.expectedSuggestion == "" {
+				require.Nil(t, diagErr.Suggestions, "expected no keyword suggestions")
+				return
+			}
+			require.NotEmpty(t, diagErr.Suggestions)
+			require.Equal(t, tc.expectedSuggestion, diagErr.Suggestions[0].Replacement)
+			require.Equal(t, tc.expectedPos.ByteOffset, diagErr.Suggestions[0].Range.Start)
+			require.Equal(t, tc.expectedSuggestionEnd, diagErr.Suggestions[0].Range.End)
+		})
+	}
+}
+
+// TestIdentifierAt covers identifierAt's boundary conditions
+// directly. The TestFromParseError table only exercises the happy
+// paths through real parser errors; this table pins the edge cases
+// that would otherwise go untested (offset at EOF, offset past EOF,
+// offset in whitespace, offset on a non-letter, multibyte byte at
+// offset, multi-line input).
+func TestIdentifierAt(t *testing.T) {
+	tests := []struct {
+		name     string
+		fullSQL  string
+		offset   int
+		nilPos   bool
+		expected string
+	}{
+		{name: "nil position returns empty", fullSQL: "SELECT 1", nilPos: true, expected: ""},
+		{name: "offset at EOF returns empty", fullSQL: "SELECT", offset: 6, expected: ""},
+		{name: "offset past EOF returns empty", fullSQL: "SELECT", offset: 99, expected: ""},
+		{name: "negative offset returns empty", fullSQL: "SELECT", offset: -1, expected: ""},
+		{name: "offset in whitespace returns empty", fullSQL: "SELECT FROM", offset: 6, expected: ""},
+		{name: "offset on punctuation returns empty", fullSQL: "SELECT *", offset: 7, expected: ""},
+		{name: "offset on digit returns empty", fullSQL: "SELECT 3LECT", offset: 7, expected: ""},
+		{name: "non-ASCII leading byte returns empty", fullSQL: "SELECT é", offset: 7, expected: ""},
+		{name: "identifier truncates at non-ASCII byte", fullSQL: "café", offset: 0, expected: "caf"},
+		{name: "ASCII identifier at start", fullSQL: "SELECTT 1", offset: 0, expected: "SELECTT"},
+		{name: "ASCII identifier mid-statement", fullSQL: "SELECT * FORM t", offset: 9, expected: "FORM"},
+		{name: "multi-line: offset in second line", fullSQL: "SELECT 1;\nSELCT 2", offset: 10, expected: "SELCT"},
+		{name: "underscore-led identifier", fullSQL: "_priv_col", offset: 0, expected: "_priv_col"},
+		{name: "identifier with digits in middle", fullSQL: "abc123def", offset: 0, expected: "abc123def"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var pos *output.Position
+			if !tc.nilPos {
+				pos = &output.Position{ByteOffset: tc.offset}
+			}
+			require.Equal(t, tc.expected, identifierAt(tc.fullSQL, pos))
 		})
 	}
 }

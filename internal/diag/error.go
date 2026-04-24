@@ -79,13 +79,50 @@ func FromParseError(err error, fullSQL string) output.Error {
 		detail = detail[:sep]
 	}
 
+	pos := ExtractPosition(detail, fullSQL)
 	return output.Error{
-		Code:     code,
-		Severity: output.Severity(sev),
-		Message:  err.Error(),
-		Position: ExtractPosition(detail, fullSQL),
-		Category: CategoryForCode(code),
+		Code:        code,
+		Severity:    output.Severity(sev),
+		Message:     err.Error(),
+		Position:    pos,
+		Category:    CategoryForCode(code),
+		Suggestions: SuggestKeyword(identifierAt(fullSQL, pos), pos),
 	}
+}
+
+// identifierAt returns the ASCII identifier-shaped run that begins at
+// pos.ByteOffset in fullSQL, or "" when pos is nil, the offset is out
+// of range, or the byte at the offset is not the start of an
+// identifier ([A-Za-z_]). This lets FromParseError extract the
+// offending token without parsing the human-readable error message —
+// the parser sometimes lower-cases the token in `at or near "..."` and
+// sometimes uses non-token sentinels like `<EOF>`, so the byte offset
+// is the authoritative pointer.
+//
+// Multi-byte (non-ASCII) leading bytes return "" because keyword
+// suggestions only apply to ASCII keyword tokens; quoted identifiers
+// or unicode operators don't benefit from a Levenshtein keyword hit.
+func identifierAt(fullSQL string, pos *output.Position) string {
+	if pos == nil || pos.ByteOffset < 0 || pos.ByteOffset >= len(fullSQL) {
+		return ""
+	}
+	c := fullSQL[pos.ByteOffset]
+	if !isIdentStart(c) {
+		return ""
+	}
+	end := pos.ByteOffset + 1
+	for end < len(fullSQL) && isIdentCont(fullSQL[end]) {
+		end++
+	}
+	return fullSQL[pos.ByteOffset:end]
+}
+
+func isIdentStart(c byte) bool {
+	return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+}
+
+func isIdentCont(c byte) bool {
+	return isIdentStart(c) || (c >= '0' && c <= '9')
 }
 
 // FromClusterError converts a cluster-side error into a structured

@@ -492,6 +492,32 @@ func TestParseSQLHandler(t *testing.T) {
 	}
 }
 
+// TestParseSQLHandlerKeywordSuggestion is the MCP smoke test for
+// issue #162: a parse error with a keyword-typo offending token must
+// surface a "did you mean?" suggestion in the envelope's first error.
+// The same enrichment lives in diag.FromParseError, so coverage at
+// that layer is exhaustive — this test only proves the wiring carries
+// the Suggestions field through to the MCP envelope.
+func TestParseSQLHandlerKeywordSuggestion(t *testing.T) {
+	handler := ParseSQLHandler(testParserVersion, "" /* defaultTargetVersion */)
+	req := mcpgo.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"sql": "SELECT * FORM t"}
+
+	res, err := handler(context.Background(), req)
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	env := requireEnvelope(t, res)
+	require.NotEmpty(t, env.Errors)
+	require.Equal(t, "42601", env.Errors[0].Code)
+	require.NotEmpty(t, env.Errors[0].Suggestions, "keyword typo should yield a did-you-mean suggestion")
+	require.Equal(t, "from", env.Errors[0].Suggestions[0].Replacement)
+	// Range covers `FORM` in the input: byte 9 is the F (after
+	// "SELECT * "), byte 13 is one past the M.
+	require.Equal(t, 9, env.Errors[0].Suggestions[0].Range.Start)
+	require.Equal(t, 13, env.Errors[0].Suggestions[0].Range.End)
+}
+
 // TestValidateSQLHandlerStampsTargetVersionOnSchemaFilePath locks in
 // the contract that when a client supplies both schemas and
 // target_version, the resolved target is stamped onto the Tier 2

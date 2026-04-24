@@ -23,7 +23,7 @@ import (
 func ParseSQLTool() mcp.Tool {
 	return mcp.NewTool(
 		ParseSQLToolName,
-		mcp.WithDescription("Parse and classify SQL statements. Returns an envelope with statement type (DDL/DML/DCL/TCL), tag, and original SQL for each statement in the input. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
+		mcp.WithDescription("Parse and classify SQL statements. Returns an envelope with statement type (DDL/DML/DCL/TCL), tag, and original SQL for each statement in the input. Syntax errors include \"did you mean?\" suggestions when the offending token resembles a SQL keyword. Tolerates cockroach sql REPL paste artifacts (leading `root@host:port/db>` prompt and `-> ` continuation prompts). Pass raw paste in one shot; do not pre-strip."),
 		mcp.WithString("sql", mcp.Required(), mcp.Description("SQL string to parse (may contain multiple semicolon-separated statements)")),
 		mcp.WithString(TargetVersionParamName, mcp.Description(TargetVersionParamDescription)),
 	)
