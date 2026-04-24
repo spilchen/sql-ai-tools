@@ -2,6 +2,21 @@ BINARY                  := crdb-sql
 BIN_DIR                 := bin
 BIN                     := $(BIN_DIR)/$(BINARY)
 GO_PKGS                 := ./...
+
+# Install destination. PREFIX picks the root (default /usr/local — on PATH on
+# both macOS and Linux); BINDIR (defaulting to $(PREFIX)/bin) names the bin
+# directory; DESTDIR stages the copy under another root for distro packaging
+# and is prepended only inside the install recipe, per GNU coding standards
+# — so a packager who overrides BINDIR=/opt/foo/bin keeps DESTDIR honored.
+# Overriding BINDIR detaches it from PREFIX entirely (PREFIX is then unused).
+# Override any of them on the command line, e.g.
+#   make install PREFIX=$$HOME/.local
+#   make install DESTDIR=/tmp/stage
+#   make install BINDIR=/opt/crdb-sql/bin
+# /usr/local/bin typically requires sudo; we don't invoke it from the recipe
+# so non-root prefixes aren't surprised.
+PREFIX                  ?= /usr/local
+BINDIR                  ?= $(PREFIX)/bin
 GOFMT_FILES             := $(shell find . -name '*.go' -not -path './vendor/*')
 
 # Pinned tool versions. Bump deliberately; do not float.
@@ -42,7 +57,7 @@ QUARTERS                := v261
 ROUTE_PKG               := github.com/spilchen/sql-ai-tools/internal/versionroute
 LDFLAGS_LATEST          := -X $(ROUTE_PKG).builtQuarterStamp=$(LATEST_QUARTER)
 
-.PHONY: help build build-all build-latest test test-integration fmt fmt-check vet lint clean tools tidy-check generate-builtins
+.PHONY: help build build-all build-latest install test test-integration fmt fmt-check vet lint clean tools tidy-check generate-builtins
 
 help: ## Show this help.
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*?##/ {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -80,6 +95,21 @@ build-v%:
 build-latest: build ## Alias for `make build` — compile the latest-quarter binary.
 
 build-all: $(addprefix build-, $(QUARTERS)) build ## Compile every supported per-quarter backend plus the unsuffixed latest.
+
+# Copies bin/crdb-sql plus any crdb-sql-v[0-9]* siblings that already exist
+# on disk — so `make build-all install` ships every per-quarter backend
+# without forcing a rebuild here. The numeric class in the glob scopes the
+# recipe to the v<digits> quarter naming used by QUARTERS (v261, v262, ...)
+# and excludes unrelated bin/ artifacts like golangci-lint. The `build` dep
+# guarantees the unsuffixed binary; the for-loop's existence check makes
+# missing siblings a silent no-op rather than an error.
+install: build ## Copy built binaries to $(DESTDIR)$(BINDIR) (default /usr/local/bin; may need sudo).
+	@install -d -m 0755 $(DESTDIR)$(BINDIR)
+	@for f in $(BIN_DIR)/$(BINARY) $(BIN_DIR)/$(BINARY)-v[0-9]*; do \
+		[ -f "$$f" ] || continue; \
+		echo "install $$f -> $(DESTDIR)$(BINDIR)/"; \
+		install -m 0755 "$$f" $(DESTDIR)$(BINDIR)/; \
+	done
 
 test: ## Run the Go test suite.
 	go test $(GO_PKGS)
