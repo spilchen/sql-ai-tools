@@ -224,6 +224,17 @@ func stampTargetVersion(env *output.Envelope, parserVersion, targetVersion strin
 	}
 }
 
+// ResolveTargetVersion is the exported entry point used by the MCP
+// per-call routing wrapper (internal/mcp/routing.go) to resolve the
+// effective target_version for a single tool call without
+// re-implementing the parameter-extraction contract. Handlers inside
+// this package call the unexported resolveTargetVersion directly;
+// keeping a thin wrapper means the wire-level contract — precedence,
+// canonicalization, error messages — has exactly one definition.
+func ResolveTargetVersion(req mcp.CallToolRequest, defaultTargetVersion string) (string, *mcp.CallToolResult) {
+	return resolveTargetVersion(req, defaultTargetVersion)
+}
+
 // resolveTargetVersion picks the target version to stamp onto the
 // envelope for a single tool call. The per-call target_version
 // argument wins over defaultTargetVersion when it is present, a
