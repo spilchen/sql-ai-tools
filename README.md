@@ -51,7 +51,7 @@ registers in [`internal/mcp/server.go`](internal/mcp/server.go) and
 
 ## Installation
 
-### Option A — Release tarball (recommended)
+### Release tarball (recommended)
 
 Each release archive bundles **both** the latest backend (`crdb-sql`)
 and the per-quarter sibling (`crdb-sql-v261`, …) so `--target-version`
@@ -67,7 +67,7 @@ sudo mv crdb-sql crdb-sql-v261 /usr/local/bin/
 Verify checksums against `checksums.txt` from the same release page if
 you care about supply-chain integrity.
 
-### Option B — Build from source
+### Build from source
 
 Requires Go 1.26+ (Go's `toolchain` directive auto-downloads a matching
 toolchain on first build if your local install is older but
@@ -82,20 +82,6 @@ make build-all
 Produces `bin/crdb-sql` and the per-quarter siblings. Add `bin/` to
 your `PATH` or copy the binaries somewhere on it. Use `make build`
 instead if you only need the latest backend.
-
-### Option C — `go install`
-
-```bash
-go install github.com/spilchen/sql-ai-tools/cmd/crdb-sql@latest
-```
-
-This installs the unsuffixed `crdb-sql` (latest quarter) into
-`$GOBIN`. It does **not** install the per-quarter `crdb-sql-vXXX`
-siblings shipped in the release archives — those are needed when you
-pass `--target-version` for an older quarter. Without the matching
-sibling on `$PATH`, `crdb-sql` prints a discovery hint to stderr and
-exits with status 2 rather than silently falling back to the wrong
-parser. Prefer Option A if you ever expect to target an older quarter.
 
 ### Verify
 
@@ -328,16 +314,15 @@ TLS knobs without knowing the libpq URI form:
 `crdb-sql mcp` runs the binary as a Model Context Protocol server over
 stdio. Every tool in the catalog above is registered.
 
-Register the binary with Claude Code. After Option A (release tarball)
-or Option C (`go install`) — both leave the binary on `$PATH` — use
-the bare command name:
+Register the binary with Claude Code. If the binary is already on
+`$PATH` (release tarball install), use the bare command name:
 
 ```bash
 claude mcp add crdb-sql -- crdb-sql mcp
 ```
 
-After Option B (build from source), point at the build output
-directly (assuming `bin/` is not on your `$PATH`):
+If you built from source, point at the build output directly
+(assuming `bin/` is not on your `$PATH`):
 
 ```bash
 claude mcp add crdb-sql -- "$(pwd)/bin/crdb-sql" mcp
